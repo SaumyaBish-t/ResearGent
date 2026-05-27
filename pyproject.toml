@@ -20,6 +20,8 @@ dependencies = [
     "pymupdf>=1.24.0",       # PDF parsing — handles academic 2-col layouts well
     "chromadb>=0.5.20",      # local persistent vector store
     "tiktoken>=0.8.0",       # token counting for size-aware chunking
+    # ---- Phase 2: hybrid retrieval ----
+    "rank-bm25>=0.2.2",      # BM25Okapi — classic lexical retrieval
 ]
 
 [project.optional-dependencies]

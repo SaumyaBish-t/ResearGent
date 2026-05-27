@@ -12,7 +12,7 @@ An **Agentic Research Engine** with Corrective RAG, Self-Reflection, hybrid retr
 |---|---|---|
 | **0** | Provider abstraction (5 providers) + 4 tiers + cascade fallback + observability | ✅ done |
 | **1** | Naive RAG — PDF ingest, embed, retrieve, generate with citations | ✅ done |
-| **2** | Hybrid retrieval — dense + BM25 + reciprocal rank fusion | ⏳ |
+| **2** | Hybrid retrieval — dense + BM25 + reciprocal rank fusion | ✅ done |
 | **3** | LangGraph agent — Planner → Retriever → Generator as stateful graph | ⏳ |
 | **4** | Corrective RAG — Critic grades chunks, rewrites queries, web fallback | ⏳ |
 | **5** | Self-Reflection — Reflector critiques drafts, re-enters the graph | ⏳ |
@@ -115,6 +115,31 @@ uv run researgent store reset
 **Pipeline:** `PDF → PyMuPDF parse → token-aware chunker → embed (tier=EMBED) → ChromaDB persistent → cosine top-k → LLM with [S1]..[Sk] citations`.
 
 One collection exists per `(embed-provider, embed-model)` combination, so switching providers in `.env` creates a fresh collection rather than mixing incompatible embedding dimensions.
+
+---
+
+## Phase 2 — Hybrid retrieval
+
+```powershell
+# Hybrid is now the default for both retrieve and rag-ask
+uv run researgent retrieve "What is RAFT fine-tuning?" --k 5
+uv run researgent rag-ask "What is RAFT fine-tuning?"
+
+# Force a single strategy
+uv run researgent retrieve "FlashAttention-2" --mode bm25      # lexical-only
+uv run researgent retrieve "How does CRAG decide?" --mode naive  # dense-only
+
+# Side-by-side benchmark — shows which chunks each strategy surfaces uniquely
+uv run researgent bench "What's the formula for RRF in the Cormack paper?"
+```
+
+**How it works:** ingest now builds two parallel indexes — Chroma (dense embeddings) and a persisted BM25Okapi pickle. At query time:
+
+1. Both indexes return their top-N (default 4×k).
+2. Reciprocal Rank Fusion combines them: `score(d) = Σ 1/(60 + rank_i(d))`.
+3. Top-k by RRF score is returned. Each chunk records which retriever(s) ranked it ("BOTH" / "dense" / "bm25"), making retrieval debuggable.
+
+**Why both:** dense alone misses exact terms (acronyms, product names, code identifiers); BM25 alone misses paraphrases. RRF combines them parameter-free.
 
 ---
 
