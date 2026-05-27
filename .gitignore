@@ -1,0 +1,39 @@
+# Environments
+.env
+.env.local
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# uv
+.uv/
+
+# Data — never commit corpora, vector stores, or downloaded papers
+data/papers/*
+!data/papers/.gitkeep
+data/chroma_db/
+data/cache/
+*.sqlite
+*.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
