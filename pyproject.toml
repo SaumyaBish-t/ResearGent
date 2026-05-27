@@ -1,0 +1,46 @@
+[project]
+name = "researgent"
+version = "0.1.0"
+description = "Agentic Research Engine with Corrective RAG & Self-Reflection"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+authors = [{ name = "Saumya Bisht" }]
+license = { text = "MIT" }
+
+# Phase 0 dependencies only.
+# Each phase adds its own — keeps installs lean and the learning curve gentle.
+dependencies = [
+    "openai>=1.55.0",        # used for NVIDIA NIM, Groq, AND Ollama (all OpenAI-compatible)
+    "python-dotenv>=1.0.1",  # load .env into os.environ
+    "pydantic>=2.9.0",       # typed config
+    "pydantic-settings>=2.6.0",
+    "rich>=13.9.0",          # pretty CLI output
+    "typer>=0.13.0",         # CLI framework
+]
+
+[project.optional-dependencies]
+# Later phases will populate these. Listed now so the structure is visible.
+ingest = []      # Phase 1: pypdf, unstructured, chromadb
+retrieval = []   # Phase 2: rank_bm25
+agents = []      # Phase 3: langgraph
+web = []         # Phase 4: tavily, playwright
+eval = []        # Phase 6: ragas, deepeval
+api = []         # Phase 6: fastapi, uvicorn, sse-starlette
+dev = [
+    "ruff>=0.7.0",
+    "pytest>=8.3.0",
+]
+
+[project.scripts]
+researgent = "src.main:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
