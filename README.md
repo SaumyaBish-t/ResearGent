@@ -26,10 +26,15 @@ An **Agentic Research Engine** with Corrective RAG, Self-Reflection, hybrid retr
 
 - **Python 3.11 or 3.12** (3.13 may have compatibility issues with later-phase libs)
 - **[uv](https://docs.astral.sh/uv/)** for dependency management
-- At least one of:
-  - [NVIDIA NIM API key](https://build.nvidia.com) (free credits)
-  - [Groq API key](https://console.groq.com/keys) (free tier)
-  - [Ollama](https://ollama.com) installed locally (free, needs a GPU for usable speeds)
+- At least one of these providers (all OpenAI-compatible, all have free tiers):
+
+  | Provider | Free tier | Best for | Get a key |
+  |---|---|---|---|
+  | **Cerebras** | 1M tokens/day, 30 RPM | **Fastest** inference (~1000 TPS) — agent loops | [cloud.cerebras.ai](https://cloud.cerebras.ai) |
+  | **NVIDIA NIM** | Generous credits | 80+ models incl. MiniMax M2.7, Kimi, DeepSeek; **only top-tier embedder** | [build.nvidia.com](https://build.nvidia.com) |
+  | **Groq** | High RPM | 315 TPS Llama 70B — fast tier (Critic) | [console.groq.com/keys](https://console.groq.com/keys) |
+  | **OpenRouter** | 50 req/day (1000 with $10 deposit) | 200+ models via one endpoint (DeepSeek R1, Step 3.5, Gemini 2.5) | [openrouter.ai/keys](https://openrouter.ai/keys) |
+  | **Ollama** | Unlimited (local) | Privacy + offline | [ollama.com](https://ollama.com) |
 
 ### 2. Install
 

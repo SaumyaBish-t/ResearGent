@@ -36,7 +36,22 @@ class ModelTier(str, Enum):
     EMBED = "embed"
 
 
-ProviderName = Literal["nvidia", "groq", "ollama"]
+# All supported providers. Each maps to an OpenAI-compatible HTTP endpoint —
+# that's what makes adding new ones cheap (no new SDK to learn).
+ProviderName = Literal["cerebras", "nvidia", "groq", "openrouter", "ollama"]
+
+# Priority order for AUTO-selection when no override is set. Engineered so the
+# default user experience is "as fast and as smart as the keys allow":
+#   - cerebras first  -> 1000+ TPS, huge models (Qwen3-235B)
+#   - nvidia next     -> widest model catalog, has embeddings
+#   - groq next       -> 315 TPS for the fast tier
+#   - openrouter      -> variety / experimentation
+#   - ollama last     -> local fallback when nothing else is configured
+_AUTO_PRIORITY: list[ProviderName] = ["cerebras", "nvidia", "groq", "openrouter", "ollama"]
+
+# Providers that host embedding models. Keeps `resolve_provider` honest for the
+# EMBED tier so we don't try to embed with Groq/Cerebras (neither hosts embedders).
+_EMBED_CAPABLE: set[ProviderName] = {"nvidia", "openrouter", "ollama"}
 
 
 class Settings(BaseSettings):
@@ -61,6 +76,27 @@ class Settings(BaseSettings):
     groq_base_url: str = "https://api.groq.com/openai/v1"
     groq_model_reasoning: str = "llama-3.3-70b-versatile"
     groq_model_fast: str = "llama-3.1-8b-instant"
+
+    # ---- Cerebras -----------------------------------------------------------
+    # Cerebras serves models on wafer-scale chips at 1000+ TPS — the fastest
+    # commercial inference available. Perfect for agent loops where many
+    # sequential calls compound into long wall-clock times.
+    cerebras_api_key: str | None = None
+    cerebras_base_url: str = "https://api.cerebras.ai/v1"
+    cerebras_model_reasoning: str = "qwen-3-235b-a22b-instruct-2507"
+    cerebras_model_fast: str = "llama3.1-8b"
+
+    # ---- OpenRouter ---------------------------------------------------------
+    # Single OpenAI-compatible endpoint fronting 200+ models. Free-tier models
+    # carry the ":free" suffix. Sends optional HTTP-Referer + X-Title headers
+    # so you appear on the OpenRouter dashboard (set them in .env if you want).
+    openrouter_api_key: str | None = None
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_model_reasoning: str = "deepseek/deepseek-r1:free"
+    openrouter_model_fast: str = "meta-llama/llama-3.1-8b-instruct:free"
+    openrouter_model_embed: str = "nvidia/nv-embed-v1"  # OpenRouter proxies NVIDIA's embedder
+    openrouter_app_url: str = "https://github.com/SaumyaBish-t/ResearGent"
+    openrouter_app_name: str = "ResearGent"
 
     # ---- Ollama (local) -----------------------------------------------------
     ollama_base_url: str = "http://localhost:11434/v1"
@@ -98,11 +134,15 @@ class Settings(BaseSettings):
     def configured_providers(self) -> list[ProviderName]:
         """Which providers have credentials? Ollama is 'always available'."""
         out: list[ProviderName] = []
+        if self.cerebras_api_key:
+            out.append("cerebras")
         if self.nvidia_api_key:
             out.append("nvidia")
         if self.groq_api_key:
             out.append("groq")
-        # Ollama is considered available — we'll check the server in the smoke test.
+        if self.openrouter_api_key:
+            out.append("openrouter")
+        # Ollama is considered available — we'll check the server at call time.
         out.append("ollama")
         return out
 
@@ -112,10 +152,10 @@ class Settings(BaseSettings):
 
         Resolution order:
           1. Per-tier override (REASONING_PROVIDER, FAST_PROVIDER, EMBED_PROVIDER)
-          2. Global override (PRIMARY_PROVIDER)
-          3. Auto: first configured provider in priority order [nvidia, groq, ollama]
-
-        Special case for EMBED: Groq doesn't host embeddings — skip it.
+          2. Global override (PRIMARY_PROVIDER) — skipped for EMBED if the
+             chosen provider can't embed
+          3. Auto: first configured provider in `_AUTO_PRIORITY` that supports
+             the tier (EMBED filters to `_EMBED_CAPABLE`)
         """
         tier_override = {
             ModelTier.REASONING: self.reasoning_provider,
@@ -125,16 +165,16 @@ class Settings(BaseSettings):
 
         if tier_override:
             return tier_override
+
         if self.primary_provider:
-            if tier == ModelTier.EMBED and self.primary_provider == "groq":
-                # Groq can't embed — fall through to auto-pick.
-                pass
+            if tier == ModelTier.EMBED and self.primary_provider not in _EMBED_CAPABLE:
+                pass  # fall through to auto-pick a real embedder
             else:
                 return self.primary_provider
 
-        priority: list[ProviderName] = ["nvidia", "groq", "ollama"]
+        priority = list(_AUTO_PRIORITY)
         if tier == ModelTier.EMBED:
-            priority = ["nvidia", "ollama"]  # skip groq
+            priority = [p for p in priority if p in _EMBED_CAPABLE]
 
         configured = set(self.configured_providers())
         for p in priority:
