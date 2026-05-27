@@ -357,6 +357,48 @@ def bench(
 
 
 @app.command()
+def doctor() -> None:
+    """
+    Health check — verifies Ollama is reachable + tests the EMBED tier with
+    one short string. Use this to debug slow / hanging ingest before you
+    process a 100-page PDF.
+    """
+    import time as _t
+    import httpx
+    from src.config import settings
+    from src.llm import ModelTier, embed
+
+    # ---- Ollama reachability ----
+    console.print("[bold cyan]Ollama check:[/bold cyan]")
+    try:
+        url = settings.ollama_base_url.rstrip("/v1").rstrip("/") + "/api/tags"
+        r = httpx.get(url, timeout=3.0)
+        if r.status_code == 200:
+            models = [m["name"] for m in r.json().get("models", [])]
+            console.print(f"  [green]reachable[/green]  models pulled: {', '.join(models) or '(none)'}")
+            need = [settings.ollama_model_reasoning, settings.ollama_model_embed]
+            missing = [m for m in need if m not in models]
+            if missing:
+                console.print(f"  [yellow]missing:[/yellow] {missing}  ->  ollama pull {' '.join(missing)}")
+        else:
+            console.print(f"  [red]HTTP {r.status_code}[/red]")
+    except Exception as e:
+        console.print(f"  [red]unreachable[/red]: {type(e).__name__}: {e}")
+        console.print(f"  [dim]is Ollama running?  https://ollama.com[/dim]")
+
+    # ---- EMBED tier smoke ----
+    console.print("\n[bold cyan]EMBED tier check:[/bold cyan]")
+    t0 = _t.perf_counter()
+    try:
+        vec = embed(["hello world"], tier=ModelTier.EMBED)
+        dur = int((_t.perf_counter() - t0) * 1000)
+        console.print(f"  [green]OK[/green]  {dur} ms  dim={len(vec[0])}")
+    except Exception as e:
+        dur = int((_t.perf_counter() - t0) * 1000)
+        console.print(f"  [red]FAIL[/red]  {dur} ms  {type(e).__name__}: {e}")
+
+
+@app.command()
 def store(
     action: str = typer.Argument("info", help="info | reset"),
 ) -> None:
