@@ -196,37 +196,51 @@ def ingest_file(path: Path, *, verbose: bool = True, rebuild_bm25: bool = True) 
 
 
 def ingest_directory(dir_path: Path) -> list[dict]:
-    """Ingest every PDF in a directory (non-recursive). BM25 rebuilds once at end."""
+    """
+    Ingest every PDF in a directory (non-recursive). BM25 rebuilds once at end.
+
+    Per-batch progress is ALWAYS shown — even when processing many files —
+    because silent embedding on a CPU-based embedder can take minutes per PDF
+    and the user needs to see it's not hung.
+    """
     pdfs = sorted(p for p in dir_path.glob("*.pdf"))
     if not pdfs:
         console.print(f"[yellow]No PDFs found in {dir_path}[/yellow]")
         return []
 
-    results: list[dict] = []
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[bold blue]{task.description}"),
-        BarColumn(),
-        MofNCompleteColumn(),
-        TimeElapsedColumn(),
-        console=console,
-    ) as prog:
-        task = prog.add_task("ingesting PDFs", total=len(pdfs))
-        for pdf in pdfs:
-            try:
-                # Defer BM25 rebuild — we'll do it once at the end.
-                r = ingest_file(pdf, verbose=False, rebuild_bm25=False)
-                results.append(r)
-                prog.console.print(
-                    f"  [green]ok[/green] {pdf.name}  "
-                    f"({r['pages']} pages, {r['chunks_inserted']} chunks)"
-                )
-            except Exception as e:
-                prog.console.print(f"  [red]fail[/red] {pdf.name}: {type(e).__name__}: {e}")
-                results.append({"source_file": pdf.name, "error": str(e)})
-            prog.advance(task)
+    # Pre-warm the embedder so users don't pay cold-load latency mid-progress.
+    # Surfaces failures BEFORE we start parsing PDFs — much faster feedback.
+    console.print("[cyan]pre-warming embedder...[/cyan]")
+    try:
+        t0 = time.perf_counter()
+        embed(["warmup"], tier=ModelTier.EMBED)
+        console.print(f"  [green]warm[/green]  ({int((time.perf_counter() - t0) * 1000)} ms)")
+    except Exception as e:
+        console.print(f"  [red]warmup FAIL[/red]: {type(e).__name__}: {e}")
+        console.print("[red]Embedder is broken. Run `researgent doctor` to diagnose.[/red]")
+        return [{"error": "embedder warmup failed"}]
 
-    console.print("[cyan]rebuilding BM25 index[/cyan]...")
+    console.print(f"\n[bold]processing {len(pdfs)} PDFs[/bold]\n")
+    results: list[dict] = []
+    overall_start = time.perf_counter()
+
+    for i, pdf in enumerate(pdfs, start=1):
+        console.print(f"[bold blue]({i}/{len(pdfs)})[/bold blue] {pdf.name}")
+        try:
+            # verbose=True so users see live per-batch progress on every PDF.
+            # BM25 rebuilds once at the end (it scans ALL chunks anyway).
+            r = ingest_file(pdf, verbose=True, rebuild_bm25=False)
+            results.append(r)
+            console.print(
+                f"  [green]done[/green]  {r['pages']} pages, {r['chunks_inserted']} chunks\n"
+            )
+        except Exception as e:
+            console.print(f"  [red]FAIL[/red] {type(e).__name__}: {e}\n")
+            results.append({"source_file": pdf.name, "error": str(e)})
+
+    total_s = time.perf_counter() - overall_start
+    console.print(f"[bold]all PDFs processed in {total_s:.1f}s[/bold]")
+    console.print("\n[cyan]rebuilding BM25 index[/cyan]...")
     bm25_n = _rebuild_bm25_from_chroma()
     console.print(f"  [green]BM25[/green] indexed {bm25_n} chunks")
     return results
