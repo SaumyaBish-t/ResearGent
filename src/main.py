@@ -12,6 +12,7 @@ Phases 1+ will add: ingest, retrieve, research, eval, serve.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -101,6 +102,108 @@ def ask(
 def status_json() -> None:
     """Machine-readable status (handy for CI / debugging)."""
     print(json.dumps(list_status(), indent=2))
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 commands: ingest / rag-ask / retrieve / store
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def ingest(
+    path: str = typer.Argument(
+        "data/papers",
+        help="PDF file or directory containing PDFs. Default: data/papers",
+    ),
+) -> None:
+    """
+    Ingest a PDF (or every PDF in a directory) into the vector store.
+
+    Re-running on the same file is safe — chunks are replaced by content hash.
+    """
+    # Import inside the command so the heavy ChromaDB/PyMuPDF deps don't slow
+    # down `researgent --help` and the lightweight Phase 0 commands.
+    from src.ingest import ingest_directory, ingest_file
+
+    p = Path(path)
+    if not p.exists():
+        console.print(f"[red]Path not found:[/red] {p}")
+        raise typer.Exit(code=1)
+
+    if p.is_file():
+        result = ingest_file(p)
+        console.print(Panel(json.dumps(result, indent=2), title="ingested", border_style="green"))
+        return
+
+    results = ingest_directory(p)
+    ok = sum(1 for r in results if "error" not in r)
+    total_chunks = sum(r.get("chunks_inserted", 0) for r in results)
+    console.print(
+        f"\n[bold green]Done.[/bold green] {ok}/{len(results)} files ingested, "
+        f"{total_chunks} chunks total."
+    )
+
+
+@app.command(name="rag-ask")
+def rag_ask(
+    question: str = typer.Argument(..., help="Question to ask the indexed corpus"),
+    k: int = typer.Option(5, help="Number of chunks to retrieve"),
+) -> None:
+    """
+    Phase 1 naive RAG — retrieve top-k chunks and answer with citations.
+
+    This is the baseline we'll beat in every later phase.
+    """
+    from src.rag import naive_rag
+
+    result = naive_rag(question, k=k)
+    console.print(Panel(result.formatted(), title=f"answer (k={k})", border_style="cyan"))
+
+
+@app.command()
+def retrieve(
+    query: str = typer.Argument(..., help="Query to retrieve chunks for"),
+    k: int = typer.Option(5, help="Number of chunks to retrieve"),
+) -> None:
+    """Show raw retrieved chunks (debugging — no LLM call)."""
+    from src.retrieval import naive_retrieve
+
+    chunks = naive_retrieve(query, k=k)
+    if not chunks:
+        console.print("[yellow]No chunks retrieved (corpus empty?). Run `ingest` first.[/yellow]")
+        return
+
+    for i, c in enumerate(chunks, start=1):
+        preview = c.text.strip().replace("\n", " ")
+        preview = preview[:300] + ("..." if len(preview) > 300 else "")
+        title = f"[S{i}] {c.citation}   score={c.score:.3f}"
+        console.print(Panel(preview, title=title, border_style="cyan"))
+
+
+@app.command()
+def store(
+    action: str = typer.Argument("info", help="info | reset"),
+) -> None:
+    """Inspect or reset the vector store. `reset` drops the current collection."""
+    from src.store import list_collections, reset_papers_collection
+
+    if action == "info":
+        cols = list_collections()
+        if not cols:
+            console.print("[yellow]No collections yet. Run `ingest` to create one.[/yellow]")
+            return
+        t = Table(title="Chroma Collections", header_style="bold cyan")
+        t.add_column("Name", overflow="fold")
+        t.add_column("Chunks")
+        for c in cols:
+            t.add_row(c["name"], str(c["count"]))
+        console.print(t)
+    elif action == "reset":
+        name = reset_papers_collection()
+        console.print(f"[yellow]Dropped collection:[/yellow] {name}")
+    else:
+        console.print(f"[red]Unknown action: {action}[/red] (use: info | reset)")
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":
