@@ -45,6 +45,16 @@ class ProviderConfig:
 def _provider_configs() -> dict[ProviderName, ProviderConfig]:
     s = settings
     return {
+        "cerebras": ProviderConfig(
+            name="cerebras",
+            base_url=s.cerebras_base_url,
+            api_key=s.cerebras_api_key or "",
+            models={
+                ModelTier.REASONING: s.cerebras_model_reasoning,
+                ModelTier.FAST: s.cerebras_model_fast,
+                ModelTier.EMBED: None,  # Cerebras does not host embeddings.
+            },
+        ),
         "nvidia": ProviderConfig(
             name="nvidia",
             base_url=s.nvidia_base_url,
@@ -65,6 +75,16 @@ def _provider_configs() -> dict[ProviderName, ProviderConfig]:
                 ModelTier.EMBED: None,  # Groq does not host embeddings.
             },
         ),
+        "openrouter": ProviderConfig(
+            name="openrouter",
+            base_url=s.openrouter_base_url,
+            api_key=s.openrouter_api_key or "",
+            models={
+                ModelTier.REASONING: s.openrouter_model_reasoning,
+                ModelTier.FAST: s.openrouter_model_fast,
+                ModelTier.EMBED: s.openrouter_model_embed,
+            },
+        ),
         "ollama": ProviderConfig(
             name="ollama",
             base_url=s.ollama_base_url,
@@ -78,7 +98,7 @@ def _provider_configs() -> dict[ProviderName, ProviderConfig]:
     }
 
 
-@lru_cache(maxsize=4)
+@lru_cache(maxsize=8)
 def get_client(provider: ProviderName) -> OpenAI:
     """Cached OpenAI client per provider. Cheap to call repeatedly."""
     cfg = _provider_configs()[provider]
@@ -87,7 +107,21 @@ def get_client(provider: ProviderName) -> OpenAI:
             f"Provider '{provider}' is not configured. "
             f"Set the corresponding API key in .env"
         )
-    return OpenAI(base_url=cfg.base_url, api_key=cfg.api_key)
+
+    # OpenRouter recommends two headers for app attribution on its dashboard.
+    # They're optional — only sent if the user set them in .env.
+    default_headers = None
+    if provider == "openrouter":
+        default_headers = {
+            "HTTP-Referer": settings.openrouter_app_url,
+            "X-Title": settings.openrouter_app_name,
+        }
+
+    return OpenAI(
+        base_url=cfg.base_url,
+        api_key=cfg.api_key,
+        default_headers=default_headers,
+    )
 
 
 def _resolve(tier: ModelTier) -> tuple[ProviderName, str]:
