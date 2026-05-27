@@ -17,6 +17,7 @@ keeping it small also bounds memory and lets us surface progress smoothly.
 
 from __future__ import annotations
 
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Iterable
@@ -38,7 +39,14 @@ from src.retrieval import bm25 as bm25_idx
 from src.store import get_or_create_papers_collection
 
 console = Console()
-EMBED_BATCH = 32
+
+# Batch size for embedding requests. Kept SMALL by default because NVIDIA NIM's
+# nv-embed-v1 free endpoint caps around ~8K tokens per request — a batch of 32
+# chunks at ~500 tokens each is ~16K tokens and silently stalls / times out.
+# 8 chunks * ~500 tokens = ~4K tokens, well within every provider's limit.
+# Override via INGEST_EMBED_BATCH env if you've measured your endpoint can handle more.
+import os
+EMBED_BATCH = int(os.environ.get("INGEST_EMBED_BATCH", "8"))
 
 
 def _batched(items: list, n: int) -> Iterable[list]:
@@ -59,17 +67,36 @@ def _delete_existing_doc(doc_id: str) -> int:
     return len(ids)
 
 
-def _embed_and_store(doc: Document, chunks: list[Chunk]) -> int:
-    """Embed chunks in batches, insert into Chroma. Returns count inserted."""
+def _embed_and_store(doc: Document, chunks: list[Chunk], *, verbose: bool = True) -> int:
+    """
+    Embed chunks in batches, insert into Chroma. Returns count inserted.
+
+    Prints per-batch latency so a stalled embedder is immediately visible
+    rather than appearing as a generic hang.
+    """
     if not chunks:
         return 0
 
     col = get_or_create_papers_collection()
     inserted = 0
+    total_batches = (len(chunks) + EMBED_BATCH - 1) // EMBED_BATCH
+    total_start = time.perf_counter()
 
-    for batch in _batched(chunks, EMBED_BATCH):
+    for batch_i, batch in enumerate(_batched(chunks, EMBED_BATCH), start=1):
         texts = [c.text for c in batch]
-        vectors = embed(texts, tier=ModelTier.EMBED)
+        batch_tokens = sum(c.token_count for c in batch)
+
+        t0 = time.perf_counter()
+        try:
+            vectors = embed(texts, tier=ModelTier.EMBED)
+        except Exception as e:
+            if verbose:
+                console.print(
+                    f"  [red]embed FAIL[/red] batch {batch_i}/{total_batches}  "
+                    f"({len(batch)} chunks, ~{batch_tokens} tok): {type(e).__name__}: {e}"
+                )
+            raise
+        dur_ms = int((time.perf_counter() - t0) * 1000)
 
         ids = [f"{doc.doc_id}:{c.chunk_index}" for c in batch]
         metadatas = [
@@ -86,6 +113,17 @@ def _embed_and_store(doc: Document, chunks: list[Chunk]) -> int:
         col.add(ids=ids, embeddings=vectors, documents=texts, metadatas=metadatas)
         inserted += len(batch)
 
+        if verbose:
+            tps = int(batch_tokens / max(dur_ms, 1) * 1000)  # tokens / second
+            console.print(
+                f"  embed batch [cyan]{batch_i}/{total_batches}[/cyan]  "
+                f"{len(batch)} chunks, ~{batch_tokens} tok  "
+                f"[green]{dur_ms} ms[/green]  ({tps} tok/s)"
+            )
+
+    if verbose:
+        total_s = time.perf_counter() - total_start
+        console.print(f"  [bold]embedded {inserted} chunks in {total_s:.1f}s[/bold]")
     return inserted
 
 

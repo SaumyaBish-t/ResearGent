@@ -143,7 +143,16 @@ def get_client(provider: ProviderName) -> OpenAI:
             "HTTP-Referer": settings.openrouter_app_url,
             "X-Title": settings.openrouter_app_name,
         }
-    return OpenAI(base_url=cfg.base_url, api_key=cfg.api_key, default_headers=default_headers)
+    # 45s timeout: long enough for slow embedders / 70B models on busy free
+    # tiers, short enough to fail fast instead of hanging indefinitely.
+    # Cascade fallback catches the resulting APITimeoutError and rolls to
+    # the next provider in the chain.
+    return OpenAI(
+        base_url=cfg.base_url,
+        api_key=cfg.api_key,
+        default_headers=default_headers,
+        timeout=45.0,
+    )
 
 
 # ---------------------------------------------------------------------------
