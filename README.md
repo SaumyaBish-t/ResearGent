@@ -10,8 +10,8 @@ An **Agentic Research Engine** with Corrective RAG, Self-Reflection, hybrid retr
 
 | Phase | Capability | Status |
 |---|---|---|
-| **0** | Provider abstraction (NVIDIA NIM / Groq / Ollama) + CLI skeleton | ✅ in progress |
-| **1** | Naive RAG — PDF ingest, embed, retrieve, generate with citations | ⏳ |
+| **0** | Provider abstraction (NVIDIA NIM / Groq / Ollama) + CLI skeleton | ✅ done |
+| **1** | Naive RAG — PDF ingest, embed, retrieve, generate with citations | ✅ done |
 | **2** | Hybrid retrieval — dense + BM25 + reciprocal rank fusion | ⏳ |
 | **3** | LangGraph agent — Planner → Retriever → Generator as stateful graph | ⏳ |
 | **4** | Corrective RAG — Critic grades chunks, rewrites queries, web fallback | ⏳ |
@@ -70,6 +70,35 @@ uv run researgent ask "What is corrective RAG in one paragraph?"
 
 ---
 
+## Phase 1 — Naive RAG usage
+
+```powershell
+# 1. Drop one or more PDFs into data/papers/
+#    (Try a couple of arXiv papers to test.)
+
+# 2. Ingest — parses pages, chunks at ~500 tokens with 80-token overlap,
+#    embeds via the active EMBED tier, stores in ChromaDB
+uv run researgent ingest
+
+# 3. Inspect what's in the store
+uv run researgent store info
+
+# 4. Retrieve raw chunks (no LLM call — useful for debugging retrieval quality)
+uv run researgent retrieve "what is corrective RAG?" --k 5
+
+# 5. Ask a question — top-k retrieval + cited generation
+uv run researgent rag-ask "How does CRAG decide when to call web search?"
+
+# Drop the index and start over (e.g. when switching embedding models)
+uv run researgent store reset
+```
+
+**Pipeline:** `PDF → PyMuPDF parse → token-aware chunker → embed (tier=EMBED) → ChromaDB persistent → cosine top-k → LLM with [S1]..[Sk] citations`.
+
+One collection exists per `(embed-provider, embed-model)` combination, so switching providers in `.env` creates a fresh collection rather than mixing incompatible embedding dimensions.
+
+---
+
 ## Architecture (target — final state)
 
 ```
@@ -115,13 +144,22 @@ uv run researgent ask "What is corrective RAG in one paragraph?"
 ```
 researgent/
 ├── src/
-│   ├── config.py          # typed settings via pydantic-settings
+│   ├── config.py             # typed settings via pydantic-settings
 │   ├── llm/
-│   │   ├── provider.py    # unified chat() / embed() over NVIDIA/Groq/Ollama
-│   │   └── __init__.py
-│   └── main.py            # Typer CLI
+│   │   └── provider.py       # unified chat() / embed() over NVIDIA/Groq/Ollama
+│   ├── ingest/
+│   │   ├── pdf.py            # PyMuPDF -> Page records
+│   │   ├── chunker.py        # token-aware chunking with overlap
+│   │   └── pipeline.py       # PDFs -> chunks -> embeddings -> Chroma
+│   ├── retrieval/
+│   │   └── naive.py          # dense top-k from Chroma (baseline)
+│   ├── rag/
+│   │   └── naive.py          # retrieve -> stuff -> generate (cited)
+│   ├── store.py              # ChromaDB client + collection management
+│   └── main.py               # Typer CLI
 ├── data/
-│   └── papers/            # drop your PDFs here (Phase 1+)
+│   ├── papers/               # drop your PDFs here
+│   └── chroma_db/            # vector store (gitignored)
 ├── .env.example
 ├── pyproject.toml
 └── README.md

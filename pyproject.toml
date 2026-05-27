@@ -16,11 +16,14 @@ dependencies = [
     "pydantic-settings>=2.6.0",
     "rich>=13.9.0",          # pretty CLI output
     "typer>=0.13.0",         # CLI framework
+    # ---- Phase 1: ingestion + naive RAG ----
+    "pymupdf>=1.24.0",       # PDF parsing — handles academic 2-col layouts well
+    "chromadb>=0.5.20",      # local persistent vector store
+    "tiktoken>=0.8.0",       # token counting for size-aware chunking
 ]
 
 [project.optional-dependencies]
 # Later phases will populate these. Listed now so the structure is visible.
-ingest = []      # Phase 1: pypdf, unstructured, chromadb
 retrieval = []   # Phase 2: rank_bm25
 agents = []      # Phase 3: langgraph
 web = []         # Phase 4: tavily, playwright
@@ -30,6 +33,8 @@ dev = [
     "ruff>=0.7.0",
     "pytest>=8.3.0",
 ]
+
+# Phase 1: ingestion + naive RAG. Promoted to core dependencies below.
 
 [project.scripts]
 researgent = "src.main:app"
