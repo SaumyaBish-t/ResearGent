@@ -28,11 +28,16 @@ class ModelTier(str, Enum):
                 Wants the strongest model available.
     FAST      — quick classifications. Used by Critic/Grader, query rewriter.
                 Wants the FASTEST cheap model — these run many times per query.
+    TOOL      — function-calling / tool-use. Different from REASONING because
+                tool-use is a distinct skill where small differences in model
+                training matter a lot (GPT-OSS-120B and Qwen3 are exceptional;
+                some otherwise-strong reasoning models do tool use badly).
     EMBED     — embedding model for retrieval. Used by ingestion + retriever.
     """
 
     REASONING = "reasoning"
     FAST = "fast"
+    TOOL = "tool"
     EMBED = "embed"
 
 
@@ -40,17 +45,17 @@ class ModelTier(str, Enum):
 # that's what makes adding new ones cheap (no new SDK to learn).
 ProviderName = Literal["cerebras", "nvidia", "groq", "openrouter", "ollama"]
 
-# Priority order for AUTO-selection when no override is set. Engineered so the
-# default user experience is "as fast and as smart as the keys allow":
+# Priority order for AUTO-selection when no override is set. Also the order
+# in which the CASCADE FALLBACK chain is built for each tier — primary tries
+# first, then we walk down on transient failure (rate limit / 5xx / timeout).
 #   - cerebras first  -> 1000+ TPS, huge models (Qwen3-235B)
 #   - nvidia next     -> widest model catalog, has embeddings
-#   - groq next       -> 315 TPS for the fast tier
+#   - groq next       -> 315 TPS for the fast/tool tiers
 #   - openrouter      -> variety / experimentation
 #   - ollama last     -> local fallback when nothing else is configured
 _AUTO_PRIORITY: list[ProviderName] = ["cerebras", "nvidia", "groq", "openrouter", "ollama"]
 
-# Providers that host embedding models. Keeps `resolve_provider` honest for the
-# EMBED tier so we don't try to embed with Groq/Cerebras (neither hosts embedders).
+# Providers that host embedding models. Keeps tier resolution honest.
 _EMBED_CAPABLE: set[ProviderName] = {"nvidia", "openrouter", "ollama"}
 
 
@@ -69,32 +74,31 @@ class Settings(BaseSettings):
     nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
     nvidia_model_reasoning: str = "meta/llama-3.3-70b-instruct"
     nvidia_model_fast: str = "meta/llama-3.1-8b-instruct"
+    nvidia_model_tool: str = "meta/llama-3.3-70b-instruct"
     nvidia_model_embed: str = "nvidia/nv-embed-v1"
 
     # ---- Groq ---------------------------------------------------------------
+    # GPT-OSS-120B on Groq is the best free-tier tool-caller available right now.
     groq_api_key: str | None = None
     groq_base_url: str = "https://api.groq.com/openai/v1"
     groq_model_reasoning: str = "llama-3.3-70b-versatile"
     groq_model_fast: str = "llama-3.1-8b-instant"
+    groq_model_tool: str = "openai/gpt-oss-120b"
 
     # ---- Cerebras -----------------------------------------------------------
-    # Cerebras serves models on wafer-scale chips at 1000+ TPS — the fastest
-    # commercial inference available. Perfect for agent loops where many
-    # sequential calls compound into long wall-clock times.
     cerebras_api_key: str | None = None
     cerebras_base_url: str = "https://api.cerebras.ai/v1"
     cerebras_model_reasoning: str = "qwen-3-235b-a22b-instruct-2507"
     cerebras_model_fast: str = "llama3.1-8b"
+    cerebras_model_tool: str = "qwen-3-235b-a22b-instruct-2507"
 
     # ---- OpenRouter ---------------------------------------------------------
-    # Single OpenAI-compatible endpoint fronting 200+ models. Free-tier models
-    # carry the ":free" suffix. Sends optional HTTP-Referer + X-Title headers
-    # so you appear on the OpenRouter dashboard (set them in .env if you want).
     openrouter_api_key: str | None = None
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_model_reasoning: str = "deepseek/deepseek-r1:free"
     openrouter_model_fast: str = "meta-llama/llama-3.1-8b-instruct:free"
-    openrouter_model_embed: str = "nvidia/nv-embed-v1"  # OpenRouter proxies NVIDIA's embedder
+    openrouter_model_tool: str = "qwen/qwen3-235b-a22b:free"
+    openrouter_model_embed: str = "nvidia/nv-embed-v1"
     openrouter_app_url: str = "https://github.com/SaumyaBish-t/ResearGent"
     openrouter_app_name: str = "ResearGent"
 
@@ -102,6 +106,7 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434/v1"
     ollama_model_reasoning: str = "llama3.1:8b"
     ollama_model_fast: str = "llama3.1:8b"
+    ollama_model_tool: str = "llama3.1:8b"
     ollama_model_embed: str = "nomic-embed-text"
 
     # ---- Routing ------------------------------------------------------------
@@ -111,21 +116,32 @@ class Settings(BaseSettings):
     )
     reasoning_provider: ProviderName | None = None
     fast_provider: ProviderName | None = None
+    tool_provider: ProviderName | None = None
     embed_provider: ProviderName | None = None
 
+    # ---- Cascade fallback ---------------------------------------------------
+    # When True, transient failures (429 / 5xx / timeout) on the primary
+    # provider for a tier automatically retry on the next configured provider.
+    # Set False to surface raw errors (useful for debugging).
+    cascade_fallback_enabled: bool = True
+
+    # ---- Observability ------------------------------------------------------
+    # Logs every chat()/embed() call to a JSONL file. Surface via `researgent stats`.
+    observability_enabled: bool = True
+    observability_log_path: str = "data/llm_calls.jsonl"
+
     # ---- Validators ---------------------------------------------------------
-    # .env files commonly leave keys blank (`PRIMARY_PROVIDER=`). Pydantic's
-    # strict Literal validator rejects "" — coerce blanks to None so blank
-    # entries behave as "unset".
     @field_validator(
         "primary_provider",
         "reasoning_provider",
         "fast_provider",
+        "tool_provider",
         "embed_provider",
         mode="before",
     )
     @classmethod
     def _blank_to_none(cls, v):
+        # Empty .env values (`PRIMARY_PROVIDER=`) should mean "unset", not "".
         if isinstance(v, str) and not v.strip():
             return None
         return v
@@ -142,24 +158,22 @@ class Settings(BaseSettings):
             out.append("groq")
         if self.openrouter_api_key:
             out.append("openrouter")
-        # Ollama is considered available — we'll check the server at call time.
-        out.append("ollama")
+        out.append("ollama")  # local — always available
         return out
 
     def resolve_provider(self, tier: ModelTier) -> ProviderName:
         """
-        Pick the provider for a given tier.
+        Pick the PRIMARY provider for a given tier.
 
         Resolution order:
-          1. Per-tier override (REASONING_PROVIDER, FAST_PROVIDER, EMBED_PROVIDER)
-          2. Global override (PRIMARY_PROVIDER) — skipped for EMBED if the
-             chosen provider can't embed
-          3. Auto: first configured provider in `_AUTO_PRIORITY` that supports
-             the tier (EMBED filters to `_EMBED_CAPABLE`)
+          1. Per-tier override (REASONING_PROVIDER, FAST_PROVIDER, TOOL_PROVIDER, EMBED_PROVIDER)
+          2. Global override (PRIMARY_PROVIDER) — skipped for EMBED if provider can't embed
+          3. Auto: first configured provider in `_AUTO_PRIORITY` that supports the tier
         """
         tier_override = {
             ModelTier.REASONING: self.reasoning_provider,
             ModelTier.FAST: self.fast_provider,
+            ModelTier.TOOL: self.tool_provider,
             ModelTier.EMBED: self.embed_provider,
         }[tier]
 
@@ -168,7 +182,7 @@ class Settings(BaseSettings):
 
         if self.primary_provider:
             if tier == ModelTier.EMBED and self.primary_provider not in _EMBED_CAPABLE:
-                pass  # fall through to auto-pick a real embedder
+                pass
             else:
                 return self.primary_provider
 
@@ -181,8 +195,32 @@ class Settings(BaseSettings):
             if p in configured:
                 return p
 
-        # Should be unreachable — Ollama is always in configured_providers.
         raise RuntimeError("No providers available. Configure at least one in .env")
+
+    def resolve_cascade(self, tier: ModelTier) -> list[ProviderName]:
+        """
+        Build the ordered FALLBACK chain for a tier.
+
+        Primary first (from `resolve_provider`), then any other configured
+        providers that can serve this tier, in `_AUTO_PRIORITY` order.
+
+        When `cascade_fallback_enabled=False`, returns just the primary.
+        """
+        primary = self.resolve_provider(tier)
+        if not self.cascade_fallback_enabled:
+            return [primary]
+
+        chain: list[ProviderName] = [primary]
+        candidates = list(_AUTO_PRIORITY)
+        if tier == ModelTier.EMBED:
+            candidates = [p for p in candidates if p in _EMBED_CAPABLE]
+
+        configured = set(self.configured_providers())
+        for p in candidates:
+            if p == primary or p not in configured:
+                continue
+            chain.append(p)
+        return chain
 
 
 settings = Settings()

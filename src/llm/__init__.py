@@ -1,8 +1,9 @@
 """
 LLM provider abstraction.
 
-Public surface — everything else in the codebase uses ONLY these:
+Public surface:
     from src.llm import chat, embed, ModelTier
+    from src.llm.observability import load_records, summarize
 """
 
 from src.config import ModelTier

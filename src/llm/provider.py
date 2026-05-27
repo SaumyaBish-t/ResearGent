@@ -1,21 +1,34 @@
 """
-Unified LLM provider interface.
+Unified LLM provider interface — with cascade fallback + observability.
 
 Design rationale
 ----------------
-NVIDIA NIM, Groq, and Ollama all expose **OpenAI-compatible** REST APIs.
-That means a single `openai` client works for all three — we only swap
-`base_url` + `api_key` per provider. No per-provider client classes needed.
+NVIDIA NIM, Groq, Cerebras, OpenRouter, and Ollama all expose **OpenAI-compatible**
+REST APIs. A single `openai` client works for all five — we only swap
+`base_url` + `api_key` per provider.
+
+Cascade fallback
+----------------
+For each tier we build an ordered chain of (provider, model) pairs from
+`settings.resolve_cascade(tier)`. `chat()` walks the chain on TRANSIENT
+failures (rate limits, 5xx, timeouts) — never on logical errors (400 bad
+request, schema mismatches). This makes the system genuinely robust to:
+  - free-tier RPM ceilings being hit mid-loop
+  - provider partial outages
+  - one provider's model returning empty / garbage output
+
+Observability
+-------------
+Every call is wrapped in `observability.track()` so the JSONL log captures
+duration, tokens, success, cascade depth. The `researgent stats` command
+reads this back.
 
 Public API
 ----------
-    chat(messages, tier=ModelTier.REASONING)   -> str
-    embed(texts, tier=ModelTier.EMBED)         -> list[list[float]]
-    get_client(provider)                       -> OpenAI client (escape hatch)
-    list_status()                              -> dict for the smoke test
-
-Every later phase calls `chat()` / `embed()` and never touches provider details.
-That's what makes "swap from cloud to local" a 0-line code change.
+    chat(messages, tier=...)             -> str
+    embed(texts, tier=...)               -> list[list[float]]
+    get_client(provider)                 -> OpenAI client (escape hatch)
+    list_status()                        -> dict for the smoke test
 """
 
 from __future__ import annotations
@@ -24,13 +37,26 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Iterable
 
+import openai
 from openai import OpenAI
 
 from src.config import ModelTier, ProviderName, settings
+from src.llm import observability as obs
+
+
+# Errors that mean "transient — try the next provider in the cascade".
+# We DELIBERATELY do not retry BadRequestError / AuthenticationError — those
+# are bugs in our code or stale keys, not problems the next provider can fix.
+_TRANSIENT_ERRORS = (
+    openai.RateLimitError,
+    openai.APITimeoutError,
+    openai.APIConnectionError,
+    openai.InternalServerError,
+)
 
 
 # ---------------------------------------------------------------------------
-# Provider descriptors — model name + endpoint per (provider, tier).
+# Provider descriptors
 # ---------------------------------------------------------------------------
 
 
@@ -38,7 +64,7 @@ from src.config import ModelTier, ProviderName, settings
 class ProviderConfig:
     name: ProviderName
     base_url: str
-    api_key: str  # "ollama" is fine as a dummy — local server ignores it
+    api_key: str
     models: dict[ModelTier, str | None]
 
 
@@ -52,7 +78,8 @@ def _provider_configs() -> dict[ProviderName, ProviderConfig]:
             models={
                 ModelTier.REASONING: s.cerebras_model_reasoning,
                 ModelTier.FAST: s.cerebras_model_fast,
-                ModelTier.EMBED: None,  # Cerebras does not host embeddings.
+                ModelTier.TOOL: s.cerebras_model_tool,
+                ModelTier.EMBED: None,
             },
         ),
         "nvidia": ProviderConfig(
@@ -62,6 +89,7 @@ def _provider_configs() -> dict[ProviderName, ProviderConfig]:
             models={
                 ModelTier.REASONING: s.nvidia_model_reasoning,
                 ModelTier.FAST: s.nvidia_model_fast,
+                ModelTier.TOOL: s.nvidia_model_tool,
                 ModelTier.EMBED: s.nvidia_model_embed,
             },
         ),
@@ -72,7 +100,8 @@ def _provider_configs() -> dict[ProviderName, ProviderConfig]:
             models={
                 ModelTier.REASONING: s.groq_model_reasoning,
                 ModelTier.FAST: s.groq_model_fast,
-                ModelTier.EMBED: None,  # Groq does not host embeddings.
+                ModelTier.TOOL: s.groq_model_tool,
+                ModelTier.EMBED: None,
             },
         ),
         "openrouter": ProviderConfig(
@@ -82,16 +111,18 @@ def _provider_configs() -> dict[ProviderName, ProviderConfig]:
             models={
                 ModelTier.REASONING: s.openrouter_model_reasoning,
                 ModelTier.FAST: s.openrouter_model_fast,
+                ModelTier.TOOL: s.openrouter_model_tool,
                 ModelTier.EMBED: s.openrouter_model_embed,
             },
         ),
         "ollama": ProviderConfig(
             name="ollama",
             base_url=s.ollama_base_url,
-            api_key="ollama",  # placeholder; Ollama ignores auth headers
+            api_key="ollama",
             models={
                 ModelTier.REASONING: s.ollama_model_reasoning,
                 ModelTier.FAST: s.ollama_model_fast,
+                ModelTier.TOOL: s.ollama_model_tool,
                 ModelTier.EMBED: s.ollama_model_embed,
             },
         ),
@@ -104,35 +135,44 @@ def get_client(provider: ProviderName) -> OpenAI:
     cfg = _provider_configs()[provider]
     if not cfg.api_key:
         raise RuntimeError(
-            f"Provider '{provider}' is not configured. "
-            f"Set the corresponding API key in .env"
+            f"Provider '{provider}' is not configured. Set the API key in .env"
         )
-
-    # OpenRouter recommends two headers for app attribution on its dashboard.
-    # They're optional — only sent if the user set them in .env.
     default_headers = None
     if provider == "openrouter":
         default_headers = {
             "HTTP-Referer": settings.openrouter_app_url,
             "X-Title": settings.openrouter_app_name,
         }
-
-    return OpenAI(
-        base_url=cfg.base_url,
-        api_key=cfg.api_key,
-        default_headers=default_headers,
-    )
+    return OpenAI(base_url=cfg.base_url, api_key=cfg.api_key, default_headers=default_headers)
 
 
-def _resolve(tier: ModelTier) -> tuple[ProviderName, str]:
-    """Return (provider, model_id) for a given tier."""
-    provider = settings.resolve_provider(tier)
-    model = _provider_configs()[provider].models[tier]
-    if model is None:
+# ---------------------------------------------------------------------------
+# Cascade resolution
+# ---------------------------------------------------------------------------
+
+
+def _cascade_for(tier: ModelTier) -> list[tuple[ProviderName, str]]:
+    """
+    Build the [(provider, model), ...] chain for a tier.
+
+    Filters out providers that don't have a model defined for this tier
+    (e.g. Groq lacks an EMBED model) or aren't configured (no API key).
+    """
+    cfgs = _provider_configs()
+    configured = set(settings.configured_providers())
+    out: list[tuple[ProviderName, str]] = []
+    for provider in settings.resolve_cascade(tier):
+        if provider not in configured:
+            continue
+        model = cfgs[provider].models.get(tier)
+        if not model:
+            continue
+        out.append((provider, model))
+    if not out:
         raise RuntimeError(
-            f"Provider '{provider}' has no model assigned for tier '{tier.value}'."
+            f"No usable providers for tier '{tier.value}'. Check .env keys + model assignments."
         )
-    return provider, model
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -149,21 +189,36 @@ def chat(
     **kwargs,
 ) -> str:
     """
-    Send a chat request to whichever provider+model serves this tier.
+    Send a chat request. Walks the cascade chain on transient failures.
 
-    Returns the assistant message content as a plain string. For streaming or
-    raw responses, drop down to `get_client(provider).chat.completions.create(...)`.
+    Raises the LAST encountered exception only if every provider in the chain
+    fails — partial failures are silently retried (and logged via observability).
     """
-    provider, model = _resolve(tier)
-    client = get_client(provider)
-    resp = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        **kwargs,
-    )
-    return resp.choices[0].message.content or ""
+    chain = _cascade_for(tier)
+    last_exc: Exception | None = None
+
+    for step, (provider, model) in enumerate(chain):
+        try:
+            with obs.track("chat", tier, provider, model, cascade_step=step) as ctx:
+                client = get_client(provider)
+                resp = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    **kwargs,
+                )
+                ctx["usage"] = resp.usage
+                return resp.choices[0].message.content or ""
+        except _TRANSIENT_ERRORS as e:
+            last_exc = e
+            continue  # try next provider
+        except Exception:
+            # Non-transient (BadRequest, Auth, config error) — fail fast.
+            raise
+
+    assert last_exc is not None
+    raise last_exc
 
 
 def embed(
@@ -171,40 +226,46 @@ def embed(
     *,
     tier: ModelTier = ModelTier.EMBED,
 ) -> list[list[float]]:
-    """
-    Embed a batch of texts. Used heavily from Phase 1 onward.
+    """Embed a batch with cascade fallback. NVIDIA needs `input_type` extra_body."""
+    chain = _cascade_for(tier)
+    texts_list = list(texts)
+    last_exc: Exception | None = None
 
-    Note: NVIDIA NIM embedding endpoints require an `input_type` extra field
-    ("query" vs "passage"). We default to "passage" — the retrieval module
-    will override per-call when querying.
-    """
-    provider, model = _resolve(tier)
-    client = get_client(provider)
-    texts = list(texts)
+    for step, (provider, model) in enumerate(chain):
+        try:
+            with obs.track("embed", tier, provider, model, cascade_step=step) as ctx:
+                client = get_client(provider)
+                extra_body = (
+                    {"input_type": "passage", "truncate": "END"}
+                    if provider == "nvidia"
+                    else None
+                )
+                resp = client.embeddings.create(
+                    model=model, input=texts_list, extra_body=extra_body
+                )
+                ctx["usage"] = getattr(resp, "usage", None)
+                return [d.embedding for d in resp.data]
+        except _TRANSIENT_ERRORS as e:
+            last_exc = e
+            continue
+        except Exception:
+            raise
 
-    extra_body = {}
-    if provider == "nvidia":
-        extra_body = {"input_type": "passage", "truncate": "END"}
-
-    resp = client.embeddings.create(
-        model=model,
-        input=texts,
-        extra_body=extra_body or None,
-    )
-    return [d.embedding for d in resp.data]
+    assert last_exc is not None
+    raise last_exc
 
 
 def list_status() -> dict[str, dict]:
     """
     Diagnostic snapshot for the smoke test.
 
-    Tells you for each tier: which provider was picked, which model, and whether
-    its credentials are configured. Does NOT make network calls.
+    Tells you for each tier: the resolved primary, the full cascade chain,
+    and per-provider configuration. Does NOT make network calls.
     """
     cfgs = _provider_configs()
     configured = set(settings.configured_providers())
 
-    out: dict[str, dict] = {"providers": {}, "routing": {}}
+    out: dict[str, dict] = {"providers": {}, "routing": {}, "cascade": {}}
 
     for name, cfg in cfgs.items():
         out["providers"][name] = {
@@ -215,9 +276,11 @@ def list_status() -> dict[str, dict]:
 
     for tier in ModelTier:
         try:
-            provider, model = _resolve(tier)
-            out["routing"][tier.value] = {"provider": provider, "model": model}
+            chain = _cascade_for(tier)
+            out["routing"][tier.value] = {"provider": chain[0][0], "model": chain[0][1]}
+            out["cascade"][tier.value] = [f"{p}:{m}" for p, m in chain]
         except Exception as e:
             out["routing"][tier.value] = {"error": str(e)}
+            out["cascade"][tier.value] = []
 
     return out
