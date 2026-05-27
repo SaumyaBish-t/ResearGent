@@ -1,40 +1,52 @@
 """
-Vector store — thin wrapper around a persistent ChromaDB client.
+Tiny persistent vector store — numpy-backed cosine-similarity search.
 
-Why a wrapper at all?
-  - Single place that knows where the DB lives on disk.
-  - Collection naming convention encodes (provider, embed-model) so switching
-    providers doesn't silently corrupt a collection with mismatched embedding
-    dimensions. A new (provider, model) -> a new collection.
-  - One place to add telemetry / migrations / backups later.
+Why we rolled our own instead of using ChromaDB
+-----------------------------------------------
+ChromaDB on Windows CPUs has hellish cold-start behavior — onnxruntime DLL
+loading, hnswlib initialization, ~60-120s on first run. For our scale
+(hundreds of chunks per corpus, maybe ~10k at the high end), a brute-force
+cosine search on a normalized numpy matrix is:
 
-Chroma's embedding behavior
----------------------------
-We pass `embedding_function=None`. That means Chroma does NOT embed on insert
-or query — we provide the vectors ourselves via `src.llm.embed`. This keeps
-embedding logic in one place (the provider abstraction) and avoids Chroma's
-auto-download of a sentence-transformers default model.
+  - Sub-100ms cold start (just numpy + pickle)
+  - Sub-millisecond per-query for our scale
+  - Zero ML dependencies (no onnxruntime, no sentence-transformers)
+  - No HuggingFace model auto-downloads on first import
+  - One pickle file per collection — trivially backed up / inspected / deleted
+
+Public surface is intentionally a ChromaDB-shaped subset so the rest of the
+codebase didn't have to change:
+  - col.count() -> int
+  - col.add(ids, embeddings, documents, metadatas) -> None
+  - col.delete(ids=...) -> None
+  - col.get(where=..., include=...) -> {"ids": [...], "documents": [...], "metadatas": [...]}
+  - col.query(query_embeddings, n_results, include=...) -> chroma-shaped dict
+
+If we ever need ANN / billion-scale, swapping back to a real vector DB is a
+two-file change (this module + the embed_function=None argument).
 """
 
 from __future__ import annotations
 
+import pickle
 import re
+import threading
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
-import chromadb
-from chromadb.api.models.Collection import Collection
-from chromadb.config import Settings as ChromaSettings
+import numpy as np
 
 from src.config import ModelTier, settings as app_settings
 
-DB_PATH = Path("data") / "chroma_db"
+DB_PATH = Path("data") / "store"
 PAPERS_PREFIX = "papers"
 
 
 def _sanitize(s: str) -> str:
-    """Chroma collection names: [a-zA-Z0-9._-], length 3-63."""
+    """Filesystem-safe collection name."""
     s = re.sub(r"[^a-zA-Z0-9._-]+", "-", s)
-    return s.strip("-._")[:50] or "default"
+    return s.strip("-._")[:60] or "default"
 
 
 def collection_name_for_current_embedder() -> str:
@@ -49,49 +61,243 @@ def collection_name_for_current_embedder() -> str:
         model = app_settings.nvidia_model_embed
     elif provider == "ollama":
         model = app_settings.ollama_model_embed
+    elif provider == "openrouter":
+        model = app_settings.openrouter_model_embed
     else:
         raise RuntimeError(f"Provider '{provider}' has no embedding model.")
     return f"{PAPERS_PREFIX}__{provider}__{_sanitize(model)}"
 
 
-_client: chromadb.PersistentClient | None = None
+# ---------------------------------------------------------------------------
+# Persistence + in-memory shape
+# ---------------------------------------------------------------------------
 
 
-def get_client() -> chromadb.PersistentClient:
-    """Process-wide singleton client."""
-    global _client
-    if _client is None:
-        DB_PATH.mkdir(parents=True, exist_ok=True)
-        _client = chromadb.PersistentClient(
-            path=str(DB_PATH),
-            settings=ChromaSettings(anonymized_telemetry=False),
-        )
-    return _client
+@dataclass
+class _Payload:
+    """What we pickle to disk per collection."""
+
+    # Parallel arrays — index i refers to the same chunk across all three.
+    ids: list[str] = field(default_factory=list)
+    embeddings: np.ndarray = field(default_factory=lambda: np.zeros((0, 0), dtype=np.float32))
+    documents: list[str] = field(default_factory=list)
+    metadatas: list[dict] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Collection — the ChromaDB-shaped object
+# ---------------------------------------------------------------------------
+
+
+class Collection:
+    """
+    Persistent vector collection.
+
+    Mutations are flushed to disk after every `add` / `delete`. For our write
+    cadence (batch ingest, then mostly read) this is fine; if we ever push
+    millions of chunks we'd batch writes.
+
+    Thread-safety: a single lock guards in-memory state. Process-level
+    concurrency on the same collection isn't supported (one ResearGent
+    process per machine — typical for a desktop tool).
+    """
+
+    def __init__(self, name: str, path: Path):
+        self.name = name
+        self.path = path
+        self._lock = threading.Lock()
+        self._payload = self._load_or_init()
+
+    # ---- persistence ----
+
+    def _load_or_init(self) -> _Payload:
+        if not self.path.exists():
+            return _Payload()
+        try:
+            with self.path.open("rb") as f:
+                p = pickle.load(f)
+            if not isinstance(p, _Payload):
+                return _Payload()
+            return p
+        except Exception:
+            return _Payload()
+
+    def _flush(self) -> None:
+        # Atomic write — tmp file then rename, so a crash mid-write leaves
+        # the previous good payload intact.
+        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+        with tmp.open("wb") as f:
+            pickle.dump(self._payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+        tmp.replace(self.path)
+
+    # ---- public, ChromaDB-shaped API ----
+
+    def count(self) -> int:
+        return len(self._payload.ids)
+
+    def add(
+        self,
+        ids: list[str],
+        embeddings: list[list[float]],
+        documents: list[str],
+        metadatas: list[dict],
+    ) -> None:
+        if not (len(ids) == len(embeddings) == len(documents) == len(metadatas)):
+            raise ValueError("ids/embeddings/documents/metadatas length mismatch")
+        if not ids:
+            return
+
+        new_emb = np.asarray(embeddings, dtype=np.float32)
+        with self._lock:
+            p = self._payload
+            if p.embeddings.size == 0:
+                p.embeddings = new_emb
+            else:
+                if new_emb.shape[1] != p.embeddings.shape[1]:
+                    raise ValueError(
+                        f"Embedding dim mismatch: existing={p.embeddings.shape[1]}, "
+                        f"new={new_emb.shape[1]}. Did the embedder change? "
+                        "Use `researgent store reset` to rebuild."
+                    )
+                p.embeddings = np.vstack([p.embeddings, new_emb])
+            p.ids.extend(ids)
+            p.documents.extend(documents)
+            p.metadatas.extend(metadatas)
+            self._flush()
+
+    def delete(self, ids: list[str] | None = None) -> None:
+        if not ids:
+            return
+        target = set(ids)
+        with self._lock:
+            p = self._payload
+            keep_idx = [i for i, _id in enumerate(p.ids) if _id not in target]
+            if len(keep_idx) == len(p.ids):
+                return  # nothing matched
+            p.ids = [p.ids[i] for i in keep_idx]
+            p.documents = [p.documents[i] for i in keep_idx]
+            p.metadatas = [p.metadatas[i] for i in keep_idx]
+            if p.embeddings.size:
+                p.embeddings = p.embeddings[keep_idx]
+            self._flush()
+
+    def get(
+        self,
+        where: dict | None = None,
+        include: list[str] | None = None,
+    ) -> dict[str, list]:
+        """ChromaDB-shaped get. `where` does AND-equality on metadata."""
+        include = include if include is not None else ["documents", "metadatas"]
+        with self._lock:
+            p = self._payload
+            if where:
+                idxs = [
+                    i
+                    for i, m in enumerate(p.metadatas)
+                    if all(m.get(k) == v for k, v in where.items())
+                ]
+            else:
+                idxs = list(range(len(p.ids)))
+
+            out: dict[str, list] = {"ids": [p.ids[i] for i in idxs]}
+            if "documents" in include:
+                out["documents"] = [p.documents[i] for i in idxs]
+            if "metadatas" in include:
+                out["metadatas"] = [p.metadatas[i] for i in idxs]
+            return out
+
+    def query(
+        self,
+        query_embeddings: list[list[float]],
+        n_results: int = 5,
+        include: list[str] | None = None,
+    ) -> dict[str, list[list]]:
+        """
+        Top-k cosine similarity. Returns ChromaDB-shaped batched dict where
+        outer list is per-query.
+
+        Distances returned are cosine DISTANCE (1 - cos_sim), matching what
+        ChromaDB returned for `hnsw:space=cosine` — so downstream code that
+        does `score = 1 - distance` keeps working unchanged.
+        """
+        include = include if include is not None else ["documents", "metadatas", "distances"]
+        with self._lock:
+            p = self._payload
+            if p.embeddings.size == 0 or not p.ids:
+                # No data — return empty per-query lists.
+                empty = [[] for _ in query_embeddings]
+                out: dict[str, list[list]] = {"ids": empty}
+                if "documents" in include: out["documents"] = empty
+                if "metadatas" in include: out["metadatas"] = empty
+                if "distances" in include: out["distances"] = empty
+                return out
+
+            corpus = p.embeddings
+            # Normalize once. Could be cached, but for our scale recomputing
+            # is sub-millisecond and avoids stale-cache bugs.
+            corpus_n = corpus / (np.linalg.norm(corpus, axis=1, keepdims=True) + 1e-12)
+
+            ids_out, docs_out, metas_out, dists_out = [], [], [], []
+            for q in query_embeddings:
+                qv = np.asarray(q, dtype=np.float32)
+                qv = qv / (np.linalg.norm(qv) + 1e-12)
+                sims = corpus_n @ qv  # cosine similarity for each row
+                # argpartition then sort is faster than full argsort for top-k
+                k = min(n_results, len(sims))
+                if k <= 0:
+                    ids_out.append([]); docs_out.append([]); metas_out.append([]); dists_out.append([])
+                    continue
+                top_unordered = np.argpartition(-sims, k - 1)[:k]
+                top = top_unordered[np.argsort(-sims[top_unordered])]
+                ids_out.append([p.ids[i] for i in top])
+                docs_out.append([p.documents[i] for i in top])
+                metas_out.append([p.metadatas[i] for i in top])
+                dists_out.append([float(1.0 - sims[i]) for i in top])
+
+            out = {"ids": ids_out}
+            if "documents" in include: out["documents"] = docs_out
+            if "metadatas" in include: out["metadatas"] = metas_out
+            if "distances" in include: out["distances"] = dists_out
+            return out
+
+
+# ---------------------------------------------------------------------------
+# Client surface — keeps the ChromaDB-shaped public API
+# ---------------------------------------------------------------------------
+
+
+_collections: dict[str, Collection] = {}
+
+
+def _path_for(name: str) -> Path:
+    DB_PATH.mkdir(parents=True, exist_ok=True)
+    return DB_PATH / f"{_sanitize(name)}.pkl"
 
 
 def get_or_create_papers_collection() -> Collection:
     """Get the collection that matches the *currently configured* embedder."""
-    return get_client().get_or_create_collection(
-        name=collection_name_for_current_embedder(),
-        metadata={"hnsw:space": "cosine"},
-        embedding_function=None,  # we embed externally
-    )
+    name = collection_name_for_current_embedder()
+    if name not in _collections:
+        _collections[name] = Collection(name=name, path=_path_for(name))
+    return _collections[name]
 
 
 def list_collections() -> list[dict]:
-    """Diagnostic — what's in the store?"""
+    """All persisted collections + chunk counts. Diagnostic."""
+    DB_PATH.mkdir(parents=True, exist_ok=True)
     out = []
-    for c in get_client().list_collections():
-        col = get_client().get_collection(c.name, embedding_function=None)
-        out.append({"name": c.name, "count": col.count()})
+    for p in sorted(DB_PATH.glob("*.pkl")):
+        name = p.stem
+        col = _collections.get(name) or Collection(name=name, path=p)
+        out.append({"name": name, "count": col.count()})
     return out
 
 
 def reset_papers_collection() -> str:
-    """Delete the current embedder's collection. Use with care."""
+    """Drop the current embedder's collection (in-memory + on-disk)."""
     name = collection_name_for_current_embedder()
-    try:
-        get_client().delete_collection(name)
-    except Exception:
-        pass
+    _collections.pop(name, None)
+    p = _path_for(name)
+    if p.exists():
+        p.unlink()
     return name

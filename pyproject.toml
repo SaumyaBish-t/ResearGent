@@ -18,8 +18,12 @@ dependencies = [
     "typer>=0.13.0",         # CLI framework
     # ---- Phase 1: ingestion + naive RAG ----
     "pymupdf>=1.24.0",       # PDF parsing — handles academic 2-col layouts well
-    "chromadb>=0.5.20",      # local persistent vector store
+    "numpy>=2.0",            # vector math for our tiny custom store
     "tiktoken>=0.8.0",       # token counting for size-aware chunking
+    # NOTE: we deliberately do NOT use chromadb — its onnxruntime + hnswlib
+    # cold-import on Windows CPUs can take 60-120s. For our scale (<10k
+    # chunks) a numpy-backed cosine search in src/store.py is faster, has no
+    # ML dependencies, and starts in <100ms.
     # ---- Phase 2: hybrid retrieval ----
     "rank-bm25>=0.2.2",      # BM25Okapi — classic lexical retrieval
 ]

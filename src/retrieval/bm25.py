@@ -42,7 +42,7 @@ from rank_bm25 import BM25Okapi
 
 from src.store import DB_PATH, collection_name_for_current_embedder
 
-# Where pickled BM25 indexes live. Sibling directory to the Chroma DB.
+# Where pickled BM25 indexes live. Sibling directory to the vector store.
 BM25_DIR = DB_PATH.parent / "bm25_idx"
 
 # Small English stopword list — kept minimal because BM25's IDF already
