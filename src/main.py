@@ -31,7 +31,7 @@ console = Console()
 
 @app.command()
 def status() -> None:
-    """Show which providers are configured and how tiers are routed."""
+    """Show providers, tier routing, and cascade fallback chains."""
     info = list_status()
 
     # --- Providers table ---
@@ -39,42 +39,46 @@ def status() -> None:
     p_table.add_column("Provider")
     p_table.add_column("Configured")
     p_table.add_column("Base URL", overflow="fold")
-    p_table.add_column("Models (reasoning / fast / embed)", overflow="fold")
+    p_table.add_column("reasoning / fast / tool / embed", overflow="fold")
 
     for name, data in info["providers"].items():
-        models = data["models"]
+        m = data["models"]
         p_table.add_row(
             name,
             "[green]yes[/green]" if data["configured"] else "[red]no[/red]",
             data["base_url"],
-            f"{models['reasoning']}  /  {models['fast']}  /  {models['embed']}",
+            f"{m.get('reasoning')}  /  {m.get('fast')}  /  {m.get('tool')}  /  {m.get('embed')}",
         )
     console.print(p_table)
 
-    # --- Routing table ---
-    r_table = Table(title="Tier Routing", show_header=True, header_style="bold cyan")
+    # --- Routing + cascade table ---
+    r_table = Table(title="Tier Routing (primary + cascade fallback)", header_style="bold cyan")
     r_table.add_column("Tier")
-    r_table.add_column("Provider")
-    r_table.add_column("Model")
+    r_table.add_column("Primary provider")
+    r_table.add_column("Primary model", overflow="fold")
+    r_table.add_column("Cascade chain (on failure)", overflow="fold")
 
     for tier, route in info["routing"].items():
+        chain = info["cascade"].get(tier, [])
         if "error" in route:
-            r_table.add_row(tier, "[red]error[/red]", route["error"])
+            r_table.add_row(tier, "[red]error[/red]", route["error"], "")
         else:
-            r_table.add_row(tier, route["provider"], route["model"])
+            cascade_str = " -> ".join(chain) if chain else "-"
+            r_table.add_row(tier, route["provider"], route["model"], cascade_str)
     console.print(r_table)
 
 
 @app.command()
 def smoke() -> None:
     """
-    Ping each tier with a one-line prompt. Confirms wiring + credentials end-to-end.
+    Ping each chat tier with a one-line prompt. Confirms wiring + credentials.
+    Skips EMBED (use `retrieve` or `ingest` to exercise that path).
     """
     prompt = [
         {"role": "system", "content": "Reply in EXACTLY one short sentence."},
         {"role": "user", "content": "Say hello and name yourself."},
     ]
-    for tier in (ModelTier.REASONING, ModelTier.FAST):
+    for tier in (ModelTier.REASONING, ModelTier.FAST, ModelTier.TOOL):
         console.print(f"\n[bold cyan]>> Testing tier: {tier.value}[/bold cyan]")
         try:
             out = chat(prompt, tier=tier, max_tokens=80)
@@ -102,6 +106,68 @@ def ask(
 def status_json() -> None:
     """Machine-readable status (handy for CI / debugging)."""
     print(json.dumps(list_status(), indent=2))
+
+
+@app.command()
+def stats(
+    last: int = typer.Option(0, help="Only consider the last N calls (0 = all)"),
+) -> None:
+    """
+    Show aggregated LLM call statistics from the observability log.
+
+    Counts, success rate, latency, and token usage broken down by tier and
+    by (tier, provider) pair. Use this to spot slow providers, broken keys,
+    or cascade fallbacks happening silently.
+    """
+    from src.llm.observability import load_records, summarize
+
+    records = load_records(limit=last or None)
+    if not records:
+        console.print(
+            "[yellow]No LLM calls logged yet.[/yellow]  "
+            "Run `researgent smoke` or `rag-ask` first."
+        )
+        return
+
+    summary = summarize(records)
+
+    # ---- Headline numbers ----
+    t = summary["tokens"]
+    console.print(
+        f"\n[bold]Total calls:[/bold] {summary['total_calls']}    "
+        f"[bold]Tokens:[/bold] {t['input']:,} in / {t['output']:,} out / {t['total']:,} total    "
+        f"[bold]Cascade fallbacks used:[/bold] {summary['cascade_used']}"
+    )
+
+    # ---- By tier ----
+    t_table = Table(title="By tier", header_style="bold cyan")
+    for col in ("Tier", "Calls", "OK%", "Avg ms", "p95 ms", "Tok in", "Tok out"):
+        t_table.add_column(col)
+    for tier_name, v in sorted(summary["by_tier"].items()):
+        t_table.add_row(
+            tier_name,
+            str(v["count"]),
+            f"{int(v['success_rate'] * 100)}%",
+            str(v["avg_ms"]),
+            str(v["p95_ms"]),
+            f"{v['in_tok']:,}",
+            f"{v['out_tok']:,}",
+        )
+    console.print(t_table)
+
+    # ---- By tier × provider ----
+    p_table = Table(title="By tier x provider", header_style="bold cyan")
+    for col in ("Tier/Provider", "Calls", "OK%", "Avg ms", "p95 ms"):
+        p_table.add_column(col)
+    for pair, v in sorted(summary["by_tier_provider"].items()):
+        p_table.add_row(
+            pair,
+            str(v["count"]),
+            f"{int(v['success_rate'] * 100)}%",
+            str(v["avg_ms"]),
+            str(v["p95_ms"]),
+        )
+    console.print(p_table)
 
 
 # ---------------------------------------------------------------------------

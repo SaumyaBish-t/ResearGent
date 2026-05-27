@@ -10,7 +10,7 @@ An **Agentic Research Engine** with Corrective RAG, Self-Reflection, hybrid retr
 
 | Phase | Capability | Status |
 |---|---|---|
-| **0** | Provider abstraction (NVIDIA NIM / Groq / Ollama) + CLI skeleton | ✅ done |
+| **0** | Provider abstraction (5 providers) + 4 tiers + cascade fallback + observability | ✅ done |
 | **1** | Naive RAG — PDF ingest, embed, retrieve, generate with citations | ✅ done |
 | **2** | Hybrid retrieval — dense + BM25 + reciprocal rank fusion | ⏳ |
 | **3** | LangGraph agent — Planner → Retriever → Generator as stateful graph | ⏳ |
@@ -63,15 +63,29 @@ ollama pull nomic-embed-text
 ### 4. Verify
 
 ```bash
-# Show which providers are configured and how tiers are routed
+# Show providers, tier routing, and cascade fallback chains
 uv run researgent status
 
-# Send a real prompt to each tier — confirms wiring + credentials
+# Send a real prompt to each chat tier (reasoning / fast / tool)
 uv run researgent smoke
 
-# One-off question (Phase 0 has no retrieval — just direct LLM call)
+# One-off question — no retrieval yet, just direct LLM call
 uv run researgent ask "What is corrective RAG in one paragraph?"
+
+# View per-call observability log (latency, tokens, cascade usage)
+uv run researgent stats
 ```
+
+### Model tiers (the heart of the model strategy)
+
+| Tier | Used by | Default model picks (when keys are available) |
+|---|---|---|
+| **REASONING** | Planner, Reflector, Report Generator | Cerebras Qwen3-235B → NVIDIA Llama 3.3 70B → ... |
+| **FAST** | Critic, Grader, Query rewriter | Groq llama-3.1-8b-instant (315 TPS) → ... |
+| **TOOL** | Any agent doing tool / function calls | Groq GPT-OSS-120B (best free tool-caller) → ... |
+| **EMBED** | Ingestion + retrieval | NVIDIA nv-embed-v1 → ... |
+
+Each tier resolves to a **cascade chain** — if the primary provider returns a transient error (429 rate limit, 5xx, timeout), the system automatically retries on the next configured provider. View the full chain with `researgent status`.
 
 ---
 
