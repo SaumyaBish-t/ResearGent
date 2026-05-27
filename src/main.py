@@ -376,8 +376,13 @@ def doctor() -> None:
         if r.status_code == 200:
             models = [m["name"] for m in r.json().get("models", [])]
             console.print(f"  [green]reachable[/green]  models pulled: {', '.join(models) or '(none)'}")
+            # Ollama lists models with a tag (`nomic-embed-text:latest`) but
+            # accepts them with or without. Normalize both sides before diffing.
+            def _bare(name: str) -> str:
+                return name.split(":", 1)[0]
+            pulled_bare = {_bare(m) for m in models}
             need = [settings.ollama_model_reasoning, settings.ollama_model_embed]
-            missing = [m for m in need if m not in models]
+            missing = [m for m in need if _bare(m) not in pulled_bare]
             if missing:
                 console.print(f"  [yellow]missing:[/yellow] {missing}  ->  ollama pull {' '.join(missing)}")
         else:

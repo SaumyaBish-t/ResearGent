@@ -230,6 +230,70 @@ def chat(
     raise last_exc
 
 
+def _embed_ollama_native(model: str, texts: list[str]) -> list[list[float]]:
+    """
+    Embed via Ollama's NATIVE API.
+
+    Ollama exposes two endpoints depending on version:
+      - /api/embed         (since v0.4, Sep 2024) — batched, `input: [...]`
+      - /api/embeddings    (older, singular)      — one string at a time, `prompt: "..."`
+
+    The /v1/embeddings OpenAI-compat shim has known quirks (silent hangs,
+    empty responses on first request). Going native is more reliable.
+
+    Strategy: try /api/embed first (batched, fast). On 404/405 fall back to
+    /api/embeddings looped per input. On other errors, surface them with the
+    response body so the failure is debuggable.
+    """
+    import httpx
+    base = settings.ollama_base_url.rstrip("/v1").rstrip("/")
+
+    # ---- Try batched /api/embed first ----
+    try:
+        r = httpx.post(
+            f"{base}/api/embed",
+            json={"model": model, "input": texts},
+            timeout=120.0,
+        )
+        if r.status_code in (404, 405):
+            raise _BatchedEndpointMissing()
+        if r.status_code >= 400:
+            # Bubble up the body so the user can see what Ollama actually said.
+            raise RuntimeError(
+                f"Ollama /api/embed returned {r.status_code}: {r.text[:300]}"
+            )
+        data = r.json()
+        emb = data.get("embeddings") or ([data["embedding"]] if "embedding" in data else None)
+        if not emb:
+            raise RuntimeError(f"Ollama /api/embed returned no embeddings: {data}")
+        return emb
+    except _BatchedEndpointMissing:
+        pass  # fall through to legacy endpoint
+
+    # ---- Fallback: legacy /api/embeddings, one call per input ----
+    out: list[list[float]] = []
+    for text in texts:
+        r = httpx.post(
+            f"{base}/api/embeddings",
+            json={"model": model, "prompt": text},
+            timeout=120.0,
+        )
+        if r.status_code >= 400:
+            raise RuntimeError(
+                f"Ollama /api/embeddings returned {r.status_code}: {r.text[:300]}"
+            )
+        data = r.json()
+        vec = data.get("embedding")
+        if not vec:
+            raise RuntimeError(f"Ollama /api/embeddings returned no embedding: {data}")
+        out.append(vec)
+    return out
+
+
+class _BatchedEndpointMissing(Exception):
+    """Signal that /api/embed is unavailable so we fall back to /api/embeddings."""
+
+
 def embed(
     texts: Iterable[str],
     *,
@@ -243,6 +307,11 @@ def embed(
     for step, (provider, model) in enumerate(chain):
         try:
             with obs.track("embed", tier, provider, model, cascade_step=step) as ctx:
+                if provider == "ollama":
+                    # Native endpoint — more reliable than the OpenAI-compat shim.
+                    # 120s timeout covers cold model loads on first request.
+                    return _embed_ollama_native(model, texts_list)
+
                 client = get_client(provider)
                 extra_body = (
                     {"input_type": "passage", "truncate": "END"}
