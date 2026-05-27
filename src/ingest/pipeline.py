@@ -34,6 +34,7 @@ from rich.progress import (
 from src.ingest.chunker import Chunk, chunk_pages
 from src.ingest.pdf import Document, parse_pdf
 from src.llm import ModelTier, embed
+from src.retrieval import bm25 as bm25_idx
 from src.store import get_or_create_papers_collection
 
 console = Console()
@@ -88,8 +89,41 @@ def _embed_and_store(doc: Document, chunks: list[Chunk]) -> int:
     return inserted
 
 
-def ingest_file(path: Path, *, verbose: bool = True) -> dict:
-    """Ingest a single PDF. Returns a result summary dict."""
+def _rebuild_bm25_from_chroma() -> int:
+    """
+    Rebuild the BM25 index from the current Chroma collection contents.
+
+    BM25's IDF depends on the FULL corpus, so per-doc incremental updates are
+    cheap with embeddings (just insert a vector) but expensive for BM25 (must
+    recompute IDF across all docs). We accept the cost — for academic corpora
+    of a few hundred PDFs this completes in milliseconds.
+    """
+    col = get_or_create_papers_collection()
+    n = col.count()
+    if n == 0:
+        bm25_idx.build_index([], [], [])
+        bm25_idx.invalidate_cache()
+        return 0
+
+    # Pull all chunks. Chroma .get() with no `where` returns everything.
+    # We do NOT need vectors here — only ids/texts/metadatas — so include=[]
+    # is overridden to the minimum we actually need.
+    res = col.get(include=["documents", "metadatas"])
+    ids = res.get("ids") or []
+    docs = res.get("documents") or []
+    metas = res.get("metadatas") or []
+    bm25_idx.build_index(ids=ids, texts=docs, metadatas=metas)
+    bm25_idx.invalidate_cache()
+    return len(ids)
+
+
+def ingest_file(path: Path, *, verbose: bool = True, rebuild_bm25: bool = True) -> dict:
+    """
+    Ingest a single PDF. Returns a result summary dict.
+
+    `rebuild_bm25=False` skips the BM25 rebuild — useful when ingesting many
+    PDFs in a row (the directory ingester rebuilds once at the end).
+    """
     if verbose:
         console.print(f"[cyan]parsing[/cyan] {path.name}")
     doc = parse_pdf(path)
@@ -105,6 +139,13 @@ def ingest_file(path: Path, *, verbose: bool = True) -> dict:
         console.print("  [cyan]embedding[/cyan]...")
 
     inserted = _embed_and_store(doc, chunks)
+
+    bm25_count = 0
+    if rebuild_bm25:
+        if verbose:
+            console.print("  [cyan]building BM25 index[/cyan]...")
+        bm25_count = _rebuild_bm25_from_chroma()
+
     return {
         "source_file": doc.source_file,
         "doc_id": doc.doc_id,
@@ -112,11 +153,12 @@ def ingest_file(path: Path, *, verbose: bool = True) -> dict:
         "pages": doc.total_pages,
         "chunks_inserted": inserted,
         "chunks_replaced": removed,
+        "bm25_chunks": bm25_count,
     }
 
 
 def ingest_directory(dir_path: Path) -> list[dict]:
-    """Ingest every PDF in a directory (non-recursive)."""
+    """Ingest every PDF in a directory (non-recursive). BM25 rebuilds once at end."""
     pdfs = sorted(p for p in dir_path.glob("*.pdf"))
     if not pdfs:
         console.print(f"[yellow]No PDFs found in {dir_path}[/yellow]")
@@ -134,7 +176,8 @@ def ingest_directory(dir_path: Path) -> list[dict]:
         task = prog.add_task("ingesting PDFs", total=len(pdfs))
         for pdf in pdfs:
             try:
-                r = ingest_file(pdf, verbose=False)
+                # Defer BM25 rebuild — we'll do it once at the end.
+                r = ingest_file(pdf, verbose=False, rebuild_bm25=False)
                 results.append(r)
                 prog.console.print(
                     f"  [green]ok[/green] {pdf.name}  "
@@ -144,4 +187,8 @@ def ingest_directory(dir_path: Path) -> list[dict]:
                 prog.console.print(f"  [red]fail[/red] {pdf.name}: {type(e).__name__}: {e}")
                 results.append({"source_file": pdf.name, "error": str(e)})
             prog.advance(task)
+
+    console.print("[cyan]rebuilding BM25 index[/cyan]...")
+    bm25_n = _rebuild_bm25_from_chroma()
+    console.print(f"  [green]BM25[/green] indexed {bm25_n} chunks")
     return results

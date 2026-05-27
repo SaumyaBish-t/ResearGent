@@ -214,36 +214,146 @@ def ingest(
 def rag_ask(
     question: str = typer.Argument(..., help="Question to ask the indexed corpus"),
     k: int = typer.Option(5, help="Number of chunks to retrieve"),
+    mode: str = typer.Option("hybrid", help="hybrid | naive — retrieval strategy"),
 ) -> None:
     """
-    Phase 1 naive RAG — retrieve top-k chunks and answer with citations.
+    Retrieve top-k chunks and answer with citations.
 
-    This is the baseline we'll beat in every later phase.
+    `--mode hybrid` (default) uses dense + BM25 + RRF — wins on exact-term
+    queries. `--mode naive` is the dense-only baseline from Phase 1.
     """
-    from src.rag import naive_rag
+    if mode == "hybrid":
+        from src.rag import hybrid_rag
+        result = hybrid_rag(question, k=k)
+    elif mode == "naive":
+        from src.rag import naive_rag
+        result = naive_rag(question, k=k)
+    else:
+        console.print(f"[red]Unknown mode: {mode}[/red] (use: hybrid | naive)")
+        raise typer.Exit(code=1)
 
-    result = naive_rag(question, k=k)
-    console.print(Panel(result.formatted(), title=f"answer (k={k})", border_style="cyan"))
+    console.print(Panel(result.formatted(), title=f"answer (mode={mode}, k={k})", border_style="cyan"))
 
 
 @app.command()
 def retrieve(
     query: str = typer.Argument(..., help="Query to retrieve chunks for"),
     k: int = typer.Option(5, help="Number of chunks to retrieve"),
+    mode: str = typer.Option("hybrid", help="hybrid | naive | bm25"),
 ) -> None:
-    """Show raw retrieved chunks (debugging — no LLM call)."""
-    from src.retrieval import naive_retrieve
+    """Show raw retrieved chunks (no LLM call). Useful for debugging retrieval."""
+    if mode == "hybrid":
+        from src.retrieval import hybrid_retrieve
+        chunks = hybrid_retrieve(query, k=k)
+        if not chunks:
+            console.print("[yellow]No chunks retrieved (corpus empty?).[/yellow]")
+            return
+        for i, c in enumerate(chunks, start=1):
+            preview = c.text.strip().replace("\n", " ")
+            preview = preview[:300] + ("..." if len(preview) > 300 else "")
+            ranks = []
+            if c.dense_rank: ranks.append(f"dense#{c.dense_rank}")
+            if c.bm25_rank: ranks.append(f"bm25#{c.bm25_rank}")
+            title = f"[S{i}] {c.citation}   signal={c.signal}  rrf={c.rrf_score:.4f}  ({', '.join(ranks)})"
+            console.print(Panel(preview, title=title, border_style="cyan"))
+    elif mode == "naive":
+        from src.retrieval import naive_retrieve
+        chunks = naive_retrieve(query, k=k)
+        if not chunks:
+            console.print("[yellow]No chunks retrieved (corpus empty?).[/yellow]")
+            return
+        for i, c in enumerate(chunks, start=1):
+            preview = c.text.strip().replace("\n", " ")
+            preview = preview[:300] + ("..." if len(preview) > 300 else "")
+            title = f"[S{i}] {c.citation}   cos={c.score:.3f}"
+            console.print(Panel(preview, title=title, border_style="cyan"))
+    elif mode == "bm25":
+        from src.retrieval import bm25 as bm25_idx
+        hits = bm25_idx.search(query, k=k)
+        if not hits:
+            console.print("[yellow]No BM25 hits (index empty or no term overlap).[/yellow]")
+            return
+        for i, h in enumerate(hits, start=1):
+            preview = h.text.strip().replace("\n", " ")
+            preview = preview[:300] + ("..." if len(preview) > 300 else "")
+            m = h.metadata
+            cit = f"{m.get('source_file','?')} p.{m.get('page_number','?')}"
+            title = f"[S{i}] {cit}   bm25={h.score:.3f}"
+            console.print(Panel(preview, title=title, border_style="cyan"))
+    else:
+        console.print(f"[red]Unknown mode: {mode}[/red] (use: hybrid | naive | bm25)")
+        raise typer.Exit(code=1)
 
-    chunks = naive_retrieve(query, k=k)
-    if not chunks:
-        console.print("[yellow]No chunks retrieved (corpus empty?). Run `ingest` first.[/yellow]")
+
+@app.command()
+def bench(
+    query: str = typer.Argument(..., help="Query to benchmark"),
+    k: int = typer.Option(5, help="Top-k for both retrievers"),
+) -> None:
+    """
+    Side-by-side: naive (dense-only) vs hybrid (dense+BM25+RRF) for one query.
+
+    Shows which chunks are unique to each retriever, which are found by both
+    (the strongest signal), and the rank shifts caused by fusion. Use this on
+    your hardest queries to see exactly when hybrid pays off.
+    """
+    from src.retrieval import naive_retrieve, hybrid_retrieve
+    from src.retrieval import bm25 as bm25_idx
+
+    naive = naive_retrieve(query, k=k)
+    hybrid = hybrid_retrieve(query, k=k)
+    bm25_hits = bm25_idx.search(query, k=k)
+
+    if not naive and not hybrid:
+        console.print("[yellow]No results — is the corpus ingested?[/yellow]")
         return
 
-    for i, c in enumerate(chunks, start=1):
-        preview = c.text.strip().replace("\n", " ")
-        preview = preview[:300] + ("..." if len(preview) > 300 else "")
-        title = f"[S{i}] {c.citation}   score={c.score:.3f}"
-        console.print(Panel(preview, title=title, border_style="cyan"))
+    def _key(source_file: str, chunk_index: int) -> str:
+        return f"{source_file}::{chunk_index}"
+
+    naive_keys = {_key(c.source_file, c.chunk_index) for c in naive}
+    bm25_keys = {_key(h.metadata.get("source_file","?"), int(h.metadata.get("chunk_index", -1))) for h in bm25_hits}
+    hybrid_keys = {_key(c.source_file, c.chunk_index) for c in hybrid}
+
+    # ---- Summary table ----
+    t = Table(title=f"Retrieval comparison  -  query: {query!r}", header_style="bold cyan")
+    t.add_column("Rank")
+    t.add_column("Naive (dense top-k)", overflow="fold")
+    t.add_column("BM25 (lexical top-k)", overflow="fold")
+    t.add_column("Hybrid (RRF top-k)", overflow="fold")
+
+    for i in range(k):
+        n_cell = ""
+        if i < len(naive):
+            c = naive[i]
+            n_cell = f"{c.citation}\ncos={c.score:.3f}"
+        b_cell = ""
+        if i < len(bm25_hits):
+            h = bm25_hits[i]
+            m = h.metadata
+            b_cell = f"{m.get('source_file','?')} p.{m.get('page_number','?')}\nbm25={h.score:.2f}"
+        h_cell = ""
+        if i < len(hybrid):
+            c = hybrid[i]
+            h_cell = f"{c.citation}\nrrf={c.rrf_score:.4f}  [{c.signal}]"
+        t.add_row(str(i + 1), n_cell, b_cell, h_cell)
+    console.print(t)
+
+    # ---- Overlap stats ----
+    both = naive_keys & bm25_keys
+    only_naive = naive_keys - bm25_keys
+    only_bm25 = bm25_keys - naive_keys
+    hybrid_from_naive = hybrid_keys & naive_keys
+    hybrid_from_bm25 = hybrid_keys & bm25_keys
+    hybrid_from_both = hybrid_keys & both
+
+    console.print(
+        f"\n[bold]Overlap:[/bold] "
+        f"both={len(both)}  only-dense={len(only_naive)}  only-bm25={len(only_bm25)}  "
+        f"|  hybrid pulled {len(hybrid_from_naive)}/{k} from dense, "
+        f"{len(hybrid_from_bm25)}/{k} from bm25, "
+        f"{len(hybrid_from_both)}/{k} ranked by both"
+    )
 
 
 @app.command()
