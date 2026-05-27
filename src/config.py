@@ -16,7 +16,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -76,6 +76,23 @@ class Settings(BaseSettings):
     reasoning_provider: ProviderName | None = None
     fast_provider: ProviderName | None = None
     embed_provider: ProviderName | None = None
+
+    # ---- Validators ---------------------------------------------------------
+    # .env files commonly leave keys blank (`PRIMARY_PROVIDER=`). Pydantic's
+    # strict Literal validator rejects "" — coerce blanks to None so blank
+    # entries behave as "unset".
+    @field_validator(
+        "primary_provider",
+        "reasoning_provider",
+        "fast_provider",
+        "embed_provider",
+        mode="before",
+    )
+    @classmethod
+    def _blank_to_none(cls, v):
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
 
     # ---- Helpers ------------------------------------------------------------
     def configured_providers(self) -> list[ProviderName]:
