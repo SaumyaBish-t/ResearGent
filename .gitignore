@@ -21,6 +21,7 @@ __pycache__/
 data/papers/*
 !data/papers/.gitkeep
 data/chroma_db/
+data/store/
 data/bm25_idx/
 data/cache/
 data/llm_calls.jsonl
