@@ -33,6 +33,7 @@ from rich.progress import (
 )
 
 from src.ingest.chunker import Chunk, chunk_pages
+from src.ingest.obsidian import VaultChunk, VaultNote, chunk_note, iter_vault_notes, parse_note
 from src.ingest.pdf import Document, parse_pdf
 from src.llm import ModelTier, embed
 from src.retrieval import bm25 as bm25_idx
@@ -243,4 +244,146 @@ def ingest_directory(dir_path: Path) -> list[dict]:
     console.print("\n[cyan]rebuilding BM25 index[/cyan]...")
     bm25_n = _rebuild_bm25_from_chroma()
     console.print(f"  [green]BM25[/green] indexed {bm25_n} chunks")
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Obsidian vault ingestion (Phase 8)
+# ---------------------------------------------------------------------------
+
+
+def _embed_and_store_vault_chunks(note: VaultNote, chunks: list[VaultChunk], *, verbose: bool = True) -> int:
+    """Embed vault chunks and insert into the same papers collection."""
+    if not chunks:
+        return 0
+
+    col = get_or_create_papers_collection()
+    inserted = 0
+    total_batches = (len(chunks) + EMBED_BATCH - 1) // EMBED_BATCH
+    total_start = time.perf_counter()
+
+    for batch_i, batch in enumerate(_batched(chunks, EMBED_BATCH), start=1):
+        texts = [c.text for c in batch]
+        batch_tokens = sum(c.token_count for c in batch)
+
+        t0 = time.perf_counter()
+        try:
+            vectors = embed(texts, tier=ModelTier.EMBED)
+        except Exception as e:
+            if verbose:
+                console.print(
+                    f"  [red]embed FAIL[/red] batch {batch_i}/{total_batches}: {type(e).__name__}: {e}"
+                )
+            raise
+        dur_ms = int((time.perf_counter() - t0) * 1000)
+
+        ids = [f"{note.doc_id}:{c.chunk_index}" for c in batch]
+        metadatas = [
+            {
+                "doc_id": note.doc_id,
+                "source_file": c.source_file,
+                "page_number": c.page_number,       # 0 for vault notes
+                "chunk_index": c.chunk_index,
+                "token_count": c.token_count,
+                "doc_title": c.note_title,
+                # Vault-specific — comma-joined for the simple metadata layer
+                "source_type": "vault",
+                "heading_path": c.heading_path,
+                "tags": ",".join(c.tags),
+                "wikilinks": ",".join(c.wikilinks),
+            }
+            for c in batch
+        ]
+        col.add(ids=ids, embeddings=vectors, documents=texts, metadatas=metadatas)
+        inserted += len(batch)
+
+        if verbose:
+            tps = int(batch_tokens / max(dur_ms, 1) * 1000)
+            console.print(
+                f"  embed batch [cyan]{batch_i}/{total_batches}[/cyan]  "
+                f"{len(batch)} chunks, ~{batch_tokens} tok  "
+                f"[green]{dur_ms} ms[/green]  ({tps} tok/s)"
+            )
+
+    if verbose:
+        total_s = time.perf_counter() - total_start
+        console.print(f"  [bold]embedded {inserted} chunks in {total_s:.1f}s[/bold]")
+    return inserted
+
+
+def ingest_vault(
+    vault_path: Path,
+    *,
+    rebuild_bm25: bool = True,
+    verbose: bool = True,
+) -> list[dict]:
+    """
+    Walk an Obsidian vault and ingest every .md file.
+
+    Re-running is idempotent: each note's chunks are keyed by `doc_id` (a
+    content hash). Modifying a note changes its hash → its chunks get
+    replaced cleanly on the next ingest. Unchanged notes are re-embedded
+    (we don't skip; embedder is cheap on local Ollama) but the result
+    is identical to what was already stored.
+    """
+    vault_path = vault_path.resolve()
+    if not vault_path.exists() or not vault_path.is_dir():
+        console.print(f"[red]Vault path not found: {vault_path}[/red]")
+        return []
+
+    notes = iter_vault_notes(vault_path)
+    if not notes:
+        console.print(f"[yellow]No .md notes found in {vault_path}[/yellow]")
+        return []
+
+    # Pre-warm — same reasoning as the PDF path.
+    console.print("[cyan]pre-warming embedder...[/cyan]")
+    try:
+        t0 = time.perf_counter()
+        embed(["warmup"], tier=ModelTier.EMBED)
+        console.print(f"  [green]warm[/green]  ({int((time.perf_counter() - t0) * 1000)} ms)")
+    except Exception as e:
+        console.print(f"  [red]warmup FAIL[/red]: {type(e).__name__}: {e}")
+        console.print("[red]Embedder is broken. Run `researgent doctor` to diagnose.[/red]")
+        return [{"error": "embedder warmup failed"}]
+
+    console.print(f"\n[bold]processing {len(notes)} notes from {vault_path}[/bold]\n")
+
+    results: list[dict] = []
+    overall_start = time.perf_counter()
+
+    for i, note_path in enumerate(notes, start=1):
+        rel = note_path.relative_to(vault_path)
+        console.print(f"[bold blue]({i}/{len(notes)})[/bold blue] {rel}")
+        try:
+            note = parse_note(note_path, vault_path)
+            chunks = chunk_note(note)
+            removed = _delete_existing_doc(note.doc_id)
+            if verbose:
+                console.print(
+                    f"  chunks: {len(chunks)}  tags: {len(note.tags)}  "
+                    f"links: {len(note.wikilinks)}  (replaced {removed})"
+                )
+            inserted = _embed_and_store_vault_chunks(note, chunks, verbose=verbose)
+            results.append({
+                "source_file": str(rel),
+                "doc_id": note.doc_id,
+                "title": note.title,
+                "tags": note.tags,
+                "wikilinks": note.wikilinks,
+                "chunks_inserted": inserted,
+                "chunks_replaced": removed,
+            })
+            console.print(f"  [green]done[/green]  {note.title!r}: {inserted} chunks\n")
+        except Exception as e:
+            console.print(f"  [red]FAIL[/red] {type(e).__name__}: {e}\n")
+            results.append({"source_file": str(rel), "error": str(e)})
+
+    total_s = time.perf_counter() - overall_start
+    console.print(f"[bold]vault ingest complete in {total_s:.1f}s[/bold]")
+
+    if rebuild_bm25:
+        console.print("\n[cyan]rebuilding BM25 index[/cyan]...")
+        bm25_n = _rebuild_bm25_from_chroma()
+        console.print(f"  [green]BM25[/green] indexed {bm25_n} chunks")
     return results

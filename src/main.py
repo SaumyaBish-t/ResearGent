@@ -175,6 +175,53 @@ def stats(
 # ---------------------------------------------------------------------------
 
 
+@app.command(name="vault-ingest")
+def vault_ingest(
+    path: str = typer.Argument(
+        "",
+        help="Obsidian vault root. Defaults to OBSIDIAN_VAULT_PATH from .env if blank.",
+    ),
+) -> None:
+    """
+    Phase 8 — Ingest an Obsidian vault as the local knowledge corpus.
+
+    Walks every .md file under the vault, parses YAML frontmatter,
+    extracts [[wikilinks]] and #tags as metadata, chunks on heading
+    boundaries, and embeds into the vector store. Re-running is safe
+    (idempotent by content hash).
+
+    Tip: drop into the same store as PDFs — retrieval merges them
+    naturally. To use the vault EXCLUSIVELY, run `researgent store reset`
+    first.
+    """
+    from pathlib import Path as _P
+    from src.config import settings
+    from src.ingest import ingest_vault
+
+    vault_path = path or (settings.obsidian_vault_path or "")
+    if not vault_path:
+        console.print(
+            "[red]No vault path provided.[/red]  Pass a path, or set "
+            "[cyan]OBSIDIAN_VAULT_PATH[/cyan] in .env"
+        )
+        raise typer.Exit(code=1)
+
+    p = _P(vault_path)
+    if not p.exists():
+        console.print(f"[red]Vault not found:[/red] {p}")
+        raise typer.Exit(code=1)
+
+    results = ingest_vault(p)
+    ok = sum(1 for r in results if "error" not in r)
+    total_chunks = sum(r.get("chunks_inserted", 0) for r in results)
+    total_tags = len({t for r in results for t in (r.get("tags") or [])})
+    total_links = sum(len(r.get("wikilinks") or []) for r in results)
+    console.print(
+        f"\n[bold green]Done.[/bold green] {ok}/{len(results)} notes ingested, "
+        f"{total_chunks} chunks, {total_tags} unique tags, {total_links} wikilinks."
+    )
+
+
 @app.command()
 def ingest(
     path: str = typer.Argument(
@@ -291,13 +338,26 @@ def research(
     k: int = typer.Option(8, help="Total chunks budget across all sub-questions"),
     run_id: str = typer.Option("", help="Stable id for checkpoint replay; auto if blank"),
     no_checkpoint: bool = typer.Option(False, help="Skip SQLite checkpointing (for tests)"),
+    save_to_vault: bool = typer.Option(
+        False,
+        "--save-to-vault",
+        help="Write the answer back as a markdown note in your Obsidian vault (Phase 8). "
+             "Requires OBSIDIAN_VAULT_PATH set in .env.",
+    ),
 ) -> None:
     """
-    Phase 3 — Run the LangGraph agent: Planner -> Retriever -> Generator.
+    Full agentic research — plan / retrieve / critique / rewrite / web /
+    paper-discovery / generate / reflect.
 
-    Decomposes complex queries into sub-questions, retrieves per sub-question
-    with hybrid (dense + BM25 + RRF), and synthesizes a structured answer
-    with grounded [S<n>] citations.
+    Decomposes complex queries into sub-questions, retrieves with hybrid
+    (dense + BM25 + RRF), grades chunks with a fast Critic, rewrites and
+    retries on low confidence, falls through arXiv+Semantic Scholar then
+    Tavily/Serper/DuckDuckGo web cascade, generates a structured answer
+    with grounded [S<n>] citations, and the Reflector audits the draft.
+
+    With --save-to-vault, the answer + sources are written as a new
+    markdown note in your Obsidian vault — frontmatter, wikilinks,
+    `#researgent` tag included.
     """
     from src.agent import run_agent
 
@@ -311,6 +371,35 @@ def research(
     if result.error:
         title += f"  [{result.error}]"
     console.print(Panel(result.formatted(), title=title, border_style="cyan"))
+
+    if save_to_vault:
+        from src.agent.vault_writer import write_run_to_vault
+        from src.config import settings
+
+        if not settings.obsidian_vault_path:
+            console.print("[red]--save-to-vault requires OBSIDIAN_VAULT_PATH in .env[/red]")
+            raise typer.Exit(code=1)
+        try:
+            note_path = write_run_to_vault(
+                vault_path=settings.obsidian_vault_path,
+                output_subfolder=settings.obsidian_output_folder,
+                question=question,
+                answer=result.answer,
+                sources=result.sources,
+                sub_questions=result.sub_questions,
+                is_complex=result.is_complex,
+                confidence=result.confidence,
+                rewrite_attempts=result.rewrite_attempts,
+                web_used=result.web_used,
+                papers_used=result.papers_used,
+                reflection_attempts=result.reflection_attempts,
+                run_id=result.run_id,
+            )
+            console.print(
+                f"\n[green]saved to vault:[/green] [cyan]{note_path}[/cyan]"
+            )
+        except Exception as e:
+            console.print(f"[red]vault write failed:[/red] {type(e).__name__}: {e}")
 
 
 @app.command()
