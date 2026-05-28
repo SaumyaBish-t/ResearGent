@@ -41,6 +41,7 @@ def web_fallback(state: AgentState) -> dict[str, Any]:
     chunks_by_subq = dict(state.get("chunks_by_subq") or {})
     timings: list[dict[str, Any]] = []
     total_added = 0
+    providers_used: set[str] = set()
 
     for sq in sub_qs:
         t0 = time.perf_counter()
@@ -57,6 +58,9 @@ def web_fallback(state: AgentState) -> dict[str, Any]:
             existing = chunks_by_subq.get(sq) or []
             chunks_by_subq[sq] = list(existing) + list(web_hits)
             total_added += len(web_hits)
+            for h in web_hits:
+                if h.provider:
+                    providers_used.add(h.provider)
 
         timings.append(
             {
@@ -64,6 +68,7 @@ def web_fallback(state: AgentState) -> dict[str, Any]:
                 "sub_q": sq[:80],
                 "query_used": query_to_use[:80],
                 "results": len(web_hits),
+                "providers": sorted({h.provider for h in web_hits if h.provider}),
                 "duration_ms": dur_ms,
             }
         )
