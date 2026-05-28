@@ -373,6 +373,9 @@ def research(
     console.print(Panel(result.formatted(), title=title, border_style="cyan"))
 
     if save_to_vault:
+        from pathlib import Path as _P
+        from urllib.parse import quote
+        import subprocess, sys
         from src.agent.vault_writer import write_run_to_vault
         from src.config import settings
 
@@ -398,6 +401,30 @@ def research(
             console.print(
                 f"\n[green]saved to vault:[/green] [cyan]{note_path}[/cyan]"
             )
+
+            # Build the obsidian:// URI and ask the OS to open it. Obsidian
+            # registers this scheme on install; the result is the new note
+            # popping open in whichever Obsidian window is active.
+            vault_root = _P(settings.obsidian_vault_path).resolve()
+            try:
+                rel = _P(note_path).resolve().relative_to(vault_root)
+                vault_name = vault_root.name
+                uri = (
+                    f"obsidian://open?vault={quote(vault_name)}"
+                    f"&file={quote(str(rel).replace(chr(92), '/'))}"
+                )
+                # OS-specific URI launcher — no extra deps.
+                if sys.platform == "win32":
+                    subprocess.Popen(["cmd", "/c", "start", "", uri], shell=False)
+                elif sys.platform == "darwin":
+                    subprocess.Popen(["open", uri])
+                else:
+                    subprocess.Popen(["xdg-open", uri])
+                console.print(f"[dim]opening in Obsidian: {uri}[/dim]")
+            except Exception:
+                # URI open is a nicety, not a critical path — never fail
+                # the command because the OS launcher returned non-zero.
+                pass
         except Exception as e:
             console.print(f"[red]vault write failed:[/red] {type(e).__name__}: {e}")
 
