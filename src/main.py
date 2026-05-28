@@ -342,8 +342,15 @@ def research(
     save_to_vault: bool = typer.Option(
         False,
         "--save-to-vault",
-        help="Write the answer back as a markdown note in your Obsidian vault (Phase 8). "
-             "Requires OBSIDIAN_VAULT_PATH set in .env.",
+        help="FORCE-save the answer to the notes folder, bypassing the "
+             "auto-save confidence gate. Useful for ad-hoc captures even "
+             "of low-confidence answers you want to keep.",
+    ),
+    no_save: bool = typer.Option(
+        False,
+        "--no-save",
+        help="Opt out of auto-save for this one query (overrides "
+             "AUTO_SAVE_TO_NOTES=true in .env).",
     ),
 ) -> None:
     """
@@ -373,66 +380,120 @@ def research(
         title += f"  [{result.error}]"
     console.print(Panel(result.formatted(), title=title, border_style="cyan"))
 
-    if save_to_vault:
+    # ---- Save policy ------------------------------------------------------
+    # Three states:
+    #   --no-save             never save this query
+    #   --save-to-vault       force-save regardless of gating
+    #   (neither)             auto-save if settings + gating allow
+    note_path = None
+    if no_save:
+        forced = False
+        attempted = False
+    elif save_to_vault:
+        forced = True
+        attempted = True
+    else:
+        forced = False
+        attempted = True  # let auto_save_run gate it
+
+    if attempted:
         from pathlib import Path as _P
         from urllib.parse import quote
         import subprocess, sys
         from src.agent.vault_writer import write_run_to_vault
+        from src.agent.save import auto_save_run, should_auto_save
         from src.config import settings
 
         notes_folder = settings.resolve_notes_folder()
         if not notes_folder:
-            console.print(
-                "[red]--save-to-vault needs a notes folder.[/red]  "
-                "Set [cyan]NOTES_FOLDER_PATH[/cyan] in .env, or put .md files in [cyan]./notes[/cyan]."
-            )
-            raise typer.Exit(code=1)
-        try:
-            note_path = write_run_to_vault(
-                vault_path=notes_folder,
-                output_subfolder=settings.obsidian_output_folder,
-                question=question,
-                answer=result.answer,
-                sources=result.sources,
-                sub_questions=result.sub_questions,
-                is_complex=result.is_complex,
-                confidence=result.confidence,
-                rewrite_attempts=result.rewrite_attempts,
-                web_used=result.web_used,
-                papers_used=result.papers_used,
-                reflection_attempts=result.reflection_attempts,
-                run_id=result.run_id,
-            )
-            console.print(
-                f"\n[green]saved to vault:[/green] [cyan]{note_path}[/cyan]"
-            )
-
-            # Build the obsidian:// URI and ask the OS to open it. Obsidian
-            # registers this scheme on install; if the user runs Obsidian on
-            # the same folder, the new note pops open in it. Harmless no-op
-            # if Obsidian isn't installed.
-            vault_root = _P(notes_folder).resolve()
-            try:
-                rel = _P(note_path).resolve().relative_to(vault_root)
-                vault_name = vault_root.name
-                uri = (
-                    f"obsidian://open?vault={quote(vault_name)}"
-                    f"&file={quote(str(rel).replace(chr(92), '/'))}"
+            if forced:
+                console.print(
+                    "[red]--save-to-vault needs a notes folder.[/red]  "
+                    "Set [cyan]NOTES_FOLDER_PATH[/cyan] in .env, or put .md files in [cyan]./notes[/cyan]."
                 )
-                # OS-specific URI launcher — no extra deps.
-                if sys.platform == "win32":
-                    subprocess.Popen(["cmd", "/c", "start", "", uri], shell=False)
-                elif sys.platform == "darwin":
-                    subprocess.Popen(["open", uri])
+                raise typer.Exit(code=1)
+            # Auto-save silently skipped — no folder configured.
+        else:
+            try:
+                if forced:
+                    note_path = write_run_to_vault(
+                        vault_path=notes_folder,
+                        output_subfolder=settings.obsidian_output_folder,
+                        question=question,
+                        answer=result.answer,
+                        sources=result.sources,
+                        sub_questions=result.sub_questions,
+                        is_complex=result.is_complex,
+                        confidence=result.confidence,
+                        rewrite_attempts=result.rewrite_attempts,
+                        web_used=result.web_used,
+                        papers_used=result.papers_used,
+                        reflection_attempts=result.reflection_attempts,
+                        run_id=result.run_id,
+                    )
                 else:
-                    subprocess.Popen(["xdg-open", uri])
-                console.print(f"[dim]opening in Obsidian: {uri}[/dim]")
-            except Exception:
-                # URI open is a nicety, not a critical path — never fail
-                # the command because the OS launcher returned non-zero.
-                pass
-        except Exception as e:
-            console.print(f"[red]vault write failed:[/red] {type(e).__name__}: {e}")
+                    note_path = auto_save_run(
+                        question=question,
+                        answer=result.answer,
+                        sources=result.sources,
+                        sub_questions=result.sub_questions,
+                        is_complex=result.is_complex,
+                        confidence=result.confidence,
+                        rewrite_attempts=result.rewrite_attempts,
+                        web_used=result.web_used,
+                        papers_used=result.papers_used,
+                        reflection_attempts=result.reflection_attempts,
+                        run_id=result.run_id,
+                        error=result.error,
+                    )
+                if note_path is None:
+                    # Auto-save was attempted but the gate rejected it.
+                    # Surface WHY so the user understands.
+                    if not forced:
+                        if result.error == "no_sources_used_llm_priors":
+                            console.print(
+                                "\n[dim]auto-save skipped:[/dim] LLM-priors answer "
+                                "(no sources to cite — would risk poisoning the brain)"
+                            )
+                        elif not should_auto_save(
+                            confidence=result.confidence, error=result.error
+                        ):
+                            console.print(
+                                f"\n[dim]auto-save skipped:[/dim] confidence "
+                                f"[yellow]{result.confidence or 'unknown'}[/yellow] "
+                                f"below threshold [cyan]{settings.auto_save_min_confidence}[/cyan]. "
+                                f"Use --save-to-vault to force, or lower "
+                                f"AUTO_SAVE_MIN_CONFIDENCE in .env."
+                            )
+                else:
+                    label = "force-saved" if forced else "auto-saved"
+                    console.print(
+                        f"\n[green]{label} to notes:[/green] [cyan]{note_path}[/cyan]"
+                    )
+
+                    # If the saved note resolves inside the vault, ask the OS
+                    # to launch the obsidian:// URI. Obsidian's URI handler
+                    # opens the note in the active window; harmless no-op
+                    # when Obsidian isn't installed.
+                    try:
+                        vault_root = _P(notes_folder).resolve()
+                        rel = _P(note_path).resolve().relative_to(vault_root)
+                        vault_name = vault_root.name
+                        uri = (
+                            f"obsidian://open?vault={quote(vault_name)}"
+                            f"&file={quote(str(rel).replace(chr(92), '/'))}"
+                        )
+                        if sys.platform == "win32":
+                            subprocess.Popen(["cmd", "/c", "start", "", uri], shell=False)
+                        elif sys.platform == "darwin":
+                            subprocess.Popen(["open", uri])
+                        else:
+                            subprocess.Popen(["xdg-open", uri])
+                    except Exception:
+                        # URI open is a nicety — never fail the command on it.
+                        pass
+            except Exception as e:
+                console.print(f"[red]vault write failed:[/red] {type(e).__name__}: {e}")
 
 
 @app.command()

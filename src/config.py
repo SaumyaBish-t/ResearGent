@@ -193,6 +193,22 @@ class Settings(BaseSettings):
     # cleanly separated from notes you wrote by hand.
     obsidian_output_folder: str = "ResearGent"
 
+    # ---- Auto-save to knowledge base ---------------------------------------
+    # When True, every research run that meets the confidence gate is
+    # written back as a note in the notes folder — the brain grows
+    # automatically without you clicking "save" each time.
+    auto_save_to_notes: bool = True
+    # Minimum Critic verdict required to auto-save. Conservative default
+    # ("high") prevents low-confidence answers from polluting the brain
+    # and propagating errors into future queries.
+    #   high     — only save when Critic was satisfied with retrieval
+    #   medium   — save unless retrieval was clearly poor
+    #   low      — save anything that produced cited sources
+    #   always   — save even thin/disagreement-flagged answers
+    # Pure-LLM-priors answers (no sources at all) are NEVER auto-saved
+    # regardless of this setting — they'd inject hallucinations.
+    auto_save_min_confidence: str = "high"
+
     def resolve_notes_folder(self) -> str | None:
         """Pick the active notes folder per the resolution order above."""
         from pathlib import Path as _P
