@@ -20,7 +20,8 @@ import time
 from typing import Any
 
 from src.agent.state import AgentState
-from src.retrieval import hybrid_retrieve
+from src.config import settings
+from src.retrieval import expand_via_wikilinks, hybrid_retrieve
 
 # Total target chunks to pass to the generator. Tunable per call from the
 # CLI; the node uses this when state doesn't carry an explicit k.
@@ -75,6 +76,54 @@ def retrieve(state: AgentState) -> dict[str, Any]:
                 "duration_ms": int((time.perf_counter() - t0) * 1000),
             }
         )
+
+    # ---- Phase 10: knowledge-graph expansion ----
+    # After direct retrieval, walk wikilink edges to surface structurally-
+    # related chunks the embedder may have ranked low. Only fires when at
+    # least one retrieved chunk carries wikilinks (i.e. came from a vault
+    # note) — pure-PDF corpora skip this entirely with no extra cost.
+    if settings.graph_expansion_enabled:
+        # Collect seeds across all sub-questions + exclude-keys so expansion
+        # doesn't re-surface chunks the retriever already has.
+        all_seeds = []
+        exclude: set[tuple[str, int]] = set()
+        for sq_chunks in chunks_by_subq.values():
+            for c in sq_chunks:
+                all_seeds.append(c)
+                exclude.add((c.source_file, c.chunk_index))
+
+        # Skip the call entirely if no seed has any wikilinks — common short-
+        # circuit that saves the store-scan cost on PDF-only retrievals.
+        any_have_links = any(
+            getattr(c, "wikilinks", None) for c in all_seeds
+        )
+        if any_have_links:
+            t0 = time.perf_counter()
+            extras = expand_via_wikilinks(
+                all_seeds,
+                max_extra=settings.graph_expansion_max_extra_chunks,
+                exclude_keys=exclude,
+            )
+            dur_ms = int((time.perf_counter() - t0) * 1000)
+            timings.append(
+                {
+                    "node": "retriever",
+                    "graph_expansion": True,
+                    "seeds_with_links": sum(
+                        1 for c in all_seeds if getattr(c, "wikilinks", None)
+                    ),
+                    "extras": len(extras),
+                    "mutual": sum(1 for e in extras if e.is_mutual),
+                    "duration_ms": dur_ms,
+                }
+            )
+            # Attach all extras under the ORIGINAL question key so the
+            # generator sees them grouped as "related context" rather than
+            # tied to a specific sub-question.
+            if extras:
+                top_key = state.get("question") or next(iter(chunks_by_subq.keys()), "")
+                if top_key:
+                    chunks_by_subq[top_key] = list(chunks_by_subq.get(top_key) or []) + extras
 
     return {"chunks_by_subq": chunks_by_subq, "trace": timings}
 

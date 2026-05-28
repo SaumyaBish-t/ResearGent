@@ -13,7 +13,7 @@ small NVIDIA-specific wart; other providers ignore the field.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from src.config import ModelTier, settings
 from src.llm import get_client
@@ -28,6 +28,10 @@ class RetrievedChunk:
     chunk_index: int
     score: float  # cosine similarity in [0, 1] (1 = identical)
     doc_title: str = ""
+    # Knowledge-graph metadata (populated only when the chunk came from a
+    # vault note that had wikilinks / tags ingested). Empty for PDF chunks.
+    wikilinks: list[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
 
     @property
     def citation(self) -> str:
@@ -70,6 +74,13 @@ def naive_retrieve(query: str, *, k: int = 5) -> list[RetrievedChunk]:
     for doc, meta, dist in zip(docs, metas, dists):
         # Chroma returns COSINE DISTANCE (1 - cos_sim) when space is "cosine".
         score = max(0.0, 1.0 - float(dist))
+        # Vault chunks store wikilinks + tags as comma-joined strings — split
+        # back into lists so downstream code (graph expansion, citation
+        # rendering) sees structured data.
+        wl_raw = meta.get("wikilinks", "") or ""
+        tg_raw = meta.get("tags", "") or ""
+        wikilinks = [w.strip() for w in wl_raw.split(",") if w.strip()]
+        tags = [t.strip() for t in tg_raw.split(",") if t.strip()]
         out.append(
             RetrievedChunk(
                 text=doc,
@@ -78,6 +89,8 @@ def naive_retrieve(query: str, *, k: int = 5) -> list[RetrievedChunk]:
                 chunk_index=int(meta.get("chunk_index", 0)),
                 doc_title=meta.get("doc_title", "") or "",
                 score=score,
+                wikilinks=wikilinks,
+                tags=tags,
             )
         )
     return out

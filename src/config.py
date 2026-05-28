@@ -162,6 +162,17 @@ class Settings(BaseSettings):
     # No env-tunable for the thresholds themselves — those are baked into the
     # Critic's prompt + parsing. The action POLICY above is the knob.
 
+    # ---- Knowledge-graph expansion (Phase 10) -----------------------------
+    # When True, retrieval results trigger a 1-hop walk along stored
+    # wikilink edges to surface STRUCTURALLY-related chunks the embedder
+    # might have ranked low. The "AI brain" behavior — your notes' link
+    # graph becomes part of retrieval, not just a UI feature in Obsidian.
+    graph_expansion_enabled: bool = True
+    # Max extra chunks added to context per query via graph expansion.
+    # Bounded to keep prompts manageable — too high and the generator
+    # drowns in tangentially-related context.
+    graph_expansion_max_extra_chunks: int = 6
+
     # ---- Obsidian vault integration (Phase 8) ------------------------------
     # Absolute path to your Obsidian vault. When set, `researgent vault-ingest`
     # walks this directory by default, and `researgent research --save-to-vault`

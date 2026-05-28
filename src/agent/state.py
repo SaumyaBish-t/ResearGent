@@ -32,12 +32,13 @@ from __future__ import annotations
 import operator
 from typing import Annotated, Any, TypedDict
 
-from src.retrieval import HybridChunk, WebChunk
+from src.retrieval import GraphChunk, HybridChunk, PaperChunk, WebChunk
 
-# A "context chunk" can come from local hybrid retrieval OR web fallback.
-# Both expose the same public interface (text, citation, signal, etc.) so the
-# generator and citation builder don't care about origin.
-ContextChunk = HybridChunk | WebChunk
+# A "context chunk" can come from local hybrid retrieval, web fallback,
+# academic paper discovery, OR knowledge-graph expansion. All four expose
+# the same public interface (text, citation, signal, source_file, ...) so
+# the generator and citation builder don't care about origin.
+ContextChunk = HybridChunk | WebChunk | PaperChunk | GraphChunk
 
 
 def _merge_chunks_by_subq(
