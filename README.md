@@ -13,10 +13,10 @@ An **Agentic Research Engine** with Corrective RAG, Self-Reflection, hybrid retr
 | **0** | Provider abstraction (5 providers) + 4 tiers + cascade fallback + observability | ✅ done |
 | **1** | Naive RAG — PDF ingest, embed, retrieve, generate with citations | ✅ done |
 | **2** | Hybrid retrieval — dense + BM25 + reciprocal rank fusion | ✅ done |
-| **3** | LangGraph agent — Planner → Retriever → Generator as stateful graph | ⏳ |
-| **4** | Corrective RAG — Critic grades chunks, rewrites queries, web fallback | ⏳ |
-| **5** | Self-Reflection — Reflector critiques drafts, re-enters the graph | ⏳ |
-| **6** | RAGAS evaluation + FastAPI streaming + React frontend | ⏳ |
+| **3** | LangGraph agent — Planner → Retriever → Generator as stateful graph | ✅ done |
+| **4** | Corrective RAG — Critic grades chunks, rewrites, **web cascade** (Tavily → Serper → DDG) | ✅ done |
+| **5** | Self-Reflection — Reflector loops back with follow-up sub-questions (bounded, deduped) | ✅ done |
+| **6** | RAGAS-style eval + FastAPI streaming + single-file web UI | ✅ done |
 
 ---
 
@@ -140,6 +140,56 @@ uv run researgent bench "What's the formula for RRF in the Cormack paper?"
 3. Top-k by RRF score is returned. Each chunk records which retriever(s) ranked it ("BOTH" / "dense" / "bm25"), making retrieval debuggable.
 
 **Why both:** dense alone misses exact terms (acronyms, product names, code identifiers); BM25 alone misses paraphrases. RRF combines them parameter-free.
+
+---
+
+## Phase 3-5 — Agent (Plan → Retrieve → Critique → Generate → Reflect)
+
+```powershell
+# Full agentic research — decomposes complex questions, hybrid-retrieves
+# per sub-question, grades chunks, rewrites/web-fallbacks on low confidence,
+# generates structured cited answer, reflects on the draft and (optionally)
+# loops back with follow-up sub-questions.
+uv run researgent research "Compare CRAG and Self-RAG"
+
+# Adjust the chunk budget shared across sub-questions
+uv run researgent research "<question>" --k 12
+
+# Replay a past run by checkpoint id
+uv run researgent research "<same question>" --run-id <previous-run-id>
+```
+
+The CRAG status line above each answer shows what the agent did:
+`_CRAG: conf=high  rewrites=1  web_fallback=YES  reflections=1_`
+
+---
+
+## Phase 6 — Evaluation, API, Web UI
+
+```powershell
+# Run a YAML test suite, compute faithfulness / relevancy / context-precision
+uv run researgent eval eval_suites/sample.yaml
+
+# Launch the FastAPI server + live web UI
+uv run researgent serve
+# -> open http://localhost:8000
+```
+
+The UI streams every agent node live via SSE — you see the planner decompose,
+the critic grade, the rewriter retry, the web fallback fire, the generator
+produce text, the reflector audit, all as it happens. The final answer
+appears with clickable `[Sn]` citations mapped to local PDFs **or** web URLs.
+
+Eval suite YAML format:
+```yaml
+name: my-suite
+queries:
+  - id: q1
+    question: "What is X?"
+    tags: [definition]
+```
+Results persist to `data/eval/runs.jsonl`, one flat row per query, ready
+for jq/pandas analysis.
 
 ---
 
