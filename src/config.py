@@ -88,9 +88,12 @@ class Settings(BaseSettings):
     # ---- Cerebras -----------------------------------------------------------
     cerebras_api_key: str | None = None
     cerebras_base_url: str = "https://api.cerebras.ai/v1"
-    cerebras_model_reasoning: str = "qwen-3-235b-a22b-instruct-2507"
+    # Cerebras model IDs vary by account access. llama-3.3-70b is universally
+    # available on the free tier; qwen3-235b often requires paid access.
+    # Override in .env if your account has additional models.
+    cerebras_model_reasoning: str = "llama-3.3-70b"
     cerebras_model_fast: str = "llama3.1-8b"
-    cerebras_model_tool: str = "qwen-3-235b-a22b-instruct-2507"
+    cerebras_model_tool: str = "llama-3.3-70b"
 
     # ---- OpenRouter ---------------------------------------------------------
     openrouter_api_key: str | None = None

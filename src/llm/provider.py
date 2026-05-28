@@ -44,14 +44,24 @@ from src.config import ModelTier, ProviderName, settings
 from src.llm import observability as obs
 
 
-# Errors that mean "transient — try the next provider in the cascade".
-# We DELIBERATELY do not retry BadRequestError / AuthenticationError — those
-# are bugs in our code or stale keys, not problems the next provider can fix.
+# Errors that mean "this provider can't serve this request — try the next".
+#
+# Includes more than just classic transient errors (429/5xx/timeout) because
+# the cascade is also a resilience layer for *configuration* mismatches:
+#   - NotFoundError (404)     -> wrong model ID for THIS provider; next one
+#                                might have the model under a different name
+#   - PermissionDeniedError   -> account doesn't have access to model on this
+#                                provider; next provider might
+#
+# We DELIBERATELY keep BadRequestError + AuthenticationError as fatal — those
+# are bugs in our code or fully-broken keys that no fallback can fix.
 _TRANSIENT_ERRORS = (
     openai.RateLimitError,
     openai.APITimeoutError,
     openai.APIConnectionError,
     openai.InternalServerError,
+    openai.NotFoundError,
+    openai.PermissionDeniedError,
 )
 
 
