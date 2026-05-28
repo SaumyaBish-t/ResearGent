@@ -33,6 +33,11 @@ dependencies = [
     "tavily-python>=0.7",              # primary web search (1000/mo free, snippet-tuned)
     "ddgs>=9.0",                       # DuckDuckGo HTML-scrape last-resort (no key, unlimited)
     # NOTE: Serper.dev uses raw HTTP via httpx (already a dep) — no extra package.
+    # ---- Phase 6: eval + API + UI ----
+    "pyyaml>=6.0",                     # eval suites are YAML for human-editable test sets
+    "fastapi>=0.115",                  # backend API
+    "uvicorn[standard]>=0.32",         # ASGI server
+    "sse-starlette>=2.1",              # Server-Sent Events for live agent streaming
 ]
 
 [project.optional-dependencies]

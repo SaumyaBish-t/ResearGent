@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ResearGent</title>
+<style>
+  * { box-sizing: border-box; }
+  :root {
+    --bg: #0e1116;
+    --bg-2: #161b22;
+    --bg-3: #1e242c;
+    --fg: #e6e8eb;
+    --fg-dim: #8b96a3;
+    --accent: #4a9eff;
+    --accent-2: #5dd39e;
+    --warn: #f6a05c;
+    --err: #ff5f56;
+    --border: #2a313a;
+    --mono: ui-monospace, "JetBrains Mono", Menlo, monospace;
+  }
+  body {
+    margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg); color: var(--fg); line-height: 1.5;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 24px; }
+  header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 16px; }
+  h1 { margin: 0; font-size: 22px; letter-spacing: -0.01em; }
+  .sub { color: var(--fg-dim); font-size: 13px; }
+  .form { display: flex; gap: 8px; margin-bottom: 12px; }
+  textarea {
+    flex: 1; padding: 10px 12px; min-height: 56px; resize: vertical;
+    background: var(--bg-2); border: 1px solid var(--border); border-radius: 6px;
+    color: var(--fg); font: inherit; font-size: 14px;
+  }
+  textarea:focus { outline: none; border-color: var(--accent); }
+  button {
+    padding: 10px 16px; min-width: 100px; background: var(--accent);
+    color: white; border: none; border-radius: 6px; cursor: pointer;
+    font-weight: 600; font-size: 14px;
+  }
+  button:hover { background: #3a8eef; }
+  button:disabled { background: var(--bg-3); color: var(--fg-dim); cursor: not-allowed; }
+  .layout { display: grid; grid-template-columns: 1fr 380px; gap: 20px; }
+  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+  .panel {
+    background: var(--bg-2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px; min-height: 100px;
+  }
+  .panel h3 { margin: 0 0 12px 0; font-size: 13px; text-transform: uppercase;
+              letter-spacing: 0.05em; color: var(--fg-dim); }
+  .answer { white-space: pre-wrap; font-size: 14.5px; }
+  .answer h2 { font-size: 16px; margin-top: 16px; margin-bottom: 8px; color: var(--accent-2); }
+  .cite { color: var(--accent); font-weight: 600; }
+  .trace { font-family: var(--mono); font-size: 12px; }
+  .step {
+    border-left: 2px solid var(--border); padding: 6px 10px; margin-bottom: 6px;
+    transition: border-color 0.2s;
+  }
+  .step.start { border-left-color: var(--accent); }
+  .step.ok { border-left-color: var(--accent-2); }
+  .step.warn { border-left-color: var(--warn); }
+  .step.err { border-left-color: var(--err); }
+  .step-name { font-weight: 600; color: var(--fg); }
+  .step-detail { color: var(--fg-dim); margin-top: 2px; }
+  .meta {
+    display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; font-family: var(--mono);
+    font-size: 11px;
+  }
+  .chip {
+    background: var(--bg-3); padding: 3px 8px; border-radius: 4px; color: var(--fg-dim);
+  }
+  .chip.web { background: rgba(93, 211, 158, 0.1); color: var(--accent-2); }
+  .chip.warn { background: rgba(246, 160, 92, 0.1); color: var(--warn); }
+  .sources { font-size: 13px; }
+  .source {
+    border-top: 1px solid var(--border); padding: 10px 0;
+  }
+  .source:first-child { border-top: none; padding-top: 0; }
+  .source-head {
+    display: flex; justify-content: space-between; gap: 8px; align-items: center;
+    margin-bottom: 4px;
+  }
+  .source-tag {
+    color: var(--accent); font-family: var(--mono); font-size: 12px; font-weight: 700;
+  }
+  .source-cite {
+    color: var(--fg-dim); font-family: var(--mono); font-size: 11px;
+    word-break: break-all; flex: 1; min-width: 0;
+  }
+  .source-cite a { color: var(--accent); text-decoration: none; }
+  .source-cite a:hover { text-decoration: underline; }
+  .source-preview {
+    color: var(--fg-dim); font-size: 12px; margin-top: 4px;
+    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .signal { font-family: var(--mono); font-size: 10px; padding: 2px 6px;
+            border-radius: 3px; background: var(--bg-3); color: var(--fg-dim); }
+  .signal.BOTH { background: rgba(74, 158, 255, 0.15); color: var(--accent); }
+  .signal[class*="web"] { background: rgba(93, 211, 158, 0.15); color: var(--accent-2); }
+  .empty { color: var(--fg-dim); font-style: italic; font-size: 13px; }
+  .sub-questions { margin: 6px 0 12px 0; font-size: 12.5px; color: var(--fg-dim); }
+  .sub-questions li { margin: 2px 0; }
+  .footer-links {
+    margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border);
+    font-size: 12px; color: var(--fg-dim); text-align: center;
+  }
+  .footer-links a { color: var(--accent); margin: 0 8px; text-decoration: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>ResearGent</h1>
+    <span class="sub">Agentic research · CRAG + Self-Reflection · live agent trace</span>
+  </header>
+
+  <div class="form">
+    <textarea id="q" placeholder="Ask anything about your indexed corpus &mdash; the agent will plan, retrieve, grade, rewrite if needed, web-fallback, generate, and reflect."></textarea>
+    <button id="go">Research</button>
+  </div>
+
+  <div class="layout">
+    <div>
+      <div class="panel" id="answer-panel">
+        <h3>Answer</h3>
+        <div class="empty" id="answer-empty">Ask a question to see the agent work.</div>
+        <ul class="sub-questions" id="sub-questions" hidden></ul>
+        <div class="meta" id="meta" hidden></div>
+        <div class="answer" id="answer" hidden></div>
+      </div>
+      <div class="panel" style="margin-top: 20px;">
+        <h3>Sources</h3>
+        <div class="empty" id="sources-empty">Source citations will appear here.</div>
+        <div class="sources" id="sources" hidden></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>Live Agent Trace</h3>
+      <div class="empty" id="trace-empty">Each node fires here as it runs.</div>
+      <div class="trace" id="trace" hidden></div>
+    </div>
+  </div>
+
+  <div class="footer-links">
+    <a href="/api/status" target="_blank">/api/status</a>
+    <a href="/api/stats" target="_blank">/api/stats</a>
+    <a href="https://github.com/SaumyaBish-t/ResearGent" target="_blank">GitHub</a>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const goBtn = $("go"), qBox = $("q");
+const answerPanel = $("answer-panel"), answerEl = $("answer"), answerEmpty = $("answer-empty");
+const metaEl = $("meta"), subQsEl = $("sub-questions");
+const sourcesEl = $("sources"), sourcesEmpty = $("sources-empty");
+const traceEl = $("trace"), traceEmpty = $("trace-empty");
+
+let evtSrc = null;
+
+function reset() {
+  answerEl.textContent = ""; answerEl.hidden = true; answerEmpty.hidden = false;
+  metaEl.innerHTML = ""; metaEl.hidden = true;
+  subQsEl.innerHTML = ""; subQsEl.hidden = true;
+  sourcesEl.innerHTML = ""; sourcesEl.hidden = true; sourcesEmpty.hidden = false;
+  traceEl.innerHTML = ""; traceEl.hidden = true; traceEmpty.hidden = false;
+}
+
+function addTrace(node, summary, cls = "ok") {
+  traceEmpty.hidden = true; traceEl.hidden = false;
+  const div = document.createElement("div");
+  div.className = `step ${cls}`;
+  const name = document.createElement("div");
+  name.className = "step-name";
+  name.textContent = node;
+  const detail = document.createElement("div");
+  detail.className = "step-detail";
+  detail.textContent = summary;
+  div.appendChild(name);
+  div.appendChild(detail);
+  traceEl.appendChild(div);
+}
+
+function summarizeNode(node, s) {
+  if (!s) return "";
+  switch (node) {
+    case "planner":
+      return `is_complex=${s.is_complex}  sub_q=${(s.sub_questions || []).length}`;
+    case "retriever":
+      return `chunks=${s.total_chunks ?? "?"}`;
+    case "critic":
+      const g = s.grades || {};
+      return `verdict=${s.confidence}  in=${s.chunks_in} kept=${s.chunks_kept}  ` +
+             `(rel=${g.relevant || 0} part=${g.partial || 0} irr=${g.irrelevant || 0})`;
+    case "rewriter":
+      return `attempt=${s.rewrite_attempt}  rewrote=${s.rewritten_count}`;
+    case "web_fallback":
+      return `+${s.web_chunks_added} chunks  providers=[${(s.providers_used || []).join(",")}]`;
+    case "generator":
+      return `${s.answer_chars} chars  n_sources=${s.n_sources}`;
+    case "reflector":
+      return `attempt=${s.attempt}  gaps_found=${s.gaps_found}  ` +
+             `follow_ups=${(s.follow_ups || []).length}`;
+    case "no_answer":
+      return `reason=${s.reason}`;
+  }
+  return JSON.stringify(s);
+}
+
+function nodeClass(node, s) {
+  if (node === "no_answer") return "err";
+  if (node === "web_fallback") return "warn";
+  if (node === "rewriter") return "warn";
+  if (node === "critic" && s && s.confidence === "low") return "warn";
+  return "ok";
+}
+
+function renderFinal(data) {
+  // Sub-questions
+  if ((data.sub_questions || []).length > 1) {
+    subQsEl.innerHTML = "";
+    const label = document.createElement("li");
+    label.textContent = "Decomposed into:";
+    label.style.color = "var(--fg)";
+    label.style.listStyle = "none";
+    label.style.marginBottom = "4px";
+    subQsEl.appendChild(label);
+    for (const sq of data.sub_questions) {
+      const li = document.createElement("li");
+      li.textContent = sq;
+      subQsEl.appendChild(li);
+    }
+    subQsEl.hidden = false;
+  }
+
+  // CRAG/Reflection chips
+  const chips = [];
+  if (data.confidence) chips.push({ text: `conf=${data.confidence}`, cls: "" });
+  if (data.rewrite_attempts) chips.push({ text: `rewrites=${data.rewrite_attempts}`, cls: "warn" });
+  if (data.web_used) chips.push({ text: "web_fallback=YES", cls: "web" });
+  if (data.reflection_attempts) chips.push({ text: `reflections=${data.reflection_attempts}`, cls: "" });
+  if (chips.length) {
+    metaEl.innerHTML = chips.map(c =>
+      `<span class="chip ${c.cls}">${c.text}</span>`
+    ).join("");
+    metaEl.hidden = false;
+  }
+
+  // Answer with [Sn] -> clickable
+  answerEmpty.hidden = true; answerEl.hidden = false;
+  const html = (data.answer || "").replace(/\[(S\d+)\]/g,
+    '<span class="cite">[$1]</span>');
+  answerEl.innerHTML = html;
+
+  // Sources
+  sourcesEmpty.hidden = true; sourcesEl.hidden = false;
+  sourcesEl.innerHTML = "";
+  for (const s of (data.sources || [])) {
+    const div = document.createElement("div");
+    div.className = "source";
+    const isUrl = (s.citation || "").startsWith("http");
+    const citeHtml = isUrl
+      ? `<a href="${s.citation}" target="_blank" rel="noopener">${s.citation}</a>`
+      : s.citation;
+    const scoreText = s.rrf_score != null
+      ? `rrf=${s.rrf_score.toFixed(4)}`
+      : (s.score != null ? `score=${s.score.toFixed(2)}` : "");
+    div.innerHTML = `
+      <div class="source-head">
+        <span class="source-tag">[${s.tag}]</span>
+        <span class="source-cite">${citeHtml}</span>
+        <span class="signal ${s.signal.replace(/[^A-Za-z]/g, "")}">${s.signal}</span>
+      </div>
+      <div class="source-preview">${s.preview || ""}</div>
+      <div style="font-family: var(--mono); font-size: 10px; color: var(--fg-dim); margin-top: 2px;">${scoreText}</div>
+    `;
+    sourcesEl.appendChild(div);
+  }
+}
+
+function research() {
+  const q = qBox.value.trim();
+  if (!q) return;
+  if (evtSrc) evtSrc.close();
+  reset();
+  goBtn.disabled = true; goBtn.textContent = "Working…";
+
+  const url = `/api/research?q=${encodeURIComponent(q)}&k=8`;
+  evtSrc = new EventSource(url);
+
+  evtSrc.addEventListener("run_started", (e) => {
+    const d = JSON.parse(e.data);
+    addTrace("run_started", `run_id=${d.run_id}`, "start");
+  });
+
+  evtSrc.addEventListener("node_complete", (e) => {
+    const d = JSON.parse(e.data);
+    addTrace(d.node, summarizeNode(d.node, d.summary), nodeClass(d.node, d.summary));
+  });
+
+  evtSrc.addEventListener("final", (e) => {
+    const d = JSON.parse(e.data);
+    renderFinal(d);
+    addTrace("done", `${(d.sources || []).length} sources, ${(d.answer || "").length} chars`, "ok");
+    cleanup();
+  });
+
+  evtSrc.addEventListener("error", (e) => {
+    let msg = "stream error";
+    try { msg = JSON.parse(e.data).error || msg; } catch {}
+    addTrace("error", msg, "err");
+    cleanup();
+  });
+}
+
+function cleanup() {
+  if (evtSrc) { evtSrc.close(); evtSrc = null; }
+  goBtn.disabled = false; goBtn.textContent = "Research";
+}
+
+goBtn.addEventListener("click", research);
+qBox.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) research();
+});
+</script>
+</body>
+</html>
