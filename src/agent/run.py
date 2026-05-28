@@ -36,6 +36,10 @@ class AgentResult:
     rewrite_attempts: int = 0
     web_used: bool = False
     rewritten_queries: dict[str, str] | None = None
+    # Phase 5 additions
+    reflection_attempts: int = 0
+    reflection_gaps: list[str] | None = None
+    reflection_follow_ups: list[str] | None = None
     error: str | None = None
 
     def formatted(self) -> str:
@@ -49,7 +53,7 @@ class AgentResult:
                 lines.append(f"  ({self.planner_reasoning})")
             lines.append("")
 
-        # CRAG status line — only when there's something noteworthy
+        # CRAG + Reflection status line — only when there's something noteworthy
         crag_flags = []
         if self.confidence:
             crag_flags.append(f"conf={self.confidence}")
@@ -57,8 +61,20 @@ class AgentResult:
             crag_flags.append(f"rewrites={self.rewrite_attempts}")
         if self.web_used:
             crag_flags.append("web_fallback=YES")
+        if self.reflection_attempts:
+            crag_flags.append(f"reflections={self.reflection_attempts}")
         if crag_flags:
             lines.append(f"_CRAG: {'  '.join(crag_flags)}_")
+            lines.append("")
+
+        # Show reflection diagnostics when the Reflector actually triggered a loop
+        if self.reflection_follow_ups:
+            lines.append("_Reflector found gaps and added follow-up sub-questions:_")
+            for fu in self.reflection_follow_ups:
+                lines.append(f"  + {fu}")
+            if self.reflection_gaps:
+                for g in self.reflection_gaps:
+                    lines.append(f"    (gap: {g})")
             lines.append("")
 
         lines.append(self.answer)
@@ -131,5 +147,8 @@ def run_agent(
         rewrite_attempts=int(final.get("rewrite_attempts") or 0),
         web_used=bool(final.get("web_used")),
         rewritten_queries=final.get("rewritten_queries") or {},
+        reflection_attempts=int(final.get("reflection_attempts") or 0),
+        reflection_gaps=final.get("reflection_gaps") or [],
+        reflection_follow_ups=final.get("reflection_follow_ups") or [],
         error=final.get("error"),
     )

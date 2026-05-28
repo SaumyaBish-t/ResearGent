@@ -79,6 +79,17 @@ class AgentState(TypedDict, total=False):
     # ---- Web fallback (Phase 4) ----
     web_used: bool
 
+    # ---- Self-reflection (Phase 5) ----
+    # How many times the Reflector has triggered a loopback. Bounded by
+    # settings.reflection_max_iterations to prevent infinite refinement loops.
+    reflection_attempts: int
+    # One-line gap descriptions surfaced by the latest Reflector pass — kept
+    # for trace/display so users can see WHY a reflection loop triggered.
+    reflection_gaps: list[str]
+    # Follow-up sub-questions appended to sub_questions on the latest loop.
+    # Surfaced separately so the AgentResult formatter can show what changed.
+    reflection_follow_ups: list[str]
+
     # ---- Generator outputs ----
     draft_answer: str
     citation_map: dict[str, ContextChunk]
