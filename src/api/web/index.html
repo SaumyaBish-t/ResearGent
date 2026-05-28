@@ -305,6 +305,12 @@ function research() {
     const d = JSON.parse(e.data);
     renderFinal(d);
     addTrace("done", `${(d.sources || []).length} sources, ${(d.answer || "").length} chars`, "ok");
+    // Don't cleanup yet — a `saved` event may follow if auto-save fires.
+  });
+
+  evtSrc.addEventListener("saved", (e) => {
+    const d = JSON.parse(e.data);
+    addTrace("auto-saved", d.path || "", "ok");
     cleanup();
   });
 
@@ -314,6 +320,13 @@ function research() {
     addTrace("error", msg, "err");
     cleanup();
   });
+
+  // Some servers won't emit `saved` (auto-save off, or run hit `error`).
+  // The EventSource closes naturally on stream end; cleanup() runs from
+  // the close handler below as a safety net so the UI doesn't stay
+  // "Working…" forever.
+  evtSrc.addEventListener("end", () => cleanup());
+  evtSrc.onerror = () => cleanup();
 }
 
 function cleanup() {

@@ -190,3 +190,30 @@ def stream_agent(
         "error": final_state.get("error"),
         "ts": time.time(),
     }
+
+    # ---- Auto-save (optional, gated by confidence) ----
+    # If the user has auto_save_to_notes enabled and the run cleared the
+    # quality gate, persist it to the notes folder right here in the
+    # stream so the browser learns the saved path via an SSE event.
+    from src.agent.save import auto_save_run
+
+    saved_path = auto_save_run(
+        question=question,
+        answer=final_state.get("draft_answer") or "",
+        sources=final_state.get("citation_map") or {},
+        sub_questions=final_state.get("sub_questions") or [question],
+        is_complex=bool(final_state.get("is_complex")),
+        confidence=final_state.get("confidence") or "",
+        rewrite_attempts=int(final_state.get("rewrite_attempts") or 0),
+        web_used=bool(final_state.get("web_used")),
+        papers_used=bool(final_state.get("papers_used")),
+        reflection_attempts=int(final_state.get("reflection_attempts") or 0),
+        run_id=rid,
+        error=final_state.get("error"),
+    )
+    if saved_path is not None:
+        yield {
+            "type": "saved",
+            "path": str(saved_path),
+            "ts": time.time(),
+        }
