@@ -119,19 +119,29 @@ def _route_after_reflector(state: AgentState) -> str:
     """
     Phase 5 decision point — accept the draft or loop back for more retrieval.
 
-    Loop back IFF:
+    Loop back IFF ALL of:
       - Reflector flagged gaps AND produced actionable follow-up questions
-      - We're under the reflection_max_iterations budget
-    Otherwise END the run.
+      - We're strictly under the audit budget (< not <=, so max N means
+        exactly N audit calls)
+      - Total sub-questions wouldn't blow past the hard ceiling — runaway
+        decomposition is worse than an imperfect answer
 
-    Note: the reflector node itself already cleared `gaps_found` if no
-    follow-ups were produced, so we just check the follow-ups list here.
+    Otherwise END the run.
     """
     follow_ups = state.get("reflection_follow_ups") or []
     attempts = int(state.get("reflection_attempts") or 0)
-    if follow_ups and attempts <= settings.reflection_max_iterations:
-        return "retriever"
-    return "end"
+    existing_subq_count = len(state.get("sub_questions") or [])
+
+    # Strict < — max=2 means exactly 2 reflector audits, 1 loopback.
+    if not follow_ups or attempts >= settings.reflection_max_iterations:
+        return "end"
+
+    # Hard cap on sub-question explosion. Without this, each loop adds N
+    # follow-ups and the retriever + critic costs grow super-linearly.
+    if existing_subq_count > settings.reflection_max_subq_total:
+        return "end"
+
+    return "retriever"
 
 
 def build_graph(use_checkpointer: bool = True):

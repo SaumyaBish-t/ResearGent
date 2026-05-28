@@ -39,46 +39,56 @@ import time
 from typing import Any
 
 from src.agent.state import AgentState, ContextChunk
-from src.config import ModelTier
+from src.config import ModelTier, settings
 from src.llm import chat
 
 
-_SYSTEM = """You are a strict research-answer auditor. Given:
+_SYSTEM = """You are a STRICT and CONSERVATIVE research-answer auditor. Given:
   - The user's ORIGINAL question
   - The assistant's DRAFT answer
   - The numbered EVIDENCE sources [S1], [S2], ... used in the draft
+  - The list of sub-questions already covered (DO NOT propose follow-ups \
+    that are slight rewordings of these)
 
-Decide whether the draft has IMPORTANT GAPS that a follow-up retrieval pass \
-could fix.
+YOUR DEFAULT IS TO ACCEPT THE DRAFT. Only flag gaps when you have HIGH \
+CONFIDENCE that BOTH:
+  (a) the missing info is plausibly in the corpus or on the public web, AND
+  (b) a SPECIFIC, differently-phrased follow-up would surface it.
 
-What counts as a GAP (trigger reflection):
-  - The draft asserts a specific claim that NO cited evidence supports
-  - The original question explicitly asks about a sub-topic the draft \
-    doesn't cover at all
-  - Two cited sources disagree on a factual point and the draft picks one \
-    without acknowledging the contradiction
-  - The draft hedges ("the sources don't say X") but X could plausibly be \
-    answered by a different retrieval (e.g. rephrasing, different sub-topic)
+What counts as a REAL gap (trigger reflection):
+  - The draft makes a specific factual claim that NO cited evidence supports
+  - The original question has a clear sub-topic the draft completely ignored
+  - Two cited sources directly contradict each other and the draft picks \
+    one without noting the disagreement
 
 What does NOT count as a gap (DO NOT trigger reflection):
-  - Stylistic preferences (could be more concise, more bullet-list, etc.)
-  - Things the user didn't ask about
-  - Honest "I don't know" when the corpus genuinely lacks the info AND \
-    you cannot think of a more targeted query that would find it
-  - The web fallback was already used and still returned thin results
+  - Stylistic preferences (concision, formatting, tone)
+  - Topics the user didn't actually ask about
+  - HONEST HEDGES like "the sources don't provide X" when the corpus \
+    genuinely lacks X. These are CORRECT — accept them.
+  - Asking for "more detail" / "specific examples" / "specific conditions" \
+    when the draft already cites the most relevant material in the corpus
+  - Follow-ups that are slight rewordings of existing sub-questions \
+    (adding "recent research studies" / "according to technical reports" / \
+     "specific conditions" / "different scenarios" does NOT make a new \
+     sub-question — it's the same query with cosmetic decoration)
+  - Asking for info that the web fallback already failed to find
 
-If you flag a gap, propose 1-3 SPECIFIC follow-up sub-questions that \
-would fill it. Each follow-up should:
-  - Name a specific entity, concept, or claim to look for
-  - Be retrieval-friendly (concrete terms, not vague pronouns)
-  - Be different from the existing sub-questions
+When in doubt, ACCEPT. A reasonable answer with one honest gap is far \
+better than wasting retrievals chasing info that doesn't exist.
+
+If you flag a gap, propose AT MOST 2 follow-up sub-questions. Each must:
+  - Name a SPECIFIC concrete entity / concept / number to look for
+  - Be MEANINGFULLY DIFFERENT from every existing sub-question (a different \
+    angle, not a synonym shuffle)
+  - Be retrieval-friendly (concrete terms, no vague pronouns)
 
 Output ONLY a JSON object, no preamble, no markdown fence:
 {
   "gaps_found": true | false,
   "gap_descriptions": ["one-line description of gap 1", ...],
   "follow_up_questions": ["specific retrieval-friendly question 1", ...],
-  "reasoning": "one short paragraph summarizing your audit"
+  "reasoning": "one short paragraph; START with 'ACCEPT:' or 'GAP:'"
 }
 
 If gaps_found is false, both arrays should be empty."""
@@ -175,16 +185,58 @@ Now audit the draft. Return JSON only."""
     gap_descs = parsed.get("gap_descriptions") or []
     follow_ups_raw = parsed.get("follow_up_questions") or []
 
-    # Normalize + dedupe follow-ups against existing sub-questions (case-insensitive).
+    # Normalize + dedupe follow-ups. Two passes:
+    #  1. Exact case-insensitive match against existing sub-questions
+    #  2. Token-overlap heuristic — drop a follow-up if >=70% of its
+    #     content words already appear in an existing sub-q (catches
+    #     "specific conditions for X" vs "X under specific conditions")
+    def _content_tokens(s: str) -> set[str]:
+        # Drop function words + punctuation; keep meaningful tokens
+        stop = {"what", "how", "the", "is", "are", "of", "for", "in", "to",
+                "and", "or", "a", "an", "do", "does", "did", "be", "with",
+                "when", "where", "which", "that", "this", "these", "those",
+                "by", "on", "at", "as", "into", "from", "their", "its",
+                "specific", "according", "different", "various", "such",
+                "based", "any", "all", "some"}
+        toks = set()
+        for raw in re.findall(r"[A-Za-z][A-Za-z0-9_-]+", s.lower()):
+            if raw not in stop and len(raw) > 2:
+                toks.add(raw)
+        return toks
+
     existing_lower = {s.strip().lower() for s in existing_sub_qs}
+    existing_token_sets = [_content_tokens(s) for s in existing_sub_qs]
+
     follow_ups: list[str] = []
+    max_per_loop = settings.reflection_max_follow_ups_per_loop
+
     for q in follow_ups_raw:
         if not isinstance(q, str):
             continue
         q = q.strip()
-        if q and q.lower() not in existing_lower:
-            follow_ups.append(q)
-            existing_lower.add(q.lower())
+        if not q:
+            continue
+        if q.lower() in existing_lower:
+            continue
+
+        # Token-overlap check — catches near-duplicates the LLM produces by
+        # adding cosmetic phrases like "specific conditions" or "according
+        # to recent studies".
+        q_tokens = _content_tokens(q)
+        if q_tokens:
+            is_near_dup = any(
+                (len(q_tokens & ex_tokens) / max(len(q_tokens), 1)) >= 0.7
+                for ex_tokens in existing_token_sets
+                if ex_tokens
+            )
+            if is_near_dup:
+                continue
+
+        follow_ups.append(q)
+        existing_lower.add(q.lower())
+        existing_token_sets.append(q_tokens)
+        if len(follow_ups) >= max_per_loop:
+            break
 
     # If gaps_found but the model returned NO valid follow-ups, treat as no
     # actionable gaps — looping back without new questions would be pointless.

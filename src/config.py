@@ -163,10 +163,22 @@ class Settings(BaseSettings):
     # Critic's prompt + parsing. The action POLICY above is the knob.
 
     # ---- Self-reflection (Phase 5) -----------------------------------------
-    # Max times the Reflector can loop back with follow-up sub-questions.
-    # Each loop costs: 1 retriever + 1 critic + 1 generator + 1 reflector pass.
-    # 2 is the sweet spot — beyond that gains plateau and latency multiplies.
+    # Max TOTAL Reflector audit calls (= 1 initial audit + (N-1) loopbacks).
+    # Default 2 means: generator runs, reflector audits, ONE loopback allowed,
+    # generator runs again, reflector audits again, accept. Total reflector
+    # calls = 2, total generator calls = 2. Strictly bounded.
     reflection_max_iterations: int = 2
+
+    # Hard ceiling on total sub-questions to prevent runaway decomposition.
+    # Without this, each reflection loop adds K follow-ups and the retriever
+    # + critic costs grow super-linearly. 8 is comfortable for academic
+    # research questions (4-axis comparison + a couple of follow-ups).
+    reflection_max_subq_total: int = 8
+
+    # Max follow-up questions the Reflector can add per loopback. Tighter
+    # than what the prompt asks for ("1-3") so a misbehaving model can't
+    # blow out the sub-question count in one shot.
+    reflection_max_follow_ups_per_loop: int = 2
 
     # ---- Observability ------------------------------------------------------
     # Logs every chat()/embed() call to a JSONL file. Surface via `researgent stats`.

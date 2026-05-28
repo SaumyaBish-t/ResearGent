@@ -28,15 +28,41 @@ DEFAULT_TOTAL_K = 8
 
 
 def retrieve(state: AgentState) -> dict[str, Any]:
-    """Retrieve chunks for every sub-question. Returns merged state-update."""
+    """
+    Retrieve chunks for every sub-question — IDEMPOTENT.
+
+    Skips sub-questions that already have chunks in state. This matters most
+    on reflection-loopbacks: when Phase 5's Reflector adds 2 new sub-Qs to
+    an existing list of 4, we should only retrieve for the 2 new ones, not
+    re-do the 4 already-answered ones. Without this, each loop's retrieve
+    + critic cost grows linearly with the cumulative sub-question count.
+
+    The chunks for an existing sub-Q are deterministic (same hybrid_retrieve
+    with same query = same chunks) so skipping is safe.
+    """
     sub_qs = state.get("sub_questions") or [state["question"]]
     total_k = int(state.get("k") or DEFAULT_TOTAL_K)  # type: ignore[arg-type]
     per_subq_k = max(2, math.ceil(total_k / max(1, len(sub_qs))))
 
-    chunks_by_subq: dict[str, list] = {}
+    # Identify which sub-Qs need fresh retrieval. An existing sub-Q is "done"
+    # if it already has at least one chunk in chunks_by_subq.
+    existing = dict(state.get("chunks_by_subq") or {})
+    to_retrieve = [sq for sq in sub_qs if not existing.get(sq)]
+    skipped = [sq for sq in sub_qs if existing.get(sq)]
+
+    chunks_by_subq: dict[str, list] = dict(existing)
     timings: list[dict[str, Any]] = []
 
-    for sq in sub_qs:
+    if skipped:
+        timings.append(
+            {
+                "node": "retriever",
+                "skipped_idempotent": len(skipped),
+                "to_retrieve": len(to_retrieve),
+            }
+        )
+
+    for sq in to_retrieve:
         t0 = time.perf_counter()
         hits = hybrid_retrieve(sq, k=per_subq_k)
         chunks_by_subq[sq] = hits
