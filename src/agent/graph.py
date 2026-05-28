@@ -63,8 +63,19 @@ def _route_after_critic(state: AgentState) -> str:
     medium + retry -> rewriter  (we can do better, try once more)
     low + retry    -> rewriter  (definitely missing; rewrite + try again)
     medium/low + no retries left:
-      - some chunks survived -> generator (best effort with what we have)
-      - no chunks survived   -> web_fallback (last resort)
+      - web not used AND tavily key set -> web_fallback (corpus failed us)
+      - web already used / no key       -> generator (best effort with surviving chunks)
+                                           or no_answer (if nothing survived)
+
+    Why prefer web over best-effort generator
+    -----------------------------------------
+    Earlier policy went to generator whenever ANY chunks survived. But "medium"
+    after 2 rewrites means the Critic explicitly said "these chunks don't
+    really answer the question." Producing an answer from them either:
+      a) hallucinates a connection that isn't there, or
+      b) says "I don't know" with a confident citation footer
+    Both are worse than trying the web first. The web result might still be
+    bad, but at least we tried the right tool.
     """
     conf = state.get("confidence") or "low"
     attempts = int(state.get("rewrite_attempts") or 0)
@@ -76,11 +87,18 @@ def _route_after_critic(state: AgentState) -> str:
     if attempts < max_rewrites:
         return "rewriter"
 
-    # Budget exhausted.
+    # Budget exhausted with non-high confidence.
+    web_already_tried = bool(state.get("web_used"))
+    have_web_key = bool(settings.tavily_api_key)
+
+    if not web_already_tried and have_web_key:
+        return "web_fallback"
+
+    # Best effort: surviving chunks or graceful no_answer.
     chunks_by_subq = state.get("chunks_by_subq") or {}
     if any(chunks_by_subq.values()):
-        return "generator"  # best effort
-    return "web_fallback"
+        return "generator"
+    return "web_fallback"  # last desperate try (returns empty if no key, then no_answer)
 
 
 def _route_after_web(state: AgentState) -> str:

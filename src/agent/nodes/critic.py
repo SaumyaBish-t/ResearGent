@@ -51,17 +51,40 @@ from src.config import ModelTier
 from src.llm import chat
 
 
-_SYSTEM = """You are a strict chunk-relevance grader for a research assistant.
+_SYSTEM = """You are a STRICT chunk-relevance grader for a research assistant.
 
-For each numbered chunk, decide whether it is:
-  - "relevant"   : directly answers (or substantially contributes to) the question
-  - "partial"    : touches the topic but doesn't answer; could support a thorough answer
-  - "irrelevant" : same domain but doesn't address this specific question
+For each numbered chunk, decide:
+  - "relevant"   : the chunk contains specific information that would directly \
+appear in (or substantially support) an answer to the question. Named entities, \
+dates, numbers, definitions, or claims that match the question's specifics.
+  - "partial"    : the chunk discusses concepts adjacent to the question but \
+does not contain specific evidence for it. Useful only as supplementary context.
+  - "irrelevant" : the chunk is on a different topic, a different entity, a \
+different event, or a different time period than the question asks about. \
+**Same general domain or research area does NOT make a chunk relevant.**
+
+Be SKEPTICAL by default. A chunk gets "relevant" ONLY if you can point to a \
+specific sentence or fact in it that directly addresses the question. If the \
+question asks about a specific entity / date / event / person / version not \
+mentioned in the chunk, grade it "irrelevant" — do NOT grade as "partial" \
+just because the chunk is in a similar field.
+
+Examples of correct grading:
+  Q: "Who won the 2026 Nobel Prize in Physics?"
+    chunk about retrieval-augmented generation     -> irrelevant (different topic)
+    chunk listing US state names                    -> irrelevant (different topic)
+    chunk about the 2025 Nobel Chemistry award     -> irrelevant (different prize/year)
+    chunk that names the 2026 Physics laureates    -> relevant
+
+  Q: "How does Self-RAG handle low-confidence retrieval?"
+    chunk defining Self-RAG's reflection tokens    -> partial (related mechanism)
+    chunk explaining Self-RAG's retrieval gating   -> relevant (direct answer)
+    chunk about CRAG's retrieval evaluator         -> irrelevant (different method)
 
 Output ONLY a JSON object, no preamble, no markdown fence:
 {
   "grades": ["relevant" | "partial" | "irrelevant", ...],
-  "reasoning": "one short sentence summarizing the overall retrieval quality"
+  "reasoning": "one short sentence summarizing what's relevant and what's missing"
 }
 
 `grades` MUST have exactly the same length as the number of chunks provided, \
@@ -132,14 +155,29 @@ def _grade_one_subq(sub_q: str, chunks: list[ContextChunk]) -> tuple[list[str], 
 
 
 def _derive_verdict(all_grades: list[str]) -> str:
-    """Deterministic confidence verdict from grades. See module docstring."""
+    """
+    Deterministic confidence verdict from grades.
+
+    Tightened policy (Phase 4 v2) — both percentage AND absolute count matter:
+      high   = (>=60% relevant AND >=3 absolute) OR (>=4 absolute relevant)
+      medium = (>=25% relevant AND >=2 absolute)
+      low    = otherwise (incl. empty)
+
+    The absolute floor is what fixes the "2 of 4 relevant -> high" failure
+    mode where small-batch retrieval over-confidently passed thin evidence
+    straight to the generator. With <3 absolute relevant chunks the agent
+    will rewrite or fall through to web_fallback instead of blessing the
+    answer.
+    """
     if not all_grades:
         return "low"
+    n = len(all_grades)
     relevant_n = sum(1 for g in all_grades if g == "relevant")
-    frac = relevant_n / len(all_grades)
-    if frac >= 0.5:
+    frac = relevant_n / n
+
+    if relevant_n >= 4 or (frac >= 0.6 and relevant_n >= 3):
         return "high"
-    if frac >= 0.2:
+    if relevant_n >= 2 and frac >= 0.25:
         return "medium"
     return "low"
 
