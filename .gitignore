@@ -17,6 +17,19 @@ __pycache__/
 # uv
 .uv/
 
+# Personal notes — your knowledge base is YOURS, never committed.
+# We ship only the README + examples; everything else is excluded.
+notes/*
+!notes/README.md
+!notes/_examples/
+!notes/_examples/**
+!notes/concepts/
+!notes/concepts/.gitkeep
+!notes/projects/
+!notes/projects/.gitkeep
+!notes/sources/
+!notes/sources/.gitkeep
+
 # Data — never commit corpora, vector stores, or downloaded papers
 data/papers/*
 !data/papers/.gitkeep
