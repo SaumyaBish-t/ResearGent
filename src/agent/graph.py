@@ -45,6 +45,8 @@ from langgraph.graph import END, START, StateGraph
 from src.agent.nodes import (
     critic,
     generator,
+    llm_reasoning,
+    paper_discovery,
     planner,
     reflector,
     retriever,
@@ -65,25 +67,25 @@ def _route_after_retriever(state: AgentState) -> str:
 
 def _route_after_critic(state: AgentState) -> str:
     """
-    The CRAG decision point.
+    The CRAG decision point (Phase 7 extends Phase 4's logic).
 
-    high           -> generator (corpus is sufficient, ship it)
-    medium + retry -> rewriter  (we can do better, try once more)
-    low + retry    -> rewriter  (definitely missing; rewrite + try again)
-    medium/low + no retries left:
-      - web not used AND tavily key set -> web_fallback (corpus failed us)
-      - web already used / no key       -> generator (best effort with surviving chunks)
-                                           or no_answer (if nothing survived)
+    high                  -> generator  (corpus is sufficient, ship it)
+    medium + budget left  -> rewriter   (we can do better, try once more)
+    low + budget left     -> rewriter   (definitely missing; rewrite + retry)
+    medium/low + exhausted:
+      - papers not yet tried + enabled -> paper_discovery  (academic literature)
+      - web not yet tried + key set    -> web_fallback     (recent advances)
+      - both failed but chunks survive -> generator        (best effort)
+      - everything empty               -> web_fallback     (last desperate try)
 
-    Why prefer web over best-effort generator
-    -----------------------------------------
-    Earlier policy went to generator whenever ANY chunks survived. But "medium"
-    after 2 rewrites means the Critic explicitly said "these chunks don't
-    really answer the question." Producing an answer from them either:
-      a) hallucinates a connection that isn't there, or
-      b) says "I don't know" with a confident citation footer
-    Both are worse than trying the web first. The web result might still be
-    bad, but at least we tried the right tool.
+    Priority order for fallbacks (NEW in Phase 7):
+      paper_discovery -> web_fallback -> generator -> llm_reasoning
+
+    Why papers BEFORE web
+    ---------------------
+    For technical/research questions, peer-reviewed (or pre-print) abstracts
+    are denser + more authoritative than web snippets. arXiv + Semantic
+    Scholar are free with no quota concerns vs Tavily's 1000/mo budget.
     """
     conf = state.get("confidence") or "low"
     attempts = int(state.get("rewrite_attempts") or 0)
@@ -95,24 +97,42 @@ def _route_after_critic(state: AgentState) -> str:
     if attempts < max_rewrites:
         return "rewriter"
 
-    # Budget exhausted with non-high confidence.
+    # Budget exhausted with non-high confidence — escalate through fallbacks.
+
+    # 1. Try academic paper discovery first (free, dense, authoritative).
+    papers_tried = bool(state.get("papers_used"))
+    if not papers_tried and settings.paper_discovery_enabled:
+        return "paper_discovery"
+
+    # 2. Then web fallback for recent / general content.
     web_already_tried = bool(state.get("web_used"))
     have_web_key = bool(settings.tavily_api_key)
-
     if not web_already_tried and have_web_key:
         return "web_fallback"
 
-    # Best effort: surviving chunks or graceful no_answer.
+    # 3. Best effort: surviving chunks or graceful next step.
     chunks_by_subq = state.get("chunks_by_subq") or {}
     if any(chunks_by_subq.values()):
         return "generator"
-    return "web_fallback"  # last desperate try (returns empty if no key, then no_answer)
+
+    # 4. Last-desperate web try (returns empty if no key, then routes to
+    # no_answer / llm_reasoning).
+    return "web_fallback"
 
 
 def _route_after_web(state: AgentState) -> str:
-    """After web fallback: if we now have ANY chunks, generate; else no_answer."""
+    """
+    After web fallback. Three outcomes:
+      - chunks present                 -> generator
+      - empty + llm_reasoning enabled  -> llm_reasoning (LAST-RESORT priors)
+      - empty + llm_reasoning disabled -> no_answer (graceful "I don't know")
+    """
     chunks_by_subq = state.get("chunks_by_subq") or {}
-    return "generator" if any(chunks_by_subq.values()) else "no_answer"
+    if any(chunks_by_subq.values()):
+        return "generator"
+    if settings.llm_reasoning_fallback_enabled:
+        return "llm_reasoning"
+    return "no_answer"
 
 
 def _route_after_reflector(state: AgentState) -> str:
@@ -159,6 +179,9 @@ def build_graph(use_checkpointer: bool = True):
     g.add_node("web_fallback", web_fallback.web_fallback)
     # Phase 5 node
     g.add_node("reflector", reflector.reflect)
+    # Phase 7 nodes — open-domain
+    g.add_node("paper_discovery", paper_discovery.discover)
+    g.add_node("llm_reasoning", llm_reasoning.reason)
 
     g.add_edge(START, "planner")
     g.add_edge("planner", "retriever")
@@ -173,16 +196,27 @@ def build_graph(use_checkpointer: bool = True):
         {
             "generator": "generator",
             "rewriter": "rewriter",
+            "paper_discovery": "paper_discovery",
             "web_fallback": "web_fallback",
         },
     )
     # Rewriter loops back to critic so the new chunks get graded.
     g.add_edge("rewriter", "critic")
+    # Paper discovery feeds back to critic so the freshly-added abstracts
+    # get graded for relevance. If critic now says "high", we ship to generator.
+    g.add_edge("paper_discovery", "critic")
     g.add_conditional_edges(
         "web_fallback",
         _route_after_web,
-        {"generator": "generator", "no_answer": "no_answer"},
+        {
+            "generator": "generator",
+            "no_answer": "no_answer",
+            "llm_reasoning": "llm_reasoning",
+        },
     )
+    # LLM reasoning is a terminal node — no further nodes can salvage
+    # an answer that wasn't grounded in any retrieval. Goes straight to END.
+    g.add_edge("llm_reasoning", END)
     # Phase 5: generator -> reflector -> (retriever loop OR END)
     g.add_edge("generator", "reflector")
     g.add_conditional_edges(

@@ -79,6 +79,12 @@ class AgentState(TypedDict, total=False):
     # ---- Web fallback (Phase 4) ----
     web_used: bool
 
+    # ---- Paper discovery (Phase 7) ----
+    papers_used: bool
+    # Lightweight summary of discovered papers for trace/display (not the
+    # full PaperChunk objects — those live in chunks_by_subq).
+    papers_discovered: list[dict]
+
     # ---- Self-reflection (Phase 5) ----
     # How many times the Reflector has triggered a loopback. Bounded by
     # settings.reflection_max_iterations to prevent infinite refinement loops.

@@ -38,6 +38,9 @@ dependencies = [
     "fastapi>=0.115",                  # backend API
     "uvicorn[standard]>=0.32",         # ASGI server
     "sse-starlette>=2.1",              # Server-Sent Events for live agent streaming
+    # ---- Phase 7: open-domain paper discovery ----
+    "arxiv>=2.1",                      # official arXiv API wrapper (free, no key)
+    # Semantic Scholar uses raw HTTP via httpx (already a dep).
 ]
 
 [project.optional-dependencies]

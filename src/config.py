@@ -162,6 +162,20 @@ class Settings(BaseSettings):
     # No env-tunable for the thresholds themselves — those are baked into the
     # Critic's prompt + parsing. The action POLICY above is the knob.
 
+    # ---- Open-domain paper discovery (Phase 7) -----------------------------
+    # When True: after the rewrite budget is exhausted with low/medium
+    # confidence, the agent searches arXiv + Semantic Scholar for the
+    # original question BEFORE falling through to web search. False keeps
+    # the Phase 4-6 behavior (skip straight to web_fallback).
+    paper_discovery_enabled: bool = True
+
+    # LLM-only reasoning is the ABSOLUTE LAST RESORT when every retrieval
+    # path (corpus, rewriter, papers, web) has produced no usable evidence.
+    # When True the agent answers from training-time priors with a loud
+    # "no sources" disclaimer. When False the agent routes to no_answer
+    # ("I don't know") — appropriate for medical/legal/regulatory use.
+    llm_reasoning_fallback_enabled: bool = True
+
     # ---- Self-reflection (Phase 5) -----------------------------------------
     # Max TOTAL Reflector audit calls (= 1 initial audit + (N-1) loopbacks).
     # Default 2 means: generator runs, reflector audits, ONE loopback allowed,
