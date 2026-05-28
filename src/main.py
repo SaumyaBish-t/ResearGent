@@ -179,38 +179,39 @@ def stats(
 def vault_ingest(
     path: str = typer.Argument(
         "",
-        help="Obsidian vault root. Defaults to OBSIDIAN_VAULT_PATH from .env if blank.",
+        help="Path to a folder of .md notes. Defaults to NOTES_FOLDER_PATH "
+             "(or OBSIDIAN_VAULT_PATH, or ./notes) from .env if blank.",
     ),
 ) -> None:
     """
-    Phase 8 — Ingest an Obsidian vault as the local knowledge corpus.
+    Ingest a folder of markdown notes as the local knowledge corpus.
 
-    Walks every .md file under the vault, parses YAML frontmatter,
-    extracts [[wikilinks]] and #tags as metadata, chunks on heading
-    boundaries, and embeds into the vector store. Re-running is safe
-    (idempotent by content hash).
+    Works with ANY tool that edits .md files — VS Code, Obsidian, Logseq,
+    Foam, vim — not specific to Obsidian. We just parse the standard
+    `[[wikilink]]` + `#tag` conventions plus optional YAML frontmatter.
 
-    Tip: drop into the same store as PDFs — retrieval merges them
-    naturally. To use the vault EXCLUSIVELY, run `researgent store reset`
-    first.
+    Walks every .md file recursively, chunks on heading boundaries, embeds
+    into the vector store. Re-running is safe (idempotent by content hash).
     """
     from pathlib import Path as _P
     from src.config import settings
     from src.ingest import ingest_vault
 
-    vault_path = path or (settings.obsidian_vault_path or "")
-    if not vault_path:
+    notes_path = path or settings.resolve_notes_folder()
+    if not notes_path:
         console.print(
-            "[red]No vault path provided.[/red]  Pass a path, or set "
-            "[cyan]OBSIDIAN_VAULT_PATH[/cyan] in .env"
+            "[red]No notes folder configured.[/red]\n"
+            "  Either pass a path explicitly, OR set [cyan]NOTES_FOLDER_PATH[/cyan] in .env,\n"
+            "  OR put your notes in the [cyan]./notes[/cyan] folder (created by default in this repo)."
         )
         raise typer.Exit(code=1)
 
-    p = _P(vault_path)
+    p = _P(notes_path)
     if not p.exists():
-        console.print(f"[red]Vault not found:[/red] {p}")
+        console.print(f"[red]Notes folder not found:[/red] {p}")
         raise typer.Exit(code=1)
 
+    console.print(f"[dim]ingesting from:[/dim] [cyan]{p.resolve()}[/cyan]\n")
     results = ingest_vault(p)
     ok = sum(1 for r in results if "error" not in r)
     total_chunks = sum(r.get("chunks_inserted", 0) for r in results)
@@ -379,12 +380,16 @@ def research(
         from src.agent.vault_writer import write_run_to_vault
         from src.config import settings
 
-        if not settings.obsidian_vault_path:
-            console.print("[red]--save-to-vault requires OBSIDIAN_VAULT_PATH in .env[/red]")
+        notes_folder = settings.resolve_notes_folder()
+        if not notes_folder:
+            console.print(
+                "[red]--save-to-vault needs a notes folder.[/red]  "
+                "Set [cyan]NOTES_FOLDER_PATH[/cyan] in .env, or put .md files in [cyan]./notes[/cyan]."
+            )
             raise typer.Exit(code=1)
         try:
             note_path = write_run_to_vault(
-                vault_path=settings.obsidian_vault_path,
+                vault_path=notes_folder,
                 output_subfolder=settings.obsidian_output_folder,
                 question=question,
                 answer=result.answer,
@@ -403,9 +408,10 @@ def research(
             )
 
             # Build the obsidian:// URI and ask the OS to open it. Obsidian
-            # registers this scheme on install; the result is the new note
-            # popping open in whichever Obsidian window is active.
-            vault_root = _P(settings.obsidian_vault_path).resolve()
+            # registers this scheme on install; if the user runs Obsidian on
+            # the same folder, the new note pops open in it. Harmless no-op
+            # if Obsidian isn't installed.
+            vault_root = _P(notes_folder).resolve()
             try:
                 rel = _P(note_path).resolve().relative_to(vault_root)
                 vault_name = vault_root.name

@@ -173,15 +173,37 @@ class Settings(BaseSettings):
     # drowns in tangentially-related context.
     graph_expansion_max_extra_chunks: int = 6
 
-    # ---- Obsidian vault integration (Phase 8) ------------------------------
-    # Absolute path to your Obsidian vault. When set, `researgent vault-ingest`
-    # walks this directory by default, and `researgent research --save-to-vault`
-    # writes answers back here as new markdown notes.
+    # ---- Markdown knowledge-base integration (Phase 8 + 11) ----------------
+    # Path to a FOLDER OF MARKDOWN NOTES that serves as your knowledge base.
+    # The folder is just plain `.md` files — works with VS Code, Obsidian,
+    # Logseq, Foam, vim, or anything else that edits text. We use the same
+    # `[[wikilink]]` and `#tag` conventions Obsidian made popular, but the
+    # app itself is NOT required.
+    #
+    # Resolution order at runtime:
+    #   1. NOTES_FOLDER_PATH env var (this setting)        ← preferred
+    #   2. OBSIDIAN_VAULT_PATH env var (legacy alias)      ← backward compat
+    #   3. The project-local ./notes folder                ← convenience default
+    notes_folder_path: str | None = None
+    # Legacy alias — same effect as notes_folder_path. Kept so existing
+    # configs don't break.
     obsidian_vault_path: str | None = None
-    # Subfolder inside the vault where ResearGent writes generated notes.
-    # Default keeps them out of your main note tree so they're easy to
-    # curate / archive separately.
+    # Subfolder inside the notes folder where ResearGent writes generated
+    # answers. Defaults to ResearGent/ so machine-generated notes stay
+    # cleanly separated from notes you wrote by hand.
     obsidian_output_folder: str = "ResearGent"
+
+    def resolve_notes_folder(self) -> str | None:
+        """Pick the active notes folder per the resolution order above."""
+        from pathlib import Path as _P
+        if self.notes_folder_path:
+            return self.notes_folder_path
+        if self.obsidian_vault_path:
+            return self.obsidian_vault_path
+        default = _P("notes").resolve()
+        if default.exists() and default.is_dir():
+            return str(default)
+        return None
 
     # ---- Open-domain paper discovery (Phase 7) -----------------------------
     # When True: after the rewrite budget is exhausted with low/medium
