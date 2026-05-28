@@ -286,6 +286,34 @@ def retrieve(
 
 
 @app.command()
+def research(
+    question: str = typer.Argument(..., help="Question to research"),
+    k: int = typer.Option(8, help="Total chunks budget across all sub-questions"),
+    run_id: str = typer.Option("", help="Stable id for checkpoint replay; auto if blank"),
+    no_checkpoint: bool = typer.Option(False, help="Skip SQLite checkpointing (for tests)"),
+) -> None:
+    """
+    Phase 3 — Run the LangGraph agent: Planner -> Retriever -> Generator.
+
+    Decomposes complex queries into sub-questions, retrieves per sub-question
+    with hybrid (dense + BM25 + RRF), and synthesizes a structured answer
+    with grounded [S<n>] citations.
+    """
+    from src.agent import run_agent
+
+    result = run_agent(
+        question,
+        k=k,
+        run_id=run_id or None,
+        use_checkpointer=not no_checkpoint,
+    )
+    title = f"agent (k={k}, run_id={result.run_id})"
+    if result.error:
+        title += f"  [{result.error}]"
+    console.print(Panel(result.formatted(), title=title, border_style="cyan"))
+
+
+@app.command()
 def bench(
     query: str = typer.Argument(..., help="Query to benchmark"),
     k: int = typer.Option(5, help="Top-k for both retrievers"),

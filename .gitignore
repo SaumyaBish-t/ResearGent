@@ -23,6 +23,7 @@ data/papers/*
 data/chroma_db/
 data/store/
 data/bm25_idx/
+data/agent_state/
 data/cache/
 data/llm_calls.jsonl
 *.sqlite
