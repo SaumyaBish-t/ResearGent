@@ -25,6 +25,7 @@ data/store/
 data/bm25_idx/
 data/agent_state/
 data/cache/
+data/eval/
 data/llm_calls.jsonl
 *.sqlite
 *.db

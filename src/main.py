@@ -432,6 +432,91 @@ def doctor() -> None:
 
 
 @app.command()
+def eval(
+    suite_path: str = typer.Argument(..., help="Path to a YAML eval suite (see eval_suites/sample.yaml)"),
+    skip_metrics: bool = typer.Option(False, help="Run agent but skip RAGAS scoring (faster smoke)"),
+    show_answers: bool = typer.Option(False, help="Print each answer inline (verbose)"),
+) -> None:
+    """
+    Phase 6a — Run an evaluation suite, compute RAGAS-style metrics, persist.
+
+    Suite YAML format:
+      name: my-suite
+      queries:
+        - id: q1
+          question: "What is X?"
+          tags: [definition]
+    """
+    from pathlib import Path as _P
+    from src.eval import EvalSuite, run_suite
+    from src.eval.runner import summarize_results
+
+    p = _P(suite_path)
+    if not p.exists():
+        console.print(f"[red]Suite not found: {p}[/red]")
+        raise typer.Exit(code=1)
+
+    suite = EvalSuite.from_yaml(p)
+    console.print(f"[bold cyan]Running suite:[/bold cyan] {suite.name}  "
+                  f"({len(suite.queries)} queries)\n")
+
+    def _on_complete(i: int, total: int, r) -> None:
+        sc = r.scores
+        line = (f"[{i}/{total}] [cyan]{r.query_id}[/cyan]  "
+                f"faith={sc['faithfulness']:.2f}  rel={sc['answer_relevancy']:.2f}  "
+                f"prec={sc['context_precision']:.2f}  "
+                f"overall=[bold]{sc['overall']:.2f}[/bold]  "
+                f"({r.latency_ms}ms)")
+        console.print(line)
+        if show_answers:
+            console.print(Panel(r.answer.strip(), border_style="dim"))
+
+    results = run_suite(suite, on_query_complete=_on_complete, skip_metrics=skip_metrics)
+    summary = summarize_results(results)
+
+    # ---- Summary table ----
+    t = Table(title=f"Suite '{suite.name}' summary", header_style="bold cyan")
+    for col in ("Metric", "Mean", "Min", "Max"):
+        t.add_column(col)
+    for metric in ("faithfulness", "answer_relevancy", "context_precision", "overall"):
+        s = summary[metric]
+        t.add_row(metric, f"{s['mean']:.3f}", f"{s['min']:.3f}", f"{s['max']:.3f}")
+    console.print()
+    console.print(t)
+    console.print(
+        f"\n[bold]Mean latency:[/bold] {summary['mean_latency_ms']} ms    "
+        f"[bold]Reflection-triggered:[/bold] {summary['n_reflections_triggered']}/{summary['n']}    "
+        f"[bold]Web-fallback used:[/bold] {summary['n_web_used']}/{summary['n']}"
+    )
+    console.print(f"\nResults appended to [cyan]data/eval/runs.jsonl[/cyan]")
+
+
+@app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", help="Bind address (use 0.0.0.0 for LAN)"),
+    port: int = typer.Option(8000, help="HTTP port"),
+    reload: bool = typer.Option(False, help="Auto-reload on code change (dev mode)"),
+) -> None:
+    """
+    Phase 6b/6c — Launch FastAPI + web UI. Streams agent runs live via SSE.
+
+    Open http://localhost:8000 in your browser. The UI shows live per-node
+    progress, the final answer with clickable citations, and a sources panel.
+    """
+    import uvicorn
+
+    console.print(
+        f"[bold green]ResearGent UI:[/bold green] http://{host}:{port}\n"
+        f"[dim]API docs:[/dim] http://{host}:{port}/docs"
+    )
+    uvicorn.run(
+        "src.api.app:create_app",
+        host=host, port=port, reload=reload, factory=True,
+        log_level="info",
+    )
+
+
+@app.command()
 def store(
     action: str = typer.Argument("info", help="info | reset"),
 ) -> None:

@@ -1,0 +1,34 @@
+name: phase6-smoke
+description: |
+  Smoke test eval suite for the RAG/CRAG/Self-RAG corpus.
+  Mix of simple definitional questions, comparisons, multi-hop, and
+  one corpus-gap question to exercise the web fallback.
+
+queries:
+  # ---- Simple definitional (planner should NOT decompose) ----
+  - id: crag-define
+    question: "What is corrective RAG?"
+    tags: [definition, single-paper]
+
+  - id: selfrag-define
+    question: "What are Self-RAG's reflection tokens?"
+    tags: [definition, single-paper]
+
+  # ---- Multi-aspect (planner should decompose 2-3 ways) ----
+  - id: crag-vs-selfrag
+    question: "How do CRAG and Self-RAG handle low-confidence retrieval?"
+    tags: [comparison, multi-paper]
+
+  - id: selfrag-training
+    question: "Explain Self-RAG's training objective and its inference loop"
+    tags: [multi-hop, single-paper]
+
+  # ---- Numeric retrieval (BM25 ought to shine; CRAG paper has the numbers) ----
+  - id: crag-latency
+    question: "What are the inference latency and TFLOPs numbers reported for CRAG?"
+    tags: [numeric, single-paper, hybrid-required]
+
+  # ---- Corpus-gap (should trigger web_fallback if Tavily set) ----
+  - id: nobel-2026
+    question: "Who won the 2026 Nobel Prize in Physics?"
+    tags: [out-of-corpus, web-fallback]
