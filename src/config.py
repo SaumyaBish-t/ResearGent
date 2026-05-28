@@ -88,12 +88,16 @@ class Settings(BaseSettings):
     # ---- Cerebras -----------------------------------------------------------
     cerebras_api_key: str | None = None
     cerebras_base_url: str = "https://api.cerebras.ai/v1"
-    # Cerebras model IDs vary by account access. llama-3.3-70b is universally
-    # available on the free tier; qwen3-235b often requires paid access.
-    # Override in .env if your account has additional models.
-    cerebras_model_reasoning: str = "llama-3.3-70b"
-    cerebras_model_fast: str = "llama3.1-8b"
-    cerebras_model_tool: str = "llama-3.3-70b"
+    # Cerebras free-tier roster (May 2026): gpt-oss-120b + zai-glm-4.7.
+    # Both at 5 RPM — tight for inner-loop agents, fine for burst / fallback.
+    #   - zai-glm-4.7        ZhipuAI GLM-4.7, strong reasoning, different
+    #                        architecture family from rest of stack (useful
+    #                        for cascade diversity). Preview tier.
+    #   - gpt-oss-120b       OpenAI open weights MoE. Production tier.
+    #                        Excellent tool use. Also available on Groq.
+    cerebras_model_reasoning: str = "zai-glm-4.7"
+    cerebras_model_fast: str = "gpt-oss-120b"
+    cerebras_model_tool: str = "gpt-oss-120b"
 
     # ---- OpenRouter ---------------------------------------------------------
     openrouter_api_key: str | None = None
