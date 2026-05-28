@@ -133,9 +133,24 @@ class Settings(BaseSettings):
     cascade_fallback_enabled: bool = True
 
     # ---- Web fallback (Phase 4) --------------------------------------------
-    # Tavily: free tier 1000 searches/month, sub-second latency, content snippets.
-    # Get a key: https://tavily.com
+    # Cascade of web search providers — same pattern as LLM cascade. Tried in
+    # order, falls through on quota exhausted / failure / empty results.
+    #
+    # 1. Tavily — primary. Agent-tuned snippets, 1000/mo free.
+    #    Get a key: https://tavily.com
     tavily_api_key: str | None = None
+
+    # 2. Serper.dev — secondary. Real Google SERP, 2500 free signup credits,
+    #    then $1/1k. Highest raw quality, no attribution requirement.
+    #    Get a key: https://serper.dev
+    serper_api_key: str | None = None
+
+    # 3. DuckDuckGo — last resort. Free forever, no API key, no signup.
+    #    Uses HTML scrape via the `ddgs` library. Rate-limited (~1 req/sec).
+    #    Always considered "configured" — guaranteed working fallback.
+
+    # Order of attempts when the agent calls web_fallback.
+    web_search_cascade: list[str] = ["tavily", "serper", "duckduckgo"]
     # Max bounded retries when Critic flags retrieval as low quality. Each
     # rewrite costs one FAST-tier call + one full retrieve. 2 is the sweet
     # spot — diminishing returns past that, and we have web fallback after.

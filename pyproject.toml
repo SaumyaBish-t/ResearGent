@@ -30,7 +30,9 @@ dependencies = [
     "langgraph>=0.6",                  # stateful directed agent graphs
     "langgraph-checkpoint-sqlite>=2.0", # SQLite-backed checkpointing for replay/audit
     # ---- Phase 4: corrective RAG ----
-    "tavily-python>=0.7",              # web search fallback when retrieval fails
+    "tavily-python>=0.7",              # primary web search (1000/mo free, snippet-tuned)
+    "ddgs>=9.0",                       # DuckDuckGo HTML-scrape last-resort (no key, unlimited)
+    # NOTE: Serper.dev uses raw HTTP via httpx (already a dep) — no extra package.
 ]
 
 [project.optional-dependencies]
