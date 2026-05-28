@@ -46,6 +46,19 @@ def _summarize_node_update(node_name: str, update: dict[str, Any]) -> dict[str, 
         cbs = update.get("chunks_by_subq") or {}
         summary["total_chunks"] = sum(len(v) for v in cbs.values())
         summary["per_subq_counts"] = {k[:60]: len(v) for k, v in cbs.items()}
+        # Count graph-expanded chunks — surfaces the "AI brain" activity.
+        graph_count = 0
+        mutual_count = 0
+        for chunks in cbs.values():
+            for c in chunks:
+                sig = getattr(c, "signal", "")
+                if sig.startswith("graph:"):
+                    graph_count += 1
+                    if sig == "graph:mutual":
+                        mutual_count += 1
+        if graph_count:
+            summary["graph_expanded"] = graph_count
+            summary["mutual_links"] = mutual_count
 
     elif node_name == "critic":
         summary["confidence"] = update.get("confidence")

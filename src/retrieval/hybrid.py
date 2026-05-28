@@ -29,7 +29,7 @@ References:
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from src.retrieval import bm25 as bm25_idx
 from src.retrieval.naive import RetrievedChunk, naive_retrieve
@@ -52,6 +52,11 @@ class HybridChunk:
     dense_score: float | None    # cosine similarity if ranked
     bm25_score: float | None     # raw BM25 score if ranked
     doc_title: str = ""
+    # Knowledge-graph fields — only populated for vault chunks. Used by
+    # graph-expansion retrieval (Phase 10) to walk wikilink edges and
+    # surface structurally-related context the embedder might have ranked low.
+    wikilinks: list[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
 
     @property
     def citation(self) -> str:
@@ -122,6 +127,10 @@ def hybrid_retrieve(
         b = bm25_ranks.get(key)
 
         # Pull canonical fields from whichever side has the chunk.
+        # Wikilinks + tags come from whichever path knows them: dense already
+        # extracted them (see naive.py), bm25 has them in raw metadata.
+        wikilinks: list[str] = []
+        tags: list[str] = []
         if d is not None:
             _, dc = d
             text = dc.text
@@ -129,6 +138,8 @@ def hybrid_retrieve(
             page_number = dc.page_number
             chunk_index = dc.chunk_index
             doc_title = dc.doc_title
+            wikilinks = list(dc.wikilinks)
+            tags = list(dc.tags)
         else:
             assert b is not None
             _, bh = b
@@ -138,6 +149,10 @@ def hybrid_retrieve(
             page_number = int(m.get("page_number", 0))
             chunk_index = int(m.get("chunk_index", 0))
             doc_title = m.get("doc_title", "") or ""
+            wl_raw = m.get("wikilinks", "") or ""
+            tg_raw = m.get("tags", "") or ""
+            wikilinks = [w.strip() for w in wl_raw.split(",") if w.strip()]
+            tags = [t.strip() for t in tg_raw.split(",") if t.strip()]
 
         out.append(
             HybridChunk(
@@ -151,6 +166,8 @@ def hybrid_retrieve(
                 dense_score=d[1].score if d else None,
                 bm25_score=b[1].score if b else None,
                 doc_title=doc_title,
+                wikilinks=wikilinks,
+                tags=tags,
             )
         )
     return out
