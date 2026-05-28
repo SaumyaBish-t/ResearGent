@@ -26,6 +26,9 @@ dependencies = [
     # ML dependencies, and starts in <100ms.
     # ---- Phase 2: hybrid retrieval ----
     "rank-bm25>=0.2.2",      # BM25Okapi — classic lexical retrieval
+    # ---- Phase 3: agent graph ----
+    "langgraph>=0.6",                  # stateful directed agent graphs
+    "langgraph-checkpoint-sqlite>=2.0", # SQLite-backed checkpointing for replay/audit
 ]
 
 [project.optional-dependencies]
