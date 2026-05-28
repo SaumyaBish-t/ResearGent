@@ -16,8 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from src.agent.graph import build_graph
-from src.agent.state import AgentState
-from src.retrieval import HybridChunk
+from src.agent.state import AgentState, ContextChunk
 
 
 @dataclass
@@ -26,16 +25,21 @@ class AgentResult:
 
     question: str
     answer: str
-    sources: dict[str, HybridChunk]
+    sources: dict[str, ContextChunk]
     sub_questions: list[str]
     is_complex: bool
     planner_reasoning: str
     trace: list[dict[str, Any]]
     run_id: str
+    # Phase 4 additions
+    confidence: str = ""
+    rewrite_attempts: int = 0
+    web_used: bool = False
+    rewritten_queries: dict[str, str] | None = None
     error: str | None = None
 
     def formatted(self) -> str:
-        """Markdown-friendly render with sources footer + per-node trace summary."""
+        """Markdown-friendly render with sources footer + CRAG metadata + trace."""
         lines = []
         if self.is_complex:
             lines.append(f"_Decomposed into {len(self.sub_questions)} sub-questions:_")
@@ -44,13 +48,34 @@ class AgentResult:
             if self.planner_reasoning:
                 lines.append(f"  ({self.planner_reasoning})")
             lines.append("")
+
+        # CRAG status line — only when there's something noteworthy
+        crag_flags = []
+        if self.confidence:
+            crag_flags.append(f"conf={self.confidence}")
+        if self.rewrite_attempts:
+            crag_flags.append(f"rewrites={self.rewrite_attempts}")
+        if self.web_used:
+            crag_flags.append("web_fallback=YES")
+        if crag_flags:
+            lines.append(f"_CRAG: {'  '.join(crag_flags)}_")
+            lines.append("")
+
         lines.append(self.answer)
 
         if self.sources:
             lines.append("")
             lines.append("Sources:")
             for tag, c in sorted(self.sources.items(), key=lambda kv: int(kv[0][1:])):
-                origin = f"signal={c.signal}, rrf={c.rrf_score:.4f}"
+                # Origin format varies: HybridChunk has rrf_score, WebChunk has none
+                rrf = getattr(c, "rrf_score", None)
+                origin = f"signal={c.signal}"
+                if rrf is not None:
+                    origin += f", rrf={rrf:.4f}"
+                else:
+                    score = getattr(c, "score", None)
+                    if score is not None:
+                        origin += f", web_score={score:.2f}"
                 lines.append(f"  [{tag}] {c.citation}  ({origin})")
 
         if self.trace:
@@ -102,5 +127,9 @@ def run_agent(
         planner_reasoning=final.get("planner_reasoning") or "",
         trace=final.get("trace") or [],
         run_id=rid,
+        confidence=str(final.get("confidence") or ""),
+        rewrite_attempts=int(final.get("rewrite_attempts") or 0),
+        web_used=bool(final.get("web_used")),
+        rewritten_queries=final.get("rewritten_queries") or {},
         error=final.get("error"),
     )

@@ -29,6 +29,8 @@ dependencies = [
     # ---- Phase 3: agent graph ----
     "langgraph>=0.6",                  # stateful directed agent graphs
     "langgraph-checkpoint-sqlite>=2.0", # SQLite-backed checkpointing for replay/audit
+    # ---- Phase 4: corrective RAG ----
+    "tavily-python>=0.7",              # web search fallback when retrieval fails
 ]
 
 [project.optional-dependencies]

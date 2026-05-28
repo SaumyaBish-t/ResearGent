@@ -32,17 +32,22 @@ from __future__ import annotations
 import operator
 from typing import Annotated, Any, TypedDict
 
-from src.retrieval import HybridChunk
+from src.retrieval import HybridChunk, WebChunk
+
+# A "context chunk" can come from local hybrid retrieval OR web fallback.
+# Both expose the same public interface (text, citation, signal, etc.) so the
+# generator and citation builder don't care about origin.
+ContextChunk = HybridChunk | WebChunk
 
 
 def _merge_chunks_by_subq(
-    a: dict[str, list[HybridChunk]],
-    b: dict[str, list[HybridChunk]],
-) -> dict[str, list[HybridChunk]]:
-    """Reducer: per-sub-question chunk lists merge by union, not overwrite."""
+    a: dict[str, list[ContextChunk]],
+    b: dict[str, list[ContextChunk]],
+) -> dict[str, list[ContextChunk]]:
+    """Reducer: latest writer wins per sub-q (deterministic in sequential mode)."""
     out = dict(a)
     for k, v in b.items():
-        out[k] = v  # latest writer wins per sub-q (deterministic in sequential mode)
+        out[k] = v
     return out
 
 
@@ -57,11 +62,26 @@ class AgentState(TypedDict, total=False):
     planner_reasoning: str
 
     # ---- Retriever outputs ----
-    chunks_by_subq: Annotated[dict[str, list[HybridChunk]], _merge_chunks_by_subq]
+    chunks_by_subq: Annotated[dict[str, list[ContextChunk]], _merge_chunks_by_subq]
+
+    # ---- Critic outputs (Phase 4) ----
+    # Overall verdict on the current retrieval round.
+    #   "high"   -> proceed to generator
+    #   "medium" -> rewrite & retry if budget left, else proceed
+    #   "low"    -> rewrite & retry if budget left, else web fallback
+    confidence: str          # "high" | "medium" | "low"
+    critic_reasoning: str    # one-line explanation for the trace
+
+    # ---- Rewriter / loop control (Phase 4) ----
+    rewrite_attempts: int    # bounded by settings.crag_max_rewrites
+    rewritten_queries: dict[str, str]   # original sub_q -> rewritten sub_q
+
+    # ---- Web fallback (Phase 4) ----
+    web_used: bool
 
     # ---- Generator outputs ----
     draft_answer: str
-    citation_map: dict[str, HybridChunk]
+    citation_map: dict[str, ContextChunk]
 
     # ---- Flow control / observability ----
     error: str | None
