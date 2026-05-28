@@ -1,5 +1,5 @@
-"""Ingestion pipeline: PDF -> page text -> chunks -> embeddings -> vector store."""
+"""Ingestion pipeline: PDF or Obsidian vault -> chunks -> embeddings -> vector store."""
 
-from src.ingest.pipeline import ingest_directory, ingest_file
+from src.ingest.pipeline import ingest_directory, ingest_file, ingest_vault
 
-__all__ = ["ingest_directory", "ingest_file"]
+__all__ = ["ingest_directory", "ingest_file", "ingest_vault"]

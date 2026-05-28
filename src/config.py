@@ -162,6 +162,16 @@ class Settings(BaseSettings):
     # No env-tunable for the thresholds themselves — those are baked into the
     # Critic's prompt + parsing. The action POLICY above is the knob.
 
+    # ---- Obsidian vault integration (Phase 8) ------------------------------
+    # Absolute path to your Obsidian vault. When set, `researgent vault-ingest`
+    # walks this directory by default, and `researgent research --save-to-vault`
+    # writes answers back here as new markdown notes.
+    obsidian_vault_path: str | None = None
+    # Subfolder inside the vault where ResearGent writes generated notes.
+    # Default keeps them out of your main note tree so they're easy to
+    # curate / archive separately.
+    obsidian_output_folder: str = "ResearGent"
+
     # ---- Open-domain paper discovery (Phase 7) -----------------------------
     # When True: after the rewrite budget is exhausted with low/medium
     # confidence, the agent searches arXiv + Semantic Scholar for the
