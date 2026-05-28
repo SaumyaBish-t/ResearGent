@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
@@ -39,7 +40,19 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="ResearGent",
         description="Agentic research engine — Corrective RAG + Self-Reflection",
-        version="0.6.0",
+        version="0.9.0",
+    )
+
+    # CORS — Obsidian's Electron renderer makes requests from app://
+    # origin which CORS-rejects against http://localhost without this.
+    # `allow_origins=["*"]` is fine for a local-only dev server; tighten
+    # before exposing to a public network.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
 
     # ---- UI ----
@@ -52,6 +65,12 @@ def create_app() -> FastAPI:
     async def research(
         q: str = Query(..., description="The research question"),
         k: int = Query(8, description="Total chunks budget across all sub-questions"),
+        context: str = Query(
+            "",
+            description="Optional inline context — e.g. the body of the user's "
+                        "currently-open note when called from the Obsidian plugin. "
+                        "Prepended to the question so the planner sees both.",
+        ),
     ):
         """
         Server-Sent Events stream. Emits JSON-encoded events:
@@ -60,12 +79,16 @@ def create_app() -> FastAPI:
           - final           {answer, sources, ...}
           - error           {error, ts}
         """
+        # Plugin caller can attach the active note's body for "research
+        # about THIS note" workflows. We splice it into the question so the
+        # planner + retriever see it as part of the prompt.
+        effective_q = q if not context else (
+            f"{q}\n\n--- Context from the user's current note ---\n{context[:4000]}"
+        )
+
         async def event_gen():
-            # stream_agent is a synchronous generator. Run each pull on the
-            # event-loop's default executor so a long LLM call doesn't block
-            # other concurrent requests.
             loop = asyncio.get_running_loop()
-            gen = stream_agent(q, k=k)
+            gen = stream_agent(effective_q, k=k)
             while True:
                 try:
                     event = await loop.run_in_executor(None, _next_or_none, gen)
