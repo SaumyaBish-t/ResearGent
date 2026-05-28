@@ -162,6 +162,12 @@ class Settings(BaseSettings):
     # No env-tunable for the thresholds themselves — those are baked into the
     # Critic's prompt + parsing. The action POLICY above is the knob.
 
+    # ---- Self-reflection (Phase 5) -----------------------------------------
+    # Max times the Reflector can loop back with follow-up sub-questions.
+    # Each loop costs: 1 retriever + 1 critic + 1 generator + 1 reflector pass.
+    # 2 is the sweet spot — beyond that gains plateau and latency multiplies.
+    reflection_max_iterations: int = 2
+
     # ---- Observability ------------------------------------------------------
     # Logs every chat()/embed() call to a JSONL file. Surface via `researgent stats`.
     observability_enabled: bool = True

@@ -1,38 +1,38 @@
 """
 Compile the agent graph.
 
-Phase 4 topology (Corrective RAG):
+Phase 5 topology (Plan + CRAG + Self-Reflection — the full agentic loop):
 
     START -> planner -> retriever -> critic
-                                       │
-                              ┌────────┼─────────┐
-                          high conf  med/low &  med/low &
-                                    retries OK   retries done
-                              │          │             │
-                              │          ▼             ▼
-                              │      rewriter     web_fallback
-                              │          │             │
-                              │          └──► critic   │
-                              │            (loop ≤N)   │
-                              │                        ▼
-                              │                    generator
-                              │                        │
-                              └─────► generator <──────┘
-                                          │
-                                          ▼
-                                         END
+                          ▲             │
+                          │     ┌───────┼─────────┐
+                          │ high conf  med/low &  med/low &
+                          │            retries OK retries done
+                          │     │         │           │
+                          │     │         ▼           ▼
+                          │     │     rewriter   web_fallback
+                          │     │         │           │
+                          │     │         └─► critic  │
+                          │     │           (loop ≤N) │
+                          │     │                     ▼
+                          │     │                 generator
+                          │     │                     │
+                          │     └────────► generator ◄┘
+                          │                     │
+                          │                     ▼
+                          │                 reflector
+                          │                     │
+                          │             ┌───────┼────────┐
+                          │         gaps found            accept
+                          │         budget left            OR
+                          │             │             budget exhausted
+                          └─────────────┘                  │
+                          (loop with follow-up             ▼
+                           sub-questions, ≤N iters)       END
 
-  No-chunks path (kept from Phase 3):
-    if retriever (or web_fallback) leaves chunks_by_subq totally empty,
-    we still route to `no_answer` for a graceful "I don't know".
-
-Splicing in Phase 5's Reflector
--------------------------------
-Reflector will sit between generator and END. It reads the draft,
-identifies gaps, and either accepts (-> END) or loops back to retriever
-with a new sub-question. The edges from generator change from
-`generator -> END` to `generator -> reflector` with one new conditional
-edge — no other node touches.
+Failure paths (kept from earlier phases):
+  - retriever returns empty -> no_answer -> END
+  - web_fallback returns empty -> no_answer -> END
 """
 
 from __future__ import annotations
@@ -42,7 +42,15 @@ from pathlib import Path
 
 from langgraph.graph import END, START, StateGraph
 
-from src.agent.nodes import critic, generator, planner, retriever, rewriter, web_fallback
+from src.agent.nodes import (
+    critic,
+    generator,
+    planner,
+    reflector,
+    retriever,
+    rewriter,
+    web_fallback,
+)
 from src.agent.state import AgentState
 from src.config import settings
 
@@ -107,6 +115,25 @@ def _route_after_web(state: AgentState) -> str:
     return "generator" if any(chunks_by_subq.values()) else "no_answer"
 
 
+def _route_after_reflector(state: AgentState) -> str:
+    """
+    Phase 5 decision point — accept the draft or loop back for more retrieval.
+
+    Loop back IFF:
+      - Reflector flagged gaps AND produced actionable follow-up questions
+      - We're under the reflection_max_iterations budget
+    Otherwise END the run.
+
+    Note: the reflector node itself already cleared `gaps_found` if no
+    follow-ups were produced, so we just check the follow-ups list here.
+    """
+    follow_ups = state.get("reflection_follow_ups") or []
+    attempts = int(state.get("reflection_attempts") or 0)
+    if follow_ups and attempts <= settings.reflection_max_iterations:
+        return "retriever"
+    return "end"
+
+
 def build_graph(use_checkpointer: bool = True):
     """Construct + compile the agent graph with optional SQLite checkpointer."""
     g = StateGraph(AgentState)
@@ -120,6 +147,8 @@ def build_graph(use_checkpointer: bool = True):
     g.add_node("critic", critic.critique)
     g.add_node("rewriter", rewriter.rewrite_and_retry)
     g.add_node("web_fallback", web_fallback.web_fallback)
+    # Phase 5 node
+    g.add_node("reflector", reflector.reflect)
 
     g.add_edge(START, "planner")
     g.add_edge("planner", "retriever")
@@ -144,7 +173,13 @@ def build_graph(use_checkpointer: bool = True):
         _route_after_web,
         {"generator": "generator", "no_answer": "no_answer"},
     )
-    g.add_edge("generator", END)
+    # Phase 5: generator -> reflector -> (retriever loop OR END)
+    g.add_edge("generator", "reflector")
+    g.add_conditional_edges(
+        "reflector",
+        _route_after_reflector,
+        {"retriever": "retriever", "end": END},
+    )
     g.add_edge("no_answer", END)
 
     if use_checkpointer:
