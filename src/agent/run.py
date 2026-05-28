@@ -40,6 +40,9 @@ class AgentResult:
     reflection_attempts: int = 0
     reflection_gaps: list[str] | None = None
     reflection_follow_ups: list[str] | None = None
+    # Phase 7 additions — open-domain
+    papers_used: bool = False
+    papers_discovered: list[dict] | None = None
     error: str | None = None
 
     def formatted(self) -> str:
@@ -53,18 +56,37 @@ class AgentResult:
                 lines.append(f"  ({self.planner_reasoning})")
             lines.append("")
 
-        # CRAG + Reflection status line — only when there's something noteworthy
+        # CRAG + Discovery + Reflection status line — only when noteworthy
         crag_flags = []
         if self.confidence:
             crag_flags.append(f"conf={self.confidence}")
         if self.rewrite_attempts:
             crag_flags.append(f"rewrites={self.rewrite_attempts}")
+        if self.papers_used:
+            n = len(self.papers_discovered or [])
+            crag_flags.append(f"papers={n}")
         if self.web_used:
-            crag_flags.append("web_fallback=YES")
+            crag_flags.append("web=YES")
         if self.reflection_attempts:
             crag_flags.append(f"reflections={self.reflection_attempts}")
+        if self.error == "no_sources_used_llm_priors":
+            crag_flags.append("LLM_PRIORS_ONLY")
         if crag_flags:
             lines.append(f"_CRAG: {'  '.join(crag_flags)}_")
+            lines.append("")
+
+        # Show discovered papers when discovery fired
+        if self.papers_discovered:
+            lines.append("_Paper discovery (arXiv + Semantic Scholar):_")
+            for p in self.papers_discovered:
+                year = f" ({p.get('year')})" if p.get("year") else ""
+                cit = p.get("citation") or ""
+                title = (p.get("title") or "")[:90]
+                src = p.get("source") or ""
+                score = p.get("score") or 0
+                cites = p.get("citations")
+                cit_str = f", {cites} citations" if cites else ""
+                lines.append(f"  + {title}{year}  [{cit}] (score={score:.2f}, {src}{cit_str})")
             lines.append("")
 
         # Show reflection diagnostics when the Reflector actually triggered a loop
@@ -150,5 +172,7 @@ def run_agent(
         reflection_attempts=int(final.get("reflection_attempts") or 0),
         reflection_gaps=final.get("reflection_gaps") or [],
         reflection_follow_ups=final.get("reflection_follow_ups") or [],
+        papers_used=bool(final.get("papers_used")),
+        papers_discovered=final.get("papers_discovered") or [],
         error=final.get("error"),
     )

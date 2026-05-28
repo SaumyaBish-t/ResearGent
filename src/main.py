@@ -432,6 +432,49 @@ def doctor() -> None:
 
 
 @app.command()
+def discover(
+    topic: str = typer.Argument(..., help="Topic / query to search papers for"),
+    max_results: int = typer.Option(5, help="How many top papers to return"),
+) -> None:
+    """
+    Phase 7 — Standalone paper discovery (arXiv + Semantic Scholar).
+
+    Useful for browsing what the agent's paper_discovery node would pull
+    for a given query, without running the full agent loop. Also handy as
+    a "find me papers about X" utility on its own.
+    """
+    from src.retrieval import discover_papers
+
+    console.print(f"[cyan]searching arXiv + Semantic Scholar for:[/cyan] {topic}\n")
+    papers = discover_papers(topic, max_results=max_results)
+    if not papers:
+        console.print("[yellow]No papers found.[/yellow]")
+        return
+
+    t = Table(title=f"Top {len(papers)} papers", header_style="bold cyan")
+    t.add_column("Score", justify="right")
+    t.add_column("Year")
+    t.add_column("Title", overflow="fold")
+    t.add_column("Citation", overflow="fold")
+    t.add_column("Src")
+    t.add_column("Cites", justify="right")
+    for p in papers:
+        t.add_row(
+            f"{p.score:.2f}",
+            str(p.year or "?"),
+            p.title or "(no title)",
+            p.citation,
+            p.source,
+            str(p.citations or ""),
+        )
+    console.print(t)
+    console.print(
+        f"\n[dim]Tip:[/dim] download a paper's PDF + drop into data/papers/, "
+        f"then [cyan]researgent ingest[/cyan] to add it to your permanent corpus."
+    )
+
+
+@app.command()
 def eval(
     suite_path: str = typer.Argument(..., help="Path to a YAML eval suite (see eval_suites/sample.yaml)"),
     skip_metrics: bool = typer.Option(False, help="Run agent but skip RAGAS scoring (faster smoke)"),
