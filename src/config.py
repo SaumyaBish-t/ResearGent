@@ -132,6 +132,21 @@ class Settings(BaseSettings):
     # Set False to surface raw errors (useful for debugging).
     cascade_fallback_enabled: bool = True
 
+    # ---- Web fallback (Phase 4) --------------------------------------------
+    # Tavily: free tier 1000 searches/month, sub-second latency, content snippets.
+    # Get a key: https://tavily.com
+    tavily_api_key: str | None = None
+    # Max bounded retries when Critic flags retrieval as low quality. Each
+    # rewrite costs one FAST-tier call + one full retrieve. 2 is the sweet
+    # spot — diminishing returns past that, and we have web fallback after.
+    crag_max_rewrites: int = 2
+    # Confidence thresholds. Critic returns one of {high, medium, low}.
+    #   - high   -> straight to generator
+    #   - medium -> rewrite & retry (if budget left) else generator
+    #   - low    -> rewrite & retry (if budget left) else web fallback
+    # No env-tunable for the thresholds themselves — those are baked into the
+    # Critic's prompt + parsing. The action POLICY above is the knob.
+
     # ---- Observability ------------------------------------------------------
     # Logs every chat()/embed() call to a JSONL file. Surface via `researgent stats`.
     observability_enabled: bool = True

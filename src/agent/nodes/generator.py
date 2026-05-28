@@ -26,10 +26,10 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from src.agent.state import AgentState
+from src.agent.state import AgentState, ContextChunk
 from src.config import ModelTier
 from src.llm import chat
-from src.retrieval import HybridChunk
+from src.retrieval import HybridChunk, WebChunk
 
 
 SYSTEM_PROMPT = """You are a careful research assistant. Answer the user's question \
@@ -44,11 +44,22 @@ Rules:
 - Prefer concise, direct prose over bullet lists unless the question itself is a list."""
 
 
-def _assign_citations(
-    chunks_by_subq: dict[str, list[HybridChunk]],
-) -> tuple[dict[str, HybridChunk], dict[str, list[str]]]:
+def _chunk_key(c: ContextChunk) -> tuple[str, int]:
     """
-    Build a stable [S<n>] map.
+    Stable dedup key across both chunk types.
+
+    HybridChunk -> (source_file, chunk_index)        from local store
+    WebChunk    -> (url, -1)                          from Tavily
+    """
+    # Both expose .source_file and .chunk_index (WebChunk's are property shims).
+    return (c.source_file, c.chunk_index)
+
+
+def _assign_citations(
+    chunks_by_subq: dict[str, list[ContextChunk]],
+) -> tuple[dict[str, ContextChunk], dict[str, list[str]]]:
+    """
+    Build a stable [S<n>] map across local + web chunks.
 
     Returns:
       citation_map: {"S1": chunk1, "S2": chunk2, ...}
@@ -56,15 +67,15 @@ def _assign_citations(
 
     A chunk that appears under multiple sub-questions gets ONE tag, reused.
     """
-    citation_map: dict[str, HybridChunk] = {}
-    chunk_to_tag: dict[tuple[str, int], str] = {}  # (source_file, chunk_index) -> tag
+    citation_map: dict[str, ContextChunk] = {}
+    chunk_to_tag: dict[tuple[str, int], str] = {}
     subq_to_tags: dict[str, list[str]] = {}
 
     next_n = 1
     for sq, chunks in chunks_by_subq.items():
         tags_for_this_sq: list[str] = []
         for c in chunks:
-            key = (c.source_file, c.chunk_index)
+            key = _chunk_key(c)
             if key not in chunk_to_tag:
                 tag = f"S{next_n}"
                 chunk_to_tag[key] = tag
@@ -76,8 +87,8 @@ def _assign_citations(
 
 
 def _build_context_block(
-    chunks_by_subq: dict[str, list[HybridChunk]],
-    citation_map: dict[str, HybridChunk],
+    chunks_by_subq: dict[str, list[ContextChunk]],
+    citation_map: dict[str, ContextChunk],
     subq_to_tags: dict[str, list[str]],
 ) -> str:
     """
