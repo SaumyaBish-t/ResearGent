@@ -72,6 +72,27 @@ import os
 EMBED_BATCH = int(os.environ.get("INGEST_EMBED_BATCH", "8"))
 
 
+def _augment_text_with_entities(text: str, entities: list[str]) -> str:
+    """
+    Append a single-line entity manifest onto the chunk text BEFORE it is
+    embedded and indexed.
+
+    Why append instead of using a separate field?
+    --------------------------------------------
+    We get "GraphRAG-style" lexical and dense recall on the extracted
+    entities for free: the same text the embedder sees is the text BM25
+    tokenizes. A query mentioning "Reciprocal Rank Fusion" now lights up
+    every chunk where GLiNER caught that phrase — even if the chunk's
+    prose refers to it only as "the fusion step."
+
+    Kept as a one-liner so it does not shift the chunk's dense vector
+    meaningfully when entities are absent (empty list → no append).
+    """
+    if not entities:
+        return text
+    return f"{text}\n\n[Extracted Entities: {', '.join(entities)}]"
+
+
 def _batched(items: list, n: int) -> Iterable[list]:
     for i in range(0, len(items), n):
         yield items[i : i + n]
@@ -122,7 +143,11 @@ def _embed_and_store(
     total_start = time.perf_counter()
 
     for batch_i, batch in enumerate(_batched(chunks, EMBED_BATCH), start=1):
-        texts = [c.text for c in batch]
+        # Phase 14: embed the entity-augmented text, not the raw chunk.
+        # `texts` is what hits both the dense embedder AND Chroma's stored
+        # document field — so BM25 (which is rebuilt from Chroma docs) will
+        # also tokenize the entity manifest.
+        texts = [_augment_text_with_entities(c.text, c.entities) for c in batch]
         batch_tokens = sum(c.token_count for c in batch)
 
         t0 = time.perf_counter()
@@ -151,6 +176,11 @@ def _embed_and_store(
                 "chunk_index": c.chunk_index,
                 "token_count": c.token_count,
                 "doc_title": doc.title or "",
+                # Phase 14: Chroma metadata is scalar-only (no list[str]), so
+                # we comma-join — matches the existing convention for `tags`
+                # and `wikilinks` on vault chunks. Retrieval-side filtering
+                # can still match with a `$contains` predicate.
+                "entities": ", ".join(c.entities),
             }
             for c in batch
         ]
@@ -345,7 +375,8 @@ def _embed_and_store_vault_chunks(
     total_start = time.perf_counter()
 
     for batch_i, batch in enumerate(_batched(chunks, EMBED_BATCH), start=1):
-        texts = [c.text for c in batch]
+        # Phase 14: same entity-augmentation as the PDF path.
+        texts = [_augment_text_with_entities(c.text, c.entities) for c in batch]
         batch_tokens = sum(c.token_count for c in batch)
 
         t0 = time.perf_counter()
@@ -374,6 +405,9 @@ def _embed_and_store_vault_chunks(
                 "heading_path": c.heading_path,
                 "tags": ",".join(c.tags),
                 "wikilinks": ",".join(c.wikilinks),
+                # Phase 14: GLiNER entities, comma-joined to fit Chroma's
+                # scalar-only metadata. Same convention as `tags`/`wikilinks`.
+                "entities": ", ".join(c.entities),
             }
             for c in batch
         ]

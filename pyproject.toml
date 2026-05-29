@@ -44,6 +44,12 @@ dependencies = [
     "sqlalchemy>=2.0.0",
     "langgraph-checkpoint-postgres>=2.0.0",
     "psycopg[binary,pool]>=3.2.0",
+    # ---- Phase 14: semantic chunking + local entity extraction ----
+    # Local NLP, CPU-only — keeps the ingest pipeline on the free-tier budget.
+    # sentence-transformers brings torch; gliner brings a small transformer head.
+    # Both models are cached after first download (~80MB MiniLM + ~150MB GLiNER-small).
+    "sentence-transformers>=3.0.0",
+    "gliner>=0.2.13",
 ]
 
 [project.optional-dependencies]

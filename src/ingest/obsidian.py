@@ -58,6 +58,8 @@ class VaultChunk:
     heading_path: str         # breadcrumb "Section > Subsection > ..."
     tags: list[str] = field(default_factory=list)
     wikilinks: list[str] = field(default_factory=list)
+    # Phase 14: GLiNER-extracted technical entities, populated by chunk_note().
+    entities: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -244,7 +246,13 @@ def _split_into_sections(body: str) -> list[_Section]:
     return sections
 
 
-def chunk_note(note: VaultNote, *, target_tokens: int = 500, overlap_tokens: int = 80) -> list[VaultChunk]:
+def chunk_note(
+    note: VaultNote,
+    *,
+    target_tokens: int = 500,
+    overlap_tokens: int = 80,
+    extract_entities_flag: bool = True,
+) -> list[VaultChunk]:
     """
     Chunk a parsed note into VaultChunks.
 
@@ -329,6 +337,15 @@ def chunk_note(note: VaultNote, *, target_tokens: int = 500, overlap_tokens: int
                 wikilinks=list(note.wikilinks),
             ))
             idx += 1
+
+    # Phase 14: enrich each emitted chunk with GLiNER-extracted entities.
+    # Done post-hoc rather than at each emit site so we only call into the
+    # NER model in one place and can flip the flag off cheaply for tests.
+    if extract_entities_flag and chunks:
+        from src.ingest.chunker import extract_entities
+
+        for c in chunks:
+            c.entities = extract_entities(c.text)
 
     return chunks
 

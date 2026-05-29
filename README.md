@@ -17,6 +17,9 @@ An **Agentic Research Engine** with Corrective RAG, Self-Reflection, hybrid retr
 | **4** | Corrective RAG — Critic grades chunks, rewrites, **web cascade** (Tavily → Serper → DDG) | ✅ done |
 | **5** | Self-Reflection — Reflector loops back with follow-up sub-questions (bounded, deduped) | ✅ done |
 | **6** | RAGAS-style eval + FastAPI streaming + single-file web UI | ✅ done |
+| **12** | **PostgreSQL persistence** — shared `psycopg_pool`, `PostgresSaver` checkpoints, `documents_registry` table, raw bytes on disk, TTL pruner, `doc_ids` retriever filter | ✅ done |
+| **13** | **Pointer-based state** — `ChunkRef` pointers in checkpoints, hydration at node entry, `agent_artifacts` JSONB store → ~3KB/snapshot instead of ~200KB (60× smaller) | ✅ done |
+| **14** | **Semantic chunking + local NER** — `all-MiniLM-L6-v2` topic-shift chunker, GLiNER entity extraction, entity-augmented embeds & BM25 (free-tier, CPU-only) | ✅ done |
 
 ---
 
@@ -193,6 +196,90 @@ for jq/pandas analysis.
 
 ---
 
+## Phase 12 — PostgreSQL persistence layer
+
+Moved checkpointing and document tracking off SQLite/MemorySaver onto Postgres so runs survive restarts, can be inspected by other tools, and scale beyond a single process.
+
+```powershell
+# Set DATABASE_URL in .env (any Postgres 14+; Neon/Supabase free tiers work)
+uv run researgent db init       # create tables (idempotent)
+uv run researgent db status     # show row counts + recent checkpoints
+uv run researgent db prune      # drop checkpoints + artifacts older than the TTL
+```
+
+- **Checkpoints**: `PostgresSaver` from `langgraph-checkpoint-postgres`, fed by a shared `psycopg_pool.ConnectionPool` configured with the three settings the saver silently requires (`autocommit=True`, `row_factory=dict_row`, `prepare_threshold=0`). Falls back to `MemorySaver` when `DATABASE_URL` is empty — local-dev still works with zero setup.
+- **`documents_registry` (SQLAlchemy)**: one row per ingested PDF/note — `doc_id` (UUID, also stamped into every Chroma chunk's metadata), `content_hash`, filename, title, source type, storage URL, file size, chunk count.
+- **Raw bytes**: copied to `data/storage/<content_hash>.<ext>` on ingest; column type is a `file://` URL today, swap for S3 by editing `_persist_raw()` only.
+- **TTL pruner**: synthesizes a UUIDv6 cutoff to bulk-delete old checkpoints (UUIDv6 sorts by timestamp), and clears matching `agent_artifacts` rows in lockstep.
+- **`Retriever.doc_ids`** filter wired through Chroma's `where={"$in": [...]}` — scope a query to a specific subset of registered documents.
+
+---
+
+## Phase 13 — Pointer-based state management
+
+Even with a 4 KB cap on `chunks_by_subq`, ~10 checkpoints/run × ~200 KB/checkpoint filled 500 MB in ~250 runs. Phase 13 keeps only pointers in checkpoint state.
+
+```
+Before:    state.chunks_by_subq = { sq1: [Chunk{text=…, 1.5KB}, …] }       ← in checkpoint
+After:     state.refs_by_subq  = { sq1: [ChunkRef{store, id, ~80B}, …] }   ← in checkpoint
+           text lives in Chroma (local) or agent_artifacts (web/paper/graph)
+```
+
+- **`src/agent/artifacts.py`** — `ChunkRef` pointers, `HydratedChunk` unified view, `agent_artifacts` JSONB table.
+- Every graph node was refactored to: read refs → hydrate at entry → operate → return refs at exit.
+- **Result**: per-snapshot size dropped from ~200 KB to ~3 KB → the same 500 MB now buys ~15,000 runs instead of ~250 (**~60× improvement**).
+- The Phase 12 TTL pruner was extended to clear `agent_artifacts` in lockstep with checkpoints.
+
+---
+
+## Phase 14 — Semantic chunking + local entity extraction
+
+Naive token-bucket chunking ignored *meaning* — a chunk frequently straddled a topical boundary because the boundary fell mid-budget. Phase 14 replaces it with a fully-local, free-tier-only semantic pipeline.
+
+### What changed
+
+1. **Semantic chunker** (`src/ingest/chunker.py`)
+   - Sentences → embeddings via `sentence-transformers/all-MiniLM-L6-v2` (22M params, ~50 ms / page on CPU).
+   - Cosine *distance* between every adjacent sentence pair.
+   - Percentile-based threshold (default 90th) on those distances → adaptive per-page topic-shift detector.
+   - Greedy pack with `target_tokens=500`, `max_tokens=800`, `min_chunk_tokens` guard against 1-sentence slivers. Hard-split as last resort.
+   - **No more fixed overlap** — topical boundaries replace it.
+
+2. **Local entity extraction** (GLiNER)
+   - `urchade/gliner_small-v2.1` (166M, ~150 MB), CPU-friendly zero-shot NER.
+   - Labels: `["Algorithm", "Framework", "Scientific Concept", "Organization", "Person", "Metric", "Dataset"]`.
+   - Threshold 0.5, case-insensitive de-dup, capped at 25 entities/chunk, fails-soft to `[]` on any error.
+   - Both models are `@lru_cache(maxsize=1)` singletons → load cost paid once per process.
+
+3. **Metadata-enriched RAG** (`src/ingest/pipeline.py`)
+   - Each chunk's extracted entities are appended to the chunk text **before** embedding:
+     ```
+     [chunk body…]
+
+     [Extracted Entities: Corrective RAG, Reciprocal Rank Fusion, LangGraph]
+     ```
+   - Net effect: **both** the dense vector and the BM25 token stream pick up the technical terms — GraphRAG-style recall without a graph DB.
+   - Same enriched text is stored as the Chroma document → BM25 (which rebuilds from Chroma docs) tokenizes the entity line automatically.
+   - Entities also stored in Chroma metadata as a comma-joined string (Chroma metadata is scalar-only; matches the existing `tags`/`wikilinks` convention). Greppable via `where_document={"$contains": "<entity>"}`.
+
+4. **Vault parity** (`src/ingest/obsidian.py`)
+   - `VaultChunk.entities` field added; `chunk_note()` runs GLiNER over each emitted chunk so Obsidian ingest gets the same enrichment.
+
+### Strict free-tier guarantee
+
+Everything in the chunking + extraction path runs **locally on CPU** — no LLM API calls, no managed NER service, no graph database. First import downloads ~230 MB of model checkpoints to the HuggingFace cache; later runs start in ~1-2 s.
+
+### New dependencies
+
+```toml
+"sentence-transformers>=3.0.0"
+"gliner>=0.2.13"
+```
+
+Run `uv sync` after pulling.
+
+---
+
 ## Architecture (target — final state)
 
 ```
@@ -240,19 +327,26 @@ researgent/
 ├── src/
 │   ├── config.py             # typed settings via pydantic-settings
 │   ├── llm/
-│   │   └── provider.py       # unified chat() / embed() over NVIDIA/Groq/Ollama
+│   │   └── provider.py       # unified chat() / embed() over NVIDIA/Groq/Ollama/Cerebras/OpenRouter
 │   ├── ingest/
 │   │   ├── pdf.py            # PyMuPDF -> Page records
-│   │   ├── chunker.py        # token-aware chunking with overlap
-│   │   └── pipeline.py       # PDFs -> chunks -> embeddings -> Chroma
+│   │   ├── chunker.py        # Phase 14: semantic chunker (MiniLM) + GLiNER entity extraction
+│   │   ├── obsidian.py       # vault parser + heading-aware chunker (entity-enriched)
+│   │   └── pipeline.py       # chunks -> entity-augmented embeds -> Chroma + BM25 + registry
 │   ├── retrieval/
-│   │   └── naive.py          # dense top-k from Chroma (baseline)
+│   │   ├── naive.py          # dense top-k from Chroma (baseline)
+│   │   └── bm25.py           # persisted BM25Okapi + RRF fusion
 │   ├── rag/
 │   │   └── naive.py          # retrieve -> stuff -> generate (cited)
+│   ├── agent/
+│   │   ├── graph.py          # LangGraph DAG (planner/retriever/critic/web/gen/reflector)
+│   │   └── artifacts.py      # Phase 13: ChunkRef pointers + agent_artifacts JSONB store
+│   ├── registry.py           # Phase 12: documents_registry (SQLAlchemy) + TTL pruner
 │   ├── store.py              # ChromaDB client + collection management
 │   └── main.py               # Typer CLI
 ├── data/
 │   ├── papers/               # drop your PDFs here
+│   ├── storage/              # Phase 12: raw bytes by content_hash (gitignored)
 │   └── chroma_db/            # vector store (gitignored)
 ├── .env.example
 ├── pyproject.toml
