@@ -115,21 +115,41 @@ def _route_after_critic(state: AgentState) -> str:
     if any(chunks_by_subq.values()):
         return "generator"
 
-    # 4. Last-desperate web try (returns empty if no key, then routes to
-    # no_answer / llm_reasoning).
+    # 4. Last-desperate web try. When web_already_tried, this is a one-pass
+    # waste (web_fallback will return empty and fall through to no_answer /
+    # llm_reasoning) — accepted because it's bounded and keeps the routing
+    # logic simple. Total max overhead: one extra web_fallback call.
     return "web_fallback"
 
 
 def _route_after_web(state: AgentState) -> str:
     """
     After web fallback. Three outcomes:
-      - chunks present                 -> generator
+      - chunks present                 -> critic (RE-GRADE including web chunks)
       - empty + llm_reasoning enabled  -> llm_reasoning (LAST-RESORT priors)
       - empty + llm_reasoning disabled -> no_answer (graceful "I don't know")
+
+    Why re-grade through critic (and not straight to generator)
+    -----------------------------------------------------------
+    Without this loopback, the final confidence shown to the user — and
+    used by auto-save — reflected only the OLD pre-web chunks. Web chunks
+    are typically cleaner and more on-topic than the local retrieval that
+    failed; re-grading produces an accurate confidence score that reflects
+    the evidence the generator will ACTUALLY see.
+
+    Loop-termination guarantee
+    --------------------------
+    The critic's routing already knows `web_used=True`, so it won't loop
+    back to web_fallback again. Rewriter is also guarded by the rewrite
+    budget which is exhausted by the time we get here. So the only
+    onward edges from this second critic pass are:
+      - high           -> generator  (the happy path; auto-save fires)
+      - medium/low     -> generator (best-effort with current chunks)
+    Bounded.
     """
     chunks_by_subq = state.get("chunks_by_subq") or {}
     if any(chunks_by_subq.values()):
-        return "generator"
+        return "critic"
     if settings.llm_reasoning_fallback_enabled:
         return "llm_reasoning"
     return "no_answer"
@@ -209,7 +229,7 @@ def build_graph(use_checkpointer: bool = True):
         "web_fallback",
         _route_after_web,
         {
-            "generator": "generator",
+            "critic": "critic",
             "no_answer": "no_answer",
             "llm_reasoning": "llm_reasoning",
         },
