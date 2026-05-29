@@ -160,6 +160,11 @@ const sourcesEl = $("sources"), sourcesEmpty = $("sources-empty");
 const traceEl = $("trace"), traceEmpty = $("trace-empty");
 
 let evtSrc = null;
+// Tracks whether the agent already delivered its `final` event. After that,
+// the only "errors" the EventSource can fire are normal end-of-stream
+// closes (the SSE spec doesn't distinguish those from network failures),
+// so we suppress them in the UI to avoid the misleading "stream error".
+let streamFinished = false;
 
 function reset() {
   answerEl.textContent = ""; answerEl.hidden = true; answerEmpty.hidden = false;
@@ -167,6 +172,7 @@ function reset() {
   subQsEl.innerHTML = ""; subQsEl.hidden = true;
   sourcesEl.innerHTML = ""; sourcesEl.hidden = true; sourcesEmpty.hidden = false;
   traceEl.innerHTML = ""; traceEl.hidden = true; traceEmpty.hidden = false;
+  streamFinished = false;
 }
 
 function addTrace(node, summary, cls = "ok") {
@@ -305,7 +311,9 @@ function research() {
     const d = JSON.parse(e.data);
     renderFinal(d);
     addTrace("done", `${(d.sources || []).length} sources, ${(d.answer || "").length} chars`, "ok");
-    // Don't cleanup yet — a `saved` event may follow if auto-save fires.
+    streamFinished = true;
+    // The server ALWAYS emits a follow-up `saved` or `save_skipped` event
+    // after `final`. Don't cleanup here — let those handlers do it.
   });
 
   evtSrc.addEventListener("saved", (e) => {
@@ -314,19 +322,51 @@ function research() {
     cleanup();
   });
 
+  evtSrc.addEventListener("save_skipped", (e) => {
+    let reason = "?";
+    try { reason = JSON.parse(e.data).reason || "?"; } catch {}
+    // Reason codes map to short human-readable explanations.
+    const explain = {
+      "auto_save_disabled": "AUTO_SAVE_TO_NOTES=false",
+      "llm_priors_no_sources": "no sources cited — would risk poisoning the brain",
+      "no_notes_folder_configured": "no notes folder configured in .env",
+    };
+    let msg = explain[reason];
+    if (!msg && reason.startsWith("confidence_")) {
+      // confidence_<got>_below_<want> -> "confidence medium below threshold high"
+      const parts = reason.replace("confidence_", "").split("_below_");
+      msg = `confidence ${parts[0] || "?"} below threshold ${parts[1] || "?"}`;
+    }
+    addTrace("auto-save", `skipped — ${msg || reason}`, "warn");
+    cleanup();
+  });
+
+  // SSE "error" event — the server EXPLICITLY emitting an error via the
+  // `event: error` field. Different from `onerror` below which fires on
+  // connection drops including normal end-of-stream.
   evtSrc.addEventListener("error", (e) => {
+    // The EventSource API also routes connection-close events to
+    // named "error" listeners with no `data`. If we've already received
+    // `final`, the run was successful and this is just the close — suppress.
+    if (streamFinished) {
+      cleanup();
+      return;
+    }
     let msg = "stream error";
-    try { msg = JSON.parse(e.data).error || msg; } catch {}
+    try { if (e.data) msg = JSON.parse(e.data).error || msg; } catch {}
     addTrace("error", msg, "err");
     cleanup();
   });
 
-  // Some servers won't emit `saved` (auto-save off, or run hit `error`).
-  // The EventSource closes naturally on stream end; cleanup() runs from
-  // the close handler below as a safety net so the UI doesn't stay
-  // "Working…" forever.
-  evtSrc.addEventListener("end", () => cleanup());
-  evtSrc.onerror = () => cleanup();
+  // Catch-all: connection drop / network failure / normal stream close.
+  // If we already saw `final`, this is the server gracefully closing the
+  // SSE — not a real error. Otherwise it's a genuine drop mid-run.
+  evtSrc.onerror = () => {
+    if (!streamFinished) {
+      addTrace("connection", "lost — try again", "err");
+    }
+    cleanup();
+  };
 }
 
 function cleanup() {
