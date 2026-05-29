@@ -33,6 +33,7 @@ import re
 import time
 from typing import Any
 
+from src.agent.artifacts import persist_mixed
 from src.agent.state import AgentState
 from src.config import ModelTier
 from src.llm import chat
@@ -105,19 +106,20 @@ def rewrite_and_retry(state: AgentState) -> dict[str, Any]:
     Bumps `rewrite_attempts` by 1 so the graph's edge predicate knows when
     to stop trying.
     """
-    chunks_by_subq = state.get("chunks_by_subq") or {}
+    refs_by_subq = dict(state.get("chunk_refs_by_subq") or {})
+    thread_id = state.get("run_id") or ""
     rewritten_map = dict(state.get("rewritten_queries") or {})
     timings: list[dict[str, Any]] = []
 
-    # Choose targets: sub-questions with zero surviving chunks after Critic.
-    targets = [sq for sq, ch in chunks_by_subq.items() if not ch]
+    # Choose targets: sub-questions with zero surviving refs after Critic.
+    targets = [sq for sq, ch in refs_by_subq.items() if not ch]
 
     if not targets:
         # Critic verdict was medium not because of empty sub-Qs but because
         # of partial-relevance dilution. Rewrite ALL sub-Qs in this case.
-        targets = list(chunks_by_subq.keys()) or state.get("sub_questions") or [state["question"]]
+        targets = list(refs_by_subq.keys()) or state.get("sub_questions") or [state["question"]]
 
-    new_chunks: dict[str, list] = dict(chunks_by_subq)
+    new_chunks_for_persist: dict[str, list] = {}
     new_attempt = int(state.get("rewrite_attempts") or 0) + 1
 
     for orig in targets:
@@ -129,9 +131,8 @@ def rewrite_and_retry(state: AgentState) -> dict[str, Any]:
         hits = hybrid_retrieve(rewritten, k=per_q_k)
         ret_ms = int((time.perf_counter() - t0) * 1000)
 
-        # Update in place — the new chunks are what the Critic (or generator)
-        # will see on the next pass.
-        new_chunks[orig] = hits
+        # Capture in memory for the batch persist call below.
+        new_chunks_for_persist[orig] = hits
 
         timings.append(
             {
@@ -146,8 +147,15 @@ def rewrite_and_retry(state: AgentState) -> dict[str, Any]:
             }
         )
 
+    # Persist all fresh retrievals as refs (local hybrid hits become free
+    # local refs via chroma_id). Then merge over the prior ref map.
+    merged_refs = dict(refs_by_subq)
+    if new_chunks_for_persist:
+        new_refs = persist_mixed(thread_id, new_chunks_for_persist)
+        merged_refs.update(new_refs)
+
     return {
-        "chunks_by_subq": new_chunks,
+        "chunk_refs_by_subq": merged_refs,
         "rewritten_queries": rewritten_map,
         "rewrite_attempts": new_attempt,
         "trace": timings,

@@ -38,7 +38,8 @@ import re
 import time
 from typing import Any
 
-from src.agent.state import AgentState, ContextChunk
+from src.agent.artifacts import HydratedChunk, hydrate_one
+from src.agent.state import AgentState
 from src.config import ModelTier, settings
 from src.llm import chat
 
@@ -115,7 +116,7 @@ def _extract_json(text: str) -> dict[str, Any] | None:
         return None
 
 
-def _format_evidence(citation_map: dict[str, ContextChunk]) -> str:
+def _format_evidence(citation_map: dict[str, HydratedChunk]) -> str:
     """Build a numbered evidence block for the reflector to compare draft against."""
     parts: list[str] = []
     for tag, c in sorted(citation_map.items(), key=lambda kv: int(kv[0][1:])):
@@ -138,7 +139,16 @@ def reflect(state: AgentState) -> dict[str, Any]:
     """
     question = state["question"]
     draft = state.get("draft_answer") or ""
-    citation_map = state.get("citation_map") or {}
+    # Pointer-state: rebuild the citation_map from refs ONLY for this node's
+    # prompt. The hydrated chunks live in memory; only refs go back to state.
+    citation_refs = state.get("citation_refs") or {}
+    if citation_refs:
+        # Hydrate in tag order so the evidence numbering stays stable.
+        ordered_tags = sorted(citation_refs.keys(), key=lambda t: int(t[1:]))
+        hydrated = hydrate_one([citation_refs[t] for t in ordered_tags])
+        citation_map = dict(zip(ordered_tags, hydrated))
+    else:
+        citation_map = {}
     existing_sub_qs = state.get("sub_questions") or [question]
     attempts_so_far = int(state.get("reflection_attempts") or 0)
 

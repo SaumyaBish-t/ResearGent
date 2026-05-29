@@ -70,8 +70,12 @@ def db_init() -> None:
 
     try:
         get_checkpointer(setup=True)
-        # documents_registry is our table, not LangGraph's — created here so
-        # `db init` is the single command that brings up a fresh deployment.
+        # Both `documents_registry` (Phase 12) and `agent_artifacts`
+        # (Phase 13) hang off the same SQLAlchemy Base. Importing the
+        # artifacts module registers `AgentArtifact` with Base.metadata
+        # so the one `init_schema()` call creates both tables. Future
+        # tables just need a similar import.
+        import src.agent.artifacts  # noqa: F401  (registers AgentArtifact)
         from src.registry import init_schema as _init_registry
         _init_registry()
     except Exception as e:
@@ -79,7 +83,8 @@ def db_init() -> None:
         raise typer.Exit(code=1)
 
     console.print(
-        "[bold green]OK[/bold green] — checkpoint tables + documents_registry ready."
+        "[bold green]OK[/bold green] — checkpoint tables + "
+        "documents_registry + agent_artifacts ready."
     )
 
 
@@ -204,6 +209,20 @@ def db_prune(
             if dry_run:
                 return
 
+            # Phase 13: agent_artifacts is pruned in lockstep with
+            # checkpoints. Without this, the ephemeral web/paper/graph
+            # chunks accumulated by stale threads would leak forever and
+            # eat the same 500 MB budget we're protecting.
+            cur.execute("SELECT to_regclass('public.agent_artifacts') AS t")
+            if cur.fetchone()["t"]:
+                cur.execute(
+                    "DELETE FROM agent_artifacts WHERE thread_id = ANY(%s)",
+                    (stale,),
+                )
+                adel = cur.rowcount
+            else:
+                adel = 0
+
             cur.execute(
                 "DELETE FROM checkpoint_writes WHERE thread_id = ANY(%s)",
                 (stale,),
@@ -232,7 +251,7 @@ def db_prune(
     console.print(
         f"[bold green]pruned[/bold green]  "
         f"checkpoints {before} -> {after} (-{cdel}), "
-        f"checkpoint_writes -{wdel}"
+        f"checkpoint_writes -{wdel}, agent_artifacts -{adel}"
     )
 
 

@@ -215,6 +215,27 @@ class Collection:
                     return False
         return True
 
+    def get_by_ids(self, ids: list[str]) -> dict[str, list]:
+        """
+        O(len(ids)) indexed lookup by chunk id — for pointer-based hydration.
+
+        Returns the same shape as `.get(where=...)` but skips the metadata
+        scan. Used by `agent.artifacts.hydrate()` to rehydrate refs into
+        chunks at the start of each node, so we never have to scan the
+        full collection just to look up 50 known ids.
+        """
+        if not ids:
+            return {"ids": [], "documents": [], "metadatas": []}
+        with self._lock:
+            p = self._payload
+            pos = {cid: i for i, cid in enumerate(p.ids)}
+            idxs = [pos[i] for i in ids if i in pos]
+            return {
+                "ids": [p.ids[i] for i in idxs],
+                "documents": [p.documents[i] for i in idxs],
+                "metadatas": [p.metadatas[i] for i in idxs],
+            }
+
     def get(
         self,
         where: dict | None = None,

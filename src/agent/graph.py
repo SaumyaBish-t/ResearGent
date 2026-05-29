@@ -104,7 +104,7 @@ def _route_after_critic(state: AgentState) -> str:
         return "web_fallback"
 
     # 3. Best effort: surviving chunks or graceful next step.
-    chunks_by_subq = state.get("chunks_by_subq") or {}
+    chunks_by_subq = state.get("chunk_refs_by_subq") or {}
     if any(chunks_by_subq.values()):
         return "generator"
 
@@ -140,7 +140,7 @@ def _route_after_web(state: AgentState) -> str:
       - medium/low     -> generator (best-effort with current chunks)
     Bounded.
     """
-    chunks_by_subq = state.get("chunks_by_subq") or {}
+    chunks_by_subq = state.get("chunk_refs_by_subq") or {}
     if any(chunks_by_subq.values()):
         return "critic"
     if settings.llm_reasoning_fallback_enabled:

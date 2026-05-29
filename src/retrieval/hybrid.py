@@ -57,6 +57,10 @@ class HybridChunk:
     # surface structurally-related context the embedder might have ranked low.
     wikilinks: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
+    # Chroma id — propagated from the dense-side result. Used by the
+    # agent's pointer-based state so a HybridChunk can ride through a
+    # checkpoint as an 80-byte ChunkRef instead of its full text.
+    chroma_id: str = ""
 
     @property
     def citation(self) -> str:
@@ -139,6 +143,7 @@ def hybrid_retrieve(
         # extracted them (see naive.py), bm25 has them in raw metadata.
         wikilinks: list[str] = []
         tags: list[str] = []
+        chroma_id = ""
         if d is not None:
             _, dc = d
             text = dc.text
@@ -148,6 +153,7 @@ def hybrid_retrieve(
             doc_title = dc.doc_title
             wikilinks = list(dc.wikilinks)
             tags = list(dc.tags)
+            chroma_id = dc.chroma_id
         else:
             assert b is not None
             _, bh = b
@@ -161,6 +167,8 @@ def hybrid_retrieve(
             tg_raw = m.get("tags", "") or ""
             wikilinks = [w.strip() for w in wl_raw.split(",") if w.strip()]
             tags = [t.strip() for t in tg_raw.split(",") if t.strip()]
+            # BM25 stores the Chroma id as `chunk_id` (set at ingest time).
+            chroma_id = getattr(bh, "chunk_id", "") or ""
 
         out.append(
             HybridChunk(
@@ -176,6 +184,7 @@ def hybrid_retrieve(
                 doc_title=doc_title,
                 wikilinks=wikilinks,
                 tags=tags,
+                chroma_id=chroma_id,
             )
         )
     return out

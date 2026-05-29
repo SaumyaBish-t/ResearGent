@@ -23,6 +23,7 @@ import re
 import time
 from typing import Any
 
+from src.agent.artifacts import persist_mixed
 from src.agent.state import AgentState
 from src.config import ModelTier
 from src.llm import chat
@@ -79,7 +80,8 @@ def _extract_search_query(question: str) -> str:
 def discover(state: AgentState) -> dict[str, Any]:
     """Search arXiv + Semantic Scholar and merge results into state."""
     question = state["question"]
-    chunks_by_subq = dict(state.get("chunks_by_subq") or {})
+    thread_id = state.get("run_id") or ""
+    existing_refs = dict(state.get("chunk_refs_by_subq") or {})
 
     # Verbose questions retrieve poorly from arXiv/SS keyword search.
     # Distill to a short query first.
@@ -104,13 +106,15 @@ def discover(state: AgentState) -> dict[str, Any]:
             ],
         }
 
-    # Attach discovered papers under the ORIGINAL question key so the
-    # generator sees them grouped with whatever local chunks survived.
-    # We use the original question (not a sub-q) because paper discovery
-    # is top-level evidence — the abstracts are usually broad enough to
-    # cover multiple sub-questions.
-    existing = list(chunks_by_subq.get(question) or [])
-    chunks_by_subq[question] = existing + list(papers)
+    # Persist paper chunks as ephemeral artifacts and merge their refs
+    # under the ORIGINAL question key. We use the original question (not
+    # a sub-q) because paper discovery is top-level evidence — the
+    # abstracts are usually broad enough to cover multiple sub-questions.
+    new_refs = persist_mixed(thread_id, {question: list(papers)})
+    merged_refs = dict(existing_refs)
+    merged_refs[question] = list(existing_refs.get(question) or []) + list(
+        new_refs.get(question) or []
+    )
 
     discovered_summary = [
         {
@@ -126,7 +130,7 @@ def discover(state: AgentState) -> dict[str, Any]:
     ]
 
     return {
-        "chunks_by_subq": chunks_by_subq,
+        "chunk_refs_by_subq": merged_refs,
         "papers_used": True,
         "papers_discovered": discovered_summary,
         # Reset critic-related state so the rewriter budget doesn't
