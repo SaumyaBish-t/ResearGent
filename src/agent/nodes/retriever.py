@@ -4,6 +4,15 @@ Retriever node — runs hybrid retrieval per sub-question.
 Reuses Phase 2's hybrid_retrieve directly. Sequential per sub-q for now;
 Phase 4 can fan out in parallel via LangGraph's Send pattern.
 
+Phase 13 pointer pattern
+------------------------
+Input state carries `chunk_refs_by_subq: dict[sub_q, list[ChunkRef]]`.
+We hydrate ONLY if we need the old chunks' metadata (for graph-expansion
+exclusion); otherwise we skip hydration entirely and treat refs as
+opaque pointers. Newly-retrieved chunks come back as HybridChunk with
+populated `chroma_id` — converted to refs by `persist_mixed()` before
+returning. Net result: state never carries chunk text.
+
 Per-sub-Q `k` tuning
 --------------------
 For a 1-sub-q (simple) question, we use the user's full `k`. For an N-sub-q
@@ -19,6 +28,7 @@ import math
 import time
 from typing import Any
 
+from src.agent.artifacts import hydrate, persist_mixed
 from src.agent.state import AgentState
 from src.config import settings
 from src.retrieval import expand_via_wikilinks, hybrid_retrieve
@@ -32,28 +42,30 @@ def retrieve(state: AgentState) -> dict[str, Any]:
     """
     Retrieve chunks for every sub-question — IDEMPOTENT.
 
-    Skips sub-questions that already have chunks in state. This matters most
+    Skips sub-questions that already have refs in state. This matters most
     on reflection-loopbacks: when Phase 5's Reflector adds 2 new sub-Qs to
     an existing list of 4, we should only retrieve for the 2 new ones, not
-    re-do the 4 already-answered ones. Without this, each loop's retrieve
-    + critic cost grows linearly with the cumulative sub-question count.
-
-    The chunks for an existing sub-Q are deterministic (same hybrid_retrieve
-    with same query = same chunks) so skipping is safe.
+    re-do the 4 already-answered ones.
     """
     sub_qs = state.get("sub_questions") or [state["question"]]
     total_k = int(state.get("k") or DEFAULT_TOTAL_K)  # type: ignore[arg-type]
     per_subq_k = max(2, math.ceil(total_k / max(1, len(sub_qs))))
+    thread_id = state.get("run_id") or ""
 
-    # Identify which sub-Qs need fresh retrieval. An existing sub-Q is "done"
-    # if it already has at least one chunk in chunks_by_subq.
-    existing = dict(state.get("chunks_by_subq") or {})
-    to_retrieve = [sq for sq in sub_qs if not existing.get(sq)]
-    skipped = [sq for sq in sub_qs if existing.get(sq)]
+    # Idempotency check is on REFS, not chunks — no hydration needed.
+    existing_refs = dict(state.get("chunk_refs_by_subq") or {})
+    to_retrieve = [sq for sq in sub_qs if not existing_refs.get(sq)]
+    skipped = [sq for sq in sub_qs if existing_refs.get(sq)]
 
-    chunks_by_subq: dict[str, list] = dict(existing)
+    # We hold chunks in memory only for the duration of this node call.
+    # Pre-existing sub-Qs get hydrated so graph-expansion can read their
+    # metadata (source_file, chunk_index, wikilinks). Fresh retrievals
+    # come back as HybridChunk objects directly.
+    chunks_by_subq: dict[str, list] = {}
+    if existing_refs:
+        chunks_by_subq.update(hydrate(existing_refs))
+
     timings: list[dict[str, Any]] = []
-
     if skipped:
         timings.append(
             {
@@ -63,10 +75,7 @@ def retrieve(state: AgentState) -> dict[str, Any]:
             }
         )
 
-    # `doc_id_scope` lets callers (API, future CLI flag) restrict retrieval
-    # to a subset of registered documents. Resolved by main.py / api/app.py
-    # against the Postgres registry before the agent is invoked, then
-    # passed through as plain list[str] of UUIDs.
+    # `doc_id_scope` lets callers restrict retrieval to a registry doc subset.
     doc_id_scope: list[str] | None = state.get("doc_id_scope")  # type: ignore[assignment]
 
     for sq in to_retrieve:
@@ -84,22 +93,17 @@ def retrieve(state: AgentState) -> dict[str, Any]:
         )
 
     # ---- Phase 10: knowledge-graph expansion ----
-    # After direct retrieval, walk wikilink edges to surface structurally-
-    # related chunks the embedder may have ranked low. Only fires when at
-    # least one retrieved chunk carries wikilinks (i.e. came from a vault
-    # note) — pure-PDF corpora skip this entirely with no extra cost.
     if settings.graph_expansion_enabled:
-        # Collect seeds across all sub-questions + exclude-keys so expansion
-        # doesn't re-surface chunks the retriever already has.
         all_seeds = []
         exclude: set[tuple[str, int]] = set()
         for sq_chunks in chunks_by_subq.values():
             for c in sq_chunks:
                 all_seeds.append(c)
-                exclude.add((c.source_file, c.chunk_index))
+                exclude.add((
+                    getattr(c, "source_file", "") or "",
+                    getattr(c, "chunk_index", -1),
+                ))
 
-        # Skip the call entirely if no seed has any wikilinks — common short-
-        # circuit that saves the store-scan cost on PDF-only retrievals.
         any_have_links = any(
             getattr(c, "wikilinks", None) for c in all_seeds
         )
@@ -123,18 +127,19 @@ def retrieve(state: AgentState) -> dict[str, Any]:
                     "duration_ms": dur_ms,
                 }
             )
-            # Attach all extras under the ORIGINAL question key so the
-            # generator sees them grouped as "related context" rather than
-            # tied to a specific sub-question.
             if extras:
                 top_key = state.get("question") or next(iter(chunks_by_subq.keys()), "")
                 if top_key:
                     chunks_by_subq[top_key] = list(chunks_by_subq.get(top_key) or []) + extras
 
-    return {"chunks_by_subq": chunks_by_subq, "trace": timings}
+    # Convert in-memory chunks back to refs for the checkpoint. Local
+    # (HybridChunk) chunks become free refs via chroma_id; web/paper/graph
+    # chunks get one INSERT each in `agent_artifacts`.
+    refs_out = persist_mixed(thread_id, chunks_by_subq)
+    return {"chunk_refs_by_subq": refs_out, "trace": timings}
 
 
 def has_any_chunks(state: AgentState) -> bool:
-    """Edge predicate — true iff retrieval surfaced at least one chunk anywhere."""
-    by_q = state.get("chunks_by_subq") or {}
+    """Edge predicate — true iff retrieval surfaced at least one ref anywhere."""
+    by_q = state.get("chunk_refs_by_subq") or {}
     return any(len(v) > 0 for v in by_q.values())

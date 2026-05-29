@@ -32,6 +32,11 @@ class RetrievedChunk:
     # vault note that had wikilinks / tags ingested). Empty for PDF chunks.
     wikilinks: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
+    # Chroma id of the underlying chunk (`<content_hash>:<chunk_index>`).
+    # Populated by `naive_retrieve` from the query result so pointer-based
+    # state (see src/agent/artifacts.py) can rehydrate this chunk from
+    # Chroma without ever putting `text` into the LangGraph checkpoint.
+    chroma_id: str = ""
 
     @property
     def citation(self) -> str:
@@ -81,12 +86,13 @@ def naive_retrieve(
         where=where,
     )
 
+    ids = res["ids"][0] if res.get("ids") else []
     docs = res["documents"][0] if res.get("documents") else []
     metas = res["metadatas"][0] if res.get("metadatas") else []
     dists = res["distances"][0] if res.get("distances") else []
 
     out: list[RetrievedChunk] = []
-    for doc, meta, dist in zip(docs, metas, dists):
+    for chroma_id, doc, meta, dist in zip(ids, docs, metas, dists):
         # Chroma returns COSINE DISTANCE (1 - cos_sim) when space is "cosine".
         score = max(0.0, 1.0 - float(dist))
         # Vault chunks store wikilinks + tags as comma-joined strings — split
@@ -106,6 +112,7 @@ def naive_retrieve(
                 score=score,
                 wikilinks=wikilinks,
                 tags=tags,
+                chroma_id=chroma_id,
             )
         )
     return out

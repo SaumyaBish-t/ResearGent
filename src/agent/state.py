@@ -8,40 +8,46 @@ to merge node return values into the running state. Each node returns a
 dict containing ONLY the fields it wants to update; LangGraph merges that
 into the existing state.
 
-For list/dict fields we use Annotated[..., operator.add] / `dict | dict`
-reducers so concurrent nodes (Phase 4+) can write without trampling each
-other. For Phase 3 we don't strictly need them, but designing for fan-out
-now means Phase 4's Critic and Web-Scraper can be added without touching
-the schema.
-
-Lean-state contract (Phase 12)
-------------------------------
+Lean-state contract (Phase 12 + Phase 13)
+-----------------------------------------
 Every field in this TypedDict gets serialized into the LangGraph
 PostgresSaver checkpoint AT EVERY NODE BOUNDARY. With a 500 MB free-tier
 budget, payload discipline matters more than any other optimisation.
 
+Phase 13 made this contract strict: **state holds REFERENCES, not chunk
+text**. Where Phase 12 still carried full `HybridChunk` / `WebChunk` /
+etc. objects through `chunks_by_subq` (worst case ~200KB/snapshot ×
+~10 snapshots/run = 2MB/run), Phase 13 carries `ChunkRef` pointers
+(~80 bytes each) and stores chunk text either in ChromaDB (for local
+chunks) or in the `agent_artifacts` table (for ephemeral web/paper/
+graph chunks). New per-snapshot cost: ~3KB. Per-run: ~30KB. The 500 MB
+budget now buys ~15,000 runs instead of ~250.
+
 Rules every node MUST follow:
-  1. NEVER put raw HTML, full PDF text, or unbounded provider responses
-     into state. Web/paper chunks are already capped (see web.py:_clip
-     and the paper-discovery abstract-only contract); new sources must
-     match that pattern.
-  2. Lean metadata only: URLs, chunk_ids, page numbers, score, signal,
-     short snippet. The full document text lives in ChromaDB; state
-     carries the pointer.
-  3. Don't accumulate. `chunks_by_subq` is the biggest line item — its
-     reducer overwrites per sub-question rather than appending, which
-     is what stops a reflection loop from doubling state every iteration.
+  1. NEVER put chunk `text` into state. Pass refs; hydrate at node entry,
+     persist refs at node exit. The helpers in `src.agent.artifacts`
+     enforce this — see `hydrate(refs_by_subq)`, `persist_local()`,
+     `persist_ephemeral()`.
+  2. NEVER put raw HTML, full PDF text, or unbounded provider responses
+     anywhere in the graph state. They're capped at the ChunkRef boundary.
+  3. Don't accumulate. `chunk_refs_by_subq`'s reducer overwrites per
+     sub-question rather than appending — stops reflection loops from
+     doubling state every iteration.
   4. Anything debug-only (full provider responses, intermediate prompts)
      belongs in the JSONL observability log, NOT in state.
+
+The only TEXT field that lives in state is `draft_answer` — bounded by
+the generator's max_tokens (≈4-6KB), and the whole point of running the
+agent in the first place.
 
 Field reference (mental model)
 ------------------------------
     question              the original user question
     sub_questions         planner output; >=1 entry, may equal [question]
     is_complex            true if planner decomposed into multiple sub-Qs
-    chunks_by_subq        {sub_q: [HybridChunk, ...]} from retriever
+    chunk_refs_by_subq    {sub_q: [ChunkRef-as-dict, ...]} — pointer-based
     draft_answer          generator's synthesized markdown answer
-    citation_map          {S<n>: HybridChunk}; survives across answer & report
+    citation_refs         {S<n>: ChunkRef-as-dict}; hydrated only at format-time
     error                 set by NoAnswer node when retrieval finds nothing
     run_id                stable id for this query, used for checkpoint lookup
     trace                 append-only log of node entries (for debugging)
@@ -52,20 +58,24 @@ from __future__ import annotations
 import operator
 from typing import Annotated, Any, TypedDict
 
-from src.retrieval import GraphChunk, HybridChunk, PaperChunk, WebChunk
 
-# A "context chunk" can come from local hybrid retrieval, web fallback,
-# academic paper discovery, OR knowledge-graph expansion. All four expose
-# the same public interface (text, citation, signal, source_file, ...) so
-# the generator and citation builder don't care about origin.
-ContextChunk = HybridChunk | WebChunk | PaperChunk | GraphChunk
+def _merge_refs_by_subq(
+    a: dict[str, list[Any]],
+    b: dict[str, list[Any]],
+) -> dict[str, list[Any]]:
+    """
+    Reducer for `chunk_refs_by_subq`.
 
+    Latest writer wins per sub-q (deterministic in sequential mode).
+    Crucial that this is OVERWRITE not APPEND — reflection loops re-run
+    retrieval for the same sub-questions, and an append reducer would
+    double the ref count every iteration.
 
-def _merge_chunks_by_subq(
-    a: dict[str, list[ContextChunk]],
-    b: dict[str, list[ContextChunk]],
-) -> dict[str, list[ContextChunk]]:
-    """Reducer: latest writer wins per sub-q (deterministic in sequential mode)."""
+    The list items are stored as plain dicts (`{"kind": ..., "id": ...}`)
+    rather than ChunkRef instances because PostgresSaver's JSON serializer
+    round-trips dataclasses as dicts anyway, and accepting dicts here means
+    the type is robust against version skew.
+    """
     out = dict(a)
     for k, v in b.items():
         out[k] = v
@@ -87,8 +97,11 @@ class AgentState(TypedDict, total=False):
     is_complex: bool
     planner_reasoning: str
 
-    # ---- Retriever outputs ----
-    chunks_by_subq: Annotated[dict[str, list[ContextChunk]], _merge_chunks_by_subq]
+    # ---- Retriever outputs (Phase 13 pointer form) ----
+    # Each value is a list of ChunkRef-shaped dicts: {"kind": str, "id": str}.
+    # Hydration to text happens inside each consuming node via
+    # `src.agent.artifacts.hydrate()`.
+    chunk_refs_by_subq: Annotated[dict[str, list[dict[str, str]]], _merge_refs_by_subq]
 
     # ---- Critic outputs (Phase 4) ----
     # Overall verdict on the current retrieval round.
@@ -108,7 +121,7 @@ class AgentState(TypedDict, total=False):
     # ---- Paper discovery (Phase 7) ----
     papers_used: bool
     # Lightweight summary of discovered papers for trace/display (not the
-    # full PaperChunk objects — those live in chunks_by_subq).
+    # full PaperChunk objects — those live in `agent_artifacts` via refs).
     papers_discovered: list[dict]
 
     # ---- Self-reflection (Phase 5) ----
@@ -124,7 +137,10 @@ class AgentState(TypedDict, total=False):
 
     # ---- Generator outputs ----
     draft_answer: str
-    citation_map: dict[str, ContextChunk]
+    # Pointer form of citation map: {"S1": {"kind": ..., "id": ...}, ...}.
+    # Hydrated for display in run.py / stream.py / vault_writer.py via
+    # `src.agent.artifacts.hydrate_one()`.
+    citation_refs: dict[str, dict[str, str]]
 
     # ---- Flow control / observability ----
     error: str | None

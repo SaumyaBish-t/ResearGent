@@ -26,10 +26,10 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from src.agent.state import AgentState, ContextChunk
+from src.agent.artifacts import ChunkRef, HydratedChunk, hydrate
+from src.agent.state import AgentState
 from src.config import ModelTier
 from src.llm import chat
-from src.retrieval import HybridChunk, WebChunk
 
 
 SYSTEM_PROMPT = """You are a careful research assistant. Answer the user's question \
@@ -44,20 +44,15 @@ Rules:
 - Prefer concise, direct prose over bullet lists unless the question itself is a list."""
 
 
-def _chunk_key(c: ContextChunk) -> tuple[str, int]:
-    """
-    Stable dedup key across both chunk types.
-
-    HybridChunk -> (source_file, chunk_index)        from local store
-    WebChunk    -> (url, -1)                          from Tavily
-    """
-    # Both expose .source_file and .chunk_index (WebChunk's are property shims).
+def _chunk_key(c: HydratedChunk) -> tuple[str, int]:
+    """Stable dedup key. All hydrated chunks expose source_file + chunk_index."""
     return (c.source_file, c.chunk_index)
 
 
 def _assign_citations(
-    chunks_by_subq: dict[str, list[ContextChunk]],
-) -> tuple[dict[str, ContextChunk], dict[str, list[str]]]:
+    chunks_by_subq: dict[str, list[HydratedChunk]],
+    refs_by_subq: dict[str, list[dict[str, str]]],
+) -> tuple[dict[str, HydratedChunk], dict[str, dict[str, str]], dict[str, list[str]]]:
     """
     Build a stable [S<n>] map across local + web chunks.
 
@@ -67,28 +62,34 @@ def _assign_citations(
 
     A chunk that appears under multiple sub-questions gets ONE tag, reused.
     """
-    citation_map: dict[str, ContextChunk] = {}
+    citation_map: dict[str, HydratedChunk] = {}
+    citation_ref_map: dict[str, dict[str, str]] = {}
     chunk_to_tag: dict[tuple[str, int], str] = {}
     subq_to_tags: dict[str, list[str]] = {}
 
     next_n = 1
     for sq, chunks in chunks_by_subq.items():
         tags_for_this_sq: list[str] = []
-        for c in chunks:
+        refs_for_sq = refs_by_subq.get(sq) or []
+        for i, c in enumerate(chunks):
             key = _chunk_key(c)
             if key not in chunk_to_tag:
                 tag = f"S{next_n}"
                 chunk_to_tag[key] = tag
                 citation_map[tag] = c
+                # Pair the tag with the ORIGINAL ref so state can store the
+                # citation map as pointers (kept under `citation_refs`).
+                if i < len(refs_for_sq):
+                    citation_ref_map[tag] = refs_for_sq[i]
                 next_n += 1
             tags_for_this_sq.append(chunk_to_tag[key])
         subq_to_tags[sq] = tags_for_this_sq
-    return citation_map, subq_to_tags
+    return citation_map, citation_ref_map, subq_to_tags
 
 
 def _build_context_block(
-    chunks_by_subq: dict[str, list[ContextChunk]],
-    citation_map: dict[str, ContextChunk],
+    chunks_by_subq: dict[str, list[HydratedChunk]],
+    citation_map: dict[str, HydratedChunk],
     subq_to_tags: dict[str, list[str]],
 ) -> str:
     """
@@ -132,17 +133,20 @@ def _build_context_block(
 def generate(state: AgentState) -> dict[str, Any]:
     """Synthesize the final answer with [S<n>] citations."""
     question = state["question"]
-    chunks_by_subq = state.get("chunks_by_subq") or {}
+    refs_by_subq = dict(state.get("chunk_refs_by_subq") or {})
 
-    if not chunks_by_subq or not any(chunks_by_subq.values()):
+    if not refs_by_subq or not any(refs_by_subq.values()):
         # Should be unreachable because of the NoAnswer edge, but stay safe.
         return {
             "draft_answer": "I don't have enough indexed material to answer this.",
-            "citation_map": {},
+            "citation_refs": {},
             "trace": [{"node": "generator", "skipped": "no_chunks"}],
         }
 
-    citation_map, subq_to_tags = _assign_citations(chunks_by_subq)
+    # Hydrate once for prompt assembly; the citation map keeps refs (not
+    # chunks) for state, so the post-generator checkpoint stays lean.
+    chunks_by_subq = hydrate(refs_by_subq)
+    citation_map, citation_refs, subq_to_tags = _assign_citations(chunks_by_subq, refs_by_subq)
     context_block = _build_context_block(chunks_by_subq, citation_map, subq_to_tags)
 
     user_msg = f"""Question: {question}
@@ -167,12 +171,12 @@ Write the answer now. Cite every claim with the [S<n>] tags above."""
 
     return {
         "draft_answer": answer.strip(),
-        "citation_map": citation_map,
+        "citation_refs": citation_refs,
         "trace": [
             {
                 "node": "generator",
                 "duration_ms": dur_ms,
-                "n_sources": len(citation_map),
+                "n_sources": len(citation_refs),
                 "answer_chars": len(answer),
             }
         ],

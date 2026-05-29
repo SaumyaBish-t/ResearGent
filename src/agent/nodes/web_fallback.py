@@ -23,6 +23,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from src.agent.artifacts import persist_mixed
 from src.agent.state import AgentState
 from src.config import settings
 from src.retrieval import web_search
@@ -38,7 +39,12 @@ def web_fallback(state: AgentState) -> dict[str, Any]:
     nothing came back.
     """
     sub_qs = list(state.get("sub_questions") or [state["question"]])
-    chunks_by_subq = dict(state.get("chunks_by_subq") or {})
+    thread_id = state.get("run_id") or ""
+    # Start from EXISTING refs — we'll append fresh web refs per sub-q. We
+    # never hydrate the existing chunks here: web_fallback adds to the
+    # ref list without inspecting prior content.
+    existing_refs = dict(state.get("chunk_refs_by_subq") or {})
+    new_web_chunks_by_subq: dict[str, list] = {}
     timings: list[dict[str, Any]] = []
     total_added = 0
     providers_used: set[str] = set()
@@ -55,8 +61,7 @@ def web_fallback(state: AgentState) -> dict[str, Any]:
         dur_ms = int((time.perf_counter() - t0) * 1000)
 
         if web_hits:
-            existing = chunks_by_subq.get(sq) or []
-            chunks_by_subq[sq] = list(existing) + list(web_hits)
+            new_web_chunks_by_subq[sq] = list(web_hits)
             total_added += len(web_hits)
             for h in web_hits:
                 if h.provider:
@@ -73,8 +78,17 @@ def web_fallback(state: AgentState) -> dict[str, Any]:
             }
         )
 
+    # Persist new web chunks to `agent_artifacts`, then merge their refs
+    # alongside the pre-existing local/paper refs. The reducer is OVERWRITE
+    # per sub-q, so we merge in Python before returning.
+    merged_refs: dict[str, list[dict[str, str]]] = dict(existing_refs)
+    if new_web_chunks_by_subq:
+        new_refs = persist_mixed(thread_id, new_web_chunks_by_subq)
+        for sq, refs in new_refs.items():
+            merged_refs[sq] = list(merged_refs.get(sq) or []) + list(refs)
+
     return {
-        "chunks_by_subq": chunks_by_subq,
+        "chunk_refs_by_subq": merged_refs,
         "web_used": True,
         "trace": timings,
         # If still nothing AND no API key, surface the reason for the trace

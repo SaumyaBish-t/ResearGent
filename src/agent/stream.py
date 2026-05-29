@@ -43,22 +43,18 @@ def _summarize_node_update(node_name: str, update: dict[str, Any]) -> dict[str, 
         summary["reasoning"] = update.get("planner_reasoning") or ""
 
     elif node_name == "retriever":
-        cbs = update.get("chunks_by_subq") or {}
+        cbs = update.get("chunk_refs_by_subq") or {}
         summary["total_chunks"] = sum(len(v) for v in cbs.values())
         summary["per_subq_counts"] = {k[:60]: len(v) for k, v in cbs.items()}
-        # Count graph-expanded chunks — surfaces the "AI brain" activity.
-        graph_count = 0
-        mutual_count = 0
-        for chunks in cbs.values():
-            for c in chunks:
-                sig = getattr(c, "signal", "")
-                if sig.startswith("graph:"):
-                    graph_count += 1
-                    if sig == "graph:mutual":
-                        mutual_count += 1
+        # Count graph-expanded refs — refs carry kind directly, no hydration.
+        graph_count = sum(
+            1
+            for refs in cbs.values()
+            for r in (refs or [])
+            if (isinstance(r, dict) and r.get("kind") == "graph")
+        )
         if graph_count:
             summary["graph_expanded"] = graph_count
-            summary["mutual_links"] = mutual_count
 
     elif node_name == "critic":
         summary["confidence"] = update.get("confidence")
@@ -79,22 +75,25 @@ def _summarize_node_update(node_name: str, update: dict[str, Any]) -> dict[str, 
         summary["rewritten_count"] = len(rewrites)
 
     elif node_name == "web_fallback":
-        cbs = update.get("chunks_by_subq") or {}
-        web_count = 0
-        providers: set[str] = set()
-        for chunks in cbs.values():
-            for c in chunks:
-                if getattr(c, "provider", "") or (getattr(c, "url", "") and not getattr(c, "chunk_index", 0) >= 0):
-                    web_count += 1
-                    p = getattr(c, "provider", "")
-                    if p:
-                        providers.add(p)
+        cbs = update.get("chunk_refs_by_subq") or {}
+        web_count = sum(
+            1
+            for refs in cbs.values()
+            for r in (refs or [])
+            if (isinstance(r, dict) and r.get("kind") == "web")
+        )
         summary["web_chunks_added"] = web_count
+        # Providers come from the trace entries — refs don't carry that.
+        trace = update.get("trace") or []
+        providers: set[str] = set()
+        for e in trace:
+            if e.get("node") == "web_fallback":
+                providers.update(e.get("providers") or [])
         summary["providers_used"] = sorted(providers)
 
     elif node_name == "generator":
         summary["answer_chars"] = len(update.get("draft_answer") or "")
-        summary["n_sources"] = len(update.get("citation_map") or {})
+        summary["n_sources"] = len(update.get("citation_refs") or {})
 
     elif node_name == "reflector":
         summary["attempt"] = update.get("reflection_attempts")
@@ -159,19 +158,23 @@ def stream_agent(
         }
         return
 
-    # Final terminal event with the fully materialized answer.
-    citation_map = final_state.get("citation_map") or {}
+    # Final terminal event with the fully materialized answer. Citations
+    # live as refs in state; hydrate them HERE — the one and only place
+    # where chunk text crosses the network boundary to the browser.
+    from src.agent.artifacts import hydrate_one
+    citation_refs = final_state.get("citation_refs") or {}
+    ordered_tags = sorted(citation_refs.keys(), key=lambda t: int(t[1:])) if citation_refs else []
+    hydrated = hydrate_one([citation_refs[t] for t in ordered_tags]) if ordered_tags else []
+    citation_map = dict(zip(ordered_tags, hydrated))
     sources_payload = []
-    for tag, c in sorted(citation_map.items(), key=lambda kv: int(kv[0][1:])):
-        rrf = getattr(c, "rrf_score", None)
-        score = getattr(c, "score", None)
+    for tag, c in citation_map.items():
         sources_payload.append(
             {
                 "tag": tag,
                 "citation": c.citation,
                 "signal": c.signal,
-                "rrf_score": rrf,
-                "score": score,
+                "rrf_score": None,
+                "score": None,
                 "preview": c.text[:300],
             }
         )
@@ -201,7 +204,7 @@ def stream_agent(
     saved_path = auto_save_run(
         question=question,
         answer=final_state.get("draft_answer") or "",
-        sources=final_state.get("citation_map") or {},
+        sources=citation_map,
         sub_questions=final_state.get("sub_questions") or [question],
         is_complex=bool(final_state.get("is_complex")),
         confidence=final_state.get("confidence") or "",

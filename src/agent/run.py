@@ -16,7 +16,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from src.agent.graph import build_graph
-from src.agent.state import AgentState, ContextChunk
+from src.agent.artifacts import HydratedChunk
+from src.agent.state import AgentState
 
 
 @dataclass
@@ -25,7 +26,7 @@ class AgentResult:
 
     question: str
     answer: str
-    sources: dict[str, ContextChunk]
+    sources: dict[str, HydratedChunk]
     sub_questions: list[str]
     is_complex: bool
     planner_reasoning: str
@@ -156,10 +157,19 @@ def run_agent(
 
     final: AgentState = graph.invoke(initial, config=config)  # type: ignore[arg-type]
 
+    # Hydrate citation refs once for the result struct. Downstream consumers
+    # (note auto-saver, CLI formatter) want chunks with text/citation, not
+    # pointers — the boundary between lean state and human-facing output.
+    from src.agent.artifacts import hydrate_one
+    citation_refs = final.get("citation_refs") or {}
+    ordered_tags = sorted(citation_refs.keys(), key=lambda t: int(t[1:])) if citation_refs else []
+    hydrated_chunks = hydrate_one([citation_refs[t] for t in ordered_tags]) if ordered_tags else []
+    sources = dict(zip(ordered_tags, hydrated_chunks))
+
     return AgentResult(
         question=question,
         answer=final.get("draft_answer", "") or "",
-        sources=final.get("citation_map") or {},
+        sources=sources,
         sub_questions=final.get("sub_questions") or [question],
         is_complex=bool(final.get("is_complex")),
         planner_reasoning=final.get("planner_reasoning") or "",

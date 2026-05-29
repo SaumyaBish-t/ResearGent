@@ -46,7 +46,8 @@ import re
 import time
 from typing import Any
 
-from src.agent.state import AgentState, ContextChunk
+from src.agent.artifacts import HydratedChunk, hydrate
+from src.agent.state import AgentState
 from src.config import ModelTier
 from src.llm import chat
 
@@ -112,7 +113,7 @@ def _extract_json(text: str) -> dict[str, Any] | None:
         return None
 
 
-def _grade_one_subq(sub_q: str, chunks: list[ContextChunk]) -> tuple[list[str], str, int]:
+def _grade_one_subq(sub_q: str, chunks: list[HydratedChunk]) -> tuple[list[str], str, int]:
     """
     Grade chunks for a single sub-question. Returns (grades, reasoning, ms).
 
@@ -191,15 +192,22 @@ def critique(state: AgentState) -> dict[str, Any]:
     chunks that survived the filter. Combined with confidence routing, this
     is the corrective half of "Corrective RAG".
     """
-    chunks_by_subq = state.get("chunks_by_subq") or {}
-    if not chunks_by_subq:
+    # Pointer-state: refs come in as dicts; hydrate them HERE to do grading,
+    # then return surviving refs (sliced from the input). The input refs
+    # are dict-typed so we can re-emit them by index without round-tripping
+    # through `persist_mixed` again — saving a PG write on every critic call.
+    refs_by_subq: dict[str, list[dict[str, str]]] = dict(state.get("chunk_refs_by_subq") or {})
+    if not refs_by_subq or not any(refs_by_subq.values()):
         return {
             "confidence": "low",
             "critic_reasoning": "no chunks retrieved",
             "trace": [{"node": "critic", "skipped": "empty_input"}],
         }
 
-    new_chunks_by_subq: dict[str, list[ContextChunk]] = {}
+    # Hydrate every sub-Q together — one ChromaDB call + one PG query total.
+    chunks_by_subq = hydrate(refs_by_subq)
+
+    new_refs_by_subq: dict[str, list[dict[str, str]]] = {}
     all_grades: list[str] = []
     reasonings: list[str] = []
     total_ms = 0
@@ -213,16 +221,22 @@ def critique(state: AgentState) -> dict[str, Any]:
         all_grades.extend(grades)
         if reasoning:
             reasonings.append(reasoning)
-        # Keep relevant + partial. Drop irrelevant.
-        kept = [c for c, g in zip(chunks, grades) if g != "irrelevant"]
-        new_chunks_by_subq[sq] = kept
-        total_chunks_kept += len(kept)
+        # Keep relevant + partial. Drop irrelevant. Refs sliced from the
+        # ORIGINAL input refs by index so we don't write new artifacts.
+        original_refs = refs_by_subq.get(sq) or []
+        kept_refs = [
+            original_refs[i]
+            for i, g in enumerate(grades)
+            if i < len(original_refs) and g != "irrelevant"
+        ]
+        new_refs_by_subq[sq] = kept_refs
+        total_chunks_kept += len(kept_refs)
 
     verdict = _derive_verdict(all_grades)
     summary = "; ".join(reasonings)[:300] if reasonings else ""
 
     return {
-        "chunks_by_subq": new_chunks_by_subq,
+        "chunk_refs_by_subq": new_refs_by_subq,
         "confidence": verdict,
         "critic_reasoning": summary,
         "trace": [
