@@ -195,7 +195,8 @@ def stream_agent(
     # If the user has auto_save_to_notes enabled and the run cleared the
     # quality gate, persist it to the notes folder right here in the
     # stream so the browser learns the saved path via an SSE event.
-    from src.agent.save import auto_save_run
+    from src.agent.save import auto_save_run, should_auto_save
+    from src.config import settings as _settings
 
     saved_path = auto_save_run(
         question=question,
@@ -215,5 +216,28 @@ def stream_agent(
         yield {
             "type": "saved",
             "path": str(saved_path),
+            "ts": time.time(),
+        }
+    else:
+        # Always emit an explicit save-decision event so the UI knows the
+        # stream is genuinely done (vs. waiting for an auto-save that's
+        # never coming). The reason field makes the skip auditable.
+        if not _settings.auto_save_to_notes:
+            reason = "auto_save_disabled"
+        elif final_state.get("error") == "no_sources_used_llm_priors":
+            reason = "llm_priors_no_sources"
+        elif not should_auto_save(
+            confidence=final_state.get("confidence") or "",
+            error=final_state.get("error"),
+        ):
+            reason = (
+                f"confidence_{final_state.get('confidence') or 'unknown'}_"
+                f"below_{_settings.auto_save_min_confidence}"
+            )
+        else:
+            reason = "no_notes_folder_configured"
+        yield {
+            "type": "save_skipped",
+            "reason": reason,
             "ts": time.time(),
         }
