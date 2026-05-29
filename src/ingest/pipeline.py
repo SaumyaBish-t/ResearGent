@@ -32,12 +32,34 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 
+from src.config import settings
 from src.ingest.chunker import Chunk, chunk_pages
 from src.ingest.obsidian import VaultChunk, VaultNote, chunk_note, iter_vault_notes, parse_note
 from src.ingest.pdf import Document, parse_pdf
 from src.llm import ModelTier, embed
 from src.retrieval import bm25 as bm25_idx
 from src.store import get_or_create_papers_collection
+
+# Where raw bytes live after ingestion. Today: local disk under data/storage/.
+# Tomorrow: swap for an S3 URL by changing `_persist_raw()` only.
+RAW_STORAGE_DIR = Path("data") / "storage"
+
+
+def _persist_raw(src: Path, *, content_hash: str, ext: str) -> str:
+    """
+    Copy `src` into the canonical raw-storage location and return the URL.
+
+    Naming by content_hash means re-ingesting the same file is a no-op on
+    disk. Returning a `file://` URL keeps the column type future-proof —
+    a later S3 migration just changes this function's return value.
+    """
+    RAW_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+    dest = RAW_STORAGE_DIR / f"{content_hash}{ext}"
+    if not dest.exists():
+        # Copy not move — the ingest source dir (data/papers/) should
+        # remain browseable; the storage dir is implementation detail.
+        dest.write_bytes(src.read_bytes())
+    return dest.resolve().as_uri()
 
 console = Console()
 
@@ -55,20 +77,36 @@ def _batched(items: list, n: int) -> Iterable[list]:
         yield items[i : i + n]
 
 
-def _delete_existing_doc(doc_id: str) -> int:
-    """Remove any chunks already stored under this doc_id. Returns count removed."""
+def _delete_existing_doc(content_hash: str) -> int:
+    """
+    Remove any chunks already stored for this content hash. Returns count removed.
+
+    Keyed on `content_hash` (not `doc_id`) so re-ingesting an identical file
+    correctly replaces the prior chunks even though the doc_id (a registry
+    UUID) is newly minted on each ingest call. Falls back to the legacy
+    `doc_id == hash` lookup so corpora ingested before Phase 12 still clean
+    up properly.
+    """
     col = get_or_create_papers_collection()
-    try:
-        existing = col.get(where={"doc_id": doc_id}, include=[])
-    except Exception:
-        return 0
-    ids = existing.get("ids") or []
-    if ids:
-        col.delete(ids=ids)
-    return len(ids)
+    removed_ids: list[str] = []
+    for filter_field in ("content_hash", "doc_id"):
+        try:
+            existing = col.get(where={filter_field: content_hash}, include=[])
+        except Exception:
+            continue
+        removed_ids.extend(existing.get("ids") or [])
+    if removed_ids:
+        col.delete(ids=list(set(removed_ids)))
+    return len(set(removed_ids))
 
 
-def _embed_and_store(doc: Document, chunks: list[Chunk], *, verbose: bool = True) -> int:
+def _embed_and_store(
+    doc: Document,
+    chunks: list[Chunk],
+    *,
+    registry_doc_id: str,
+    verbose: bool = True,
+) -> int:
     """
     Embed chunks in batches, insert into Chroma. Returns count inserted.
 
@@ -99,10 +137,15 @@ def _embed_and_store(doc: Document, chunks: list[Chunk], *, verbose: bool = True
             raise
         dur_ms = int((time.perf_counter() - t0) * 1000)
 
+        # Chroma id prefix uses the content hash so the same chunk has a
+        # stable id across re-ingests (lets `_delete_existing_doc` find it).
+        # `doc_id` in metadata is the REGISTRY UUID — what the Retriever
+        # filters on. `content_hash` is the dedup key.
         ids = [f"{doc.doc_id}:{c.chunk_index}" for c in batch]
         metadatas = [
             {
-                "doc_id": doc.doc_id,
+                "doc_id": registry_doc_id,
+                "content_hash": doc.doc_id,
                 "source_file": c.source_file,
                 "page_number": c.page_number,
                 "chunk_index": c.chunk_index,
@@ -168,16 +211,46 @@ def ingest_file(path: Path, *, verbose: bool = True, rebuild_bm25: bool = True) 
     doc = parse_pdf(path)
 
     if verbose:
-        console.print(f"  pages: {doc.total_pages}  |  doc_id: {doc.doc_id}")
+        console.print(f"  pages: {doc.total_pages}  |  content_hash: {doc.doc_id}")
 
     chunks = chunk_pages(doc.pages)
     removed = _delete_existing_doc(doc.doc_id)
 
+    # Persist raw bytes + register in PG BEFORE embedding so a mid-embed
+    # crash still leaves a discoverable registry row pointing at the file.
+    # Registration is gated on Postgres being configured — local-dev users
+    # without DATABASE_URL fall back to using the content_hash as doc_id
+    # so retrieval still works (just without registry-based filtering).
+    file_size = path.stat().st_size
+    registry_doc_id: str
+    storage_url: str | None = None
+    if settings.resolve_database_url():
+        from src.registry import upsert_document
+
+        storage_url = _persist_raw(path, content_hash=doc.doc_id, ext=".pdf")
+        registry_uuid = upsert_document(
+            content_hash=doc.doc_id,
+            filename=path.name,
+            title=doc.title,
+            source_type="pdf",
+            file_storage_url=storage_url,
+            file_size=file_size,
+            chunk_count=len(chunks),
+        )
+        registry_doc_id = str(registry_uuid)
+    else:
+        # No Postgres → keep Phase-11 behaviour. The content_hash doubles
+        # as doc_id; nothing in the retrieval path requires UUID format.
+        registry_doc_id = doc.doc_id
+
     if verbose:
-        console.print(f"  chunks: {len(chunks)} (replaced {removed} existing)")
+        console.print(
+            f"  chunks: {len(chunks)} (replaced {removed} existing)  "
+            f"doc_id: {registry_doc_id}"
+        )
         console.print("  [cyan]embedding[/cyan]...")
 
-    inserted = _embed_and_store(doc, chunks)
+    inserted = _embed_and_store(doc, chunks, registry_doc_id=registry_doc_id)
 
     bm25_count = 0
     if rebuild_bm25:
@@ -187,12 +260,15 @@ def ingest_file(path: Path, *, verbose: bool = True, rebuild_bm25: bool = True) 
 
     return {
         "source_file": doc.source_file,
-        "doc_id": doc.doc_id,
+        "doc_id": registry_doc_id,
+        "content_hash": doc.doc_id,
         "title": doc.title,
         "pages": doc.total_pages,
         "chunks_inserted": inserted,
         "chunks_replaced": removed,
         "bm25_chunks": bm25_count,
+        "storage_url": storage_url,
+        "file_size": file_size,
     }
 
 
@@ -252,7 +328,13 @@ def ingest_directory(dir_path: Path) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def _embed_and_store_vault_chunks(note: VaultNote, chunks: list[VaultChunk], *, verbose: bool = True) -> int:
+def _embed_and_store_vault_chunks(
+    note: VaultNote,
+    chunks: list[VaultChunk],
+    *,
+    registry_doc_id: str,
+    verbose: bool = True,
+) -> int:
     """Embed vault chunks and insert into the same papers collection."""
     if not chunks:
         return 0
@@ -280,7 +362,8 @@ def _embed_and_store_vault_chunks(note: VaultNote, chunks: list[VaultChunk], *, 
         ids = [f"{note.doc_id}:{c.chunk_index}" for c in batch]
         metadatas = [
             {
-                "doc_id": note.doc_id,
+                "doc_id": registry_doc_id,
+                "content_hash": note.doc_id,
                 "source_file": c.source_file,
                 "page_number": c.page_number,       # 0 for vault notes
                 "chunk_index": c.chunk_index,
@@ -359,15 +442,43 @@ def ingest_vault(
             note = parse_note(note_path, vault_path)
             chunks = chunk_note(note)
             removed = _delete_existing_doc(note.doc_id)
+
+            # Register the note's bytes the same way as PDFs. The "raw"
+            # representation of a markdown note is just the file itself.
+            file_size = note_path.stat().st_size
+            if settings.resolve_database_url():
+                from src.registry import upsert_document
+
+                storage_url = _persist_raw(
+                    note_path, content_hash=note.doc_id, ext=".md"
+                )
+                registry_uuid = upsert_document(
+                    content_hash=note.doc_id,
+                    filename=str(rel),
+                    title=note.title,
+                    source_type="note",
+                    file_storage_url=storage_url,
+                    file_size=file_size,
+                    chunk_count=len(chunks),
+                    extra={"tags": note.tags, "wikilinks": note.wikilinks},
+                )
+                registry_doc_id = str(registry_uuid)
+            else:
+                registry_doc_id = note.doc_id
+
             if verbose:
                 console.print(
                     f"  chunks: {len(chunks)}  tags: {len(note.tags)}  "
-                    f"links: {len(note.wikilinks)}  (replaced {removed})"
+                    f"links: {len(note.wikilinks)}  (replaced {removed})  "
+                    f"doc_id: {registry_doc_id}"
                 )
-            inserted = _embed_and_store_vault_chunks(note, chunks, verbose=verbose)
+            inserted = _embed_and_store_vault_chunks(
+                note, chunks, registry_doc_id=registry_doc_id, verbose=verbose,
+            )
             results.append({
                 "source_file": str(rel),
-                "doc_id": note.doc_id,
+                "doc_id": registry_doc_id,
+                "content_hash": note.doc_id,
                 "title": note.title,
                 "tags": note.tags,
                 "wikilinks": note.wikilinks,

@@ -63,9 +63,15 @@ def retrieve(state: AgentState) -> dict[str, Any]:
             }
         )
 
+    # `doc_id_scope` lets callers (API, future CLI flag) restrict retrieval
+    # to a subset of registered documents. Resolved by main.py / api/app.py
+    # against the Postgres registry before the agent is invoked, then
+    # passed through as plain list[str] of UUIDs.
+    doc_id_scope: list[str] | None = state.get("doc_id_scope")  # type: ignore[assignment]
+
     for sq in to_retrieve:
         t0 = time.perf_counter()
-        hits = hybrid_retrieve(sq, k=per_subq_k)
+        hits = hybrid_retrieve(sq, k=per_subq_k, doc_ids=doc_id_scope)
         chunks_by_subq[sq] = hits
         timings.append(
             {

@@ -181,20 +181,52 @@ class Collection:
                 p.embeddings = p.embeddings[keep_idx]
             self._flush()
 
+    @staticmethod
+    def _match(meta: dict, where: dict) -> bool:
+        """
+        Tiny `where` evaluator covering the subset of Chroma operators we use.
+
+        Supported:
+          {"key": "value"}                         -> equality
+          {"key": {"$in":  [v1, v2, ...]}}         -> membership
+          {"key": {"$eq":  v}}                     -> explicit equality
+          {"key": {"$ne":  v}}                     -> inequality
+
+        Anything else raises so a typo doesn't silently return everything.
+        """
+        for k, expected in where.items():
+            actual = meta.get(k)
+            if isinstance(expected, dict):
+                if "$in" in expected:
+                    if actual not in expected["$in"]:
+                        return False
+                elif "$eq" in expected:
+                    if actual != expected["$eq"]:
+                        return False
+                elif "$ne" in expected:
+                    if actual == expected["$ne"]:
+                        return False
+                else:
+                    raise ValueError(
+                        f"Unsupported where operator(s) for key {k!r}: {expected!r}"
+                    )
+            else:
+                if actual != expected:
+                    return False
+        return True
+
     def get(
         self,
         where: dict | None = None,
         include: list[str] | None = None,
     ) -> dict[str, list]:
-        """ChromaDB-shaped get. `where` does AND-equality on metadata."""
+        """ChromaDB-shaped get. `where` supports equality + `$in`/`$eq`/`$ne`."""
         include = include if include is not None else ["documents", "metadatas"]
         with self._lock:
             p = self._payload
             if where:
                 idxs = [
-                    i
-                    for i, m in enumerate(p.metadatas)
-                    if all(m.get(k) == v for k, v in where.items())
+                    i for i, m in enumerate(p.metadatas) if self._match(m, where)
                 ]
             else:
                 idxs = list(range(len(p.ids)))
@@ -211,6 +243,7 @@ class Collection:
         query_embeddings: list[list[float]],
         n_results: int = 5,
         include: list[str] | None = None,
+        where: dict | None = None,
     ) -> dict[str, list[list]]:
         """
         Top-k cosine similarity. Returns ChromaDB-shaped batched dict where
@@ -232,7 +265,28 @@ class Collection:
                 if "distances" in include: out["distances"] = empty
                 return out
 
-            corpus = p.embeddings
+            # Restrict candidate pool by `where` BEFORE similarity sort, so
+            # filters like {"doc_id": {"$in": [...]}} cost O(filtered) rather
+            # than O(corpus). Big win when filtering to a handful of docs in
+            # a corpus of thousands of chunks.
+            if where:
+                allowed = np.array(
+                    [self._match(m, where) for m in p.metadatas], dtype=bool
+                )
+                if not allowed.any():
+                    empty = [[] for _ in query_embeddings]
+                    out: dict[str, list[list]] = {"ids": empty}
+                    if "documents" in include: out["documents"] = empty
+                    if "metadatas" in include: out["metadatas"] = empty
+                    if "distances" in include: out["distances"] = empty
+                    return out
+                allowed_idx = np.nonzero(allowed)[0]
+                corpus = p.embeddings[allowed_idx]
+                id_map = allowed_idx
+            else:
+                corpus = p.embeddings
+                id_map = np.arange(len(p.ids))
+
             # Normalize once. Could be cached, but for our scale recomputing
             # is sub-millisecond and avoids stale-cache bugs.
             corpus_n = corpus / (np.linalg.norm(corpus, axis=1, keepdims=True) + 1e-12)
@@ -249,10 +303,13 @@ class Collection:
                     continue
                 top_unordered = np.argpartition(-sims, k - 1)[:k]
                 top = top_unordered[np.argsort(-sims[top_unordered])]
-                ids_out.append([p.ids[i] for i in top])
-                docs_out.append([p.documents[i] for i in top])
-                metas_out.append([p.metadatas[i] for i in top])
-                dists_out.append([float(1.0 - sims[i]) for i in top])
+                # `top` indexes the FILTERED corpus; map back to original
+                # row indices for id/doc/metadata lookup.
+                orig = [int(id_map[i]) for i in top]
+                ids_out.append([p.ids[i] for i in orig])
+                docs_out.append([p.documents[i] for i in orig])
+                metas_out.append([p.metadatas[i] for i in orig])
+                dists_out.append([float(1.0 - sims[top[j]]) for j in range(len(top))])
 
             out = {"ids": ids_out}
             if "documents" in include: out["documents"] = docs_out

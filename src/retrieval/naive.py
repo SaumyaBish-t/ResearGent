@@ -53,17 +53,32 @@ def _embed_query(query: str) -> list[float]:
     return resp.data[0].embedding
 
 
-def naive_retrieve(query: str, *, k: int = 5) -> list[RetrievedChunk]:
-    """Top-k dense retrieval from the currently active papers collection."""
+def naive_retrieve(
+    query: str,
+    *,
+    k: int = 5,
+    doc_ids: list[str] | None = None,
+) -> list[RetrievedChunk]:
+    """
+    Top-k dense retrieval from the currently active papers collection.
+
+    `doc_ids` scopes the search to a specific set of registry doc_ids —
+    e.g. "search only the user's uploaded PDFs", "search only notes
+    tagged #research". The doc_ids come from the Postgres registry
+    (see `src.registry.get_doc_ids_for_filter`). When None (the default),
+    the entire corpus is searched.
+    """
     col = get_or_create_papers_collection()
     if col.count() == 0:
         return []
 
     qvec = _embed_query(query)
+    where = {"doc_id": {"$in": doc_ids}} if doc_ids else None
     res = col.query(
         query_embeddings=[qvec],
         n_results=k,
         include=["documents", "metadatas", "distances"],
+        where=where,
     )
 
     docs = res["documents"][0] if res.get("documents") else []

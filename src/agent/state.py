@@ -14,6 +14,26 @@ other. For Phase 3 we don't strictly need them, but designing for fan-out
 now means Phase 4's Critic and Web-Scraper can be added without touching
 the schema.
 
+Lean-state contract (Phase 12)
+------------------------------
+Every field in this TypedDict gets serialized into the LangGraph
+PostgresSaver checkpoint AT EVERY NODE BOUNDARY. With a 500 MB free-tier
+budget, payload discipline matters more than any other optimisation.
+
+Rules every node MUST follow:
+  1. NEVER put raw HTML, full PDF text, or unbounded provider responses
+     into state. Web/paper chunks are already capped (see web.py:_clip
+     and the paper-discovery abstract-only contract); new sources must
+     match that pattern.
+  2. Lean metadata only: URLs, chunk_ids, page numbers, score, signal,
+     short snippet. The full document text lives in ChromaDB; state
+     carries the pointer.
+  3. Don't accumulate. `chunks_by_subq` is the biggest line item — its
+     reducer overwrites per sub-question rather than appending, which
+     is what stops a reflection loop from doubling state every iteration.
+  4. Anything debug-only (full provider responses, intermediate prompts)
+     belongs in the JSONL observability log, NOT in state.
+
 Field reference (mental model)
 ------------------------------
     question              the original user question
@@ -56,6 +76,11 @@ class AgentState(TypedDict, total=False):
     # ---- Inputs ----
     question: str
     run_id: str
+    # Optional: restrict retrieval to a specific set of registry doc_ids
+    # (UUID strings). When unset, the entire corpus is searched. Lets the
+    # caller scope a query to "just my uploads" / "just my notes" / etc.
+    # without code changes elsewhere.
+    doc_id_scope: list[str]
 
     # ---- Planner outputs ----
     sub_questions: list[str]
