@@ -77,6 +77,7 @@ def hybrid_retrieve(
     *,
     k: int = 5,
     pool_size: int | None = None,
+    doc_ids: list[str] | None = None,
 ) -> list[HybridChunk]:
     """
     Run dense + BM25 in parallel-ish, fuse with RRF, return top-k.
@@ -89,8 +90,15 @@ def hybrid_retrieve(
     pool = pool_size or max(20, k * 4)
 
     # ---- Retrieve from both sides ----
-    dense_hits = naive_retrieve(query, k=pool)
+    # `doc_ids` is honoured by the dense side via Chroma metadata filtering.
+    # BM25 doesn't speak that filter today, so we filter its hits post-hoc.
+    # Same end result; small efficiency penalty (BM25 still scans the full
+    # index). Worth tightening only if doc-scoped queries become hot.
+    dense_hits = naive_retrieve(query, k=pool, doc_ids=doc_ids)
     bm25_hits = bm25_idx.search(query, k=pool)
+    if doc_ids:
+        allowed = set(doc_ids)
+        bm25_hits = [h for h in bm25_hits if h.metadata.get("doc_id") in allowed]
 
     # ---- Index by chunk id (= "<doc_id>:<chunk_index>") for join ----
     # The naive retriever returns RetrievedChunk without an explicit id, so we

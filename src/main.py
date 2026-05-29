@@ -28,6 +28,213 @@ app = typer.Typer(
 )
 console = Console()
 
+# `db` sub-app — schema setup, TTL pruning, connection health. Kept separate
+# from the top-level commands because they're admin operations, not
+# day-to-day usage. Try `researgent db --help`.
+db_app = typer.Typer(help="PostgreSQL admin: init schema, prune old checkpoints, status.")
+app.add_typer(db_app, name="db")
+
+
+@db_app.command("init")
+def db_init() -> None:
+    """
+    Create LangGraph checkpoint tables in Postgres.
+
+    Run this once per environment after setting DATABASE_URL (or the
+    discrete POSTGRES_* fields) in .env. It calls PostgresSaver.setup(),
+    which issues idempotent `CREATE TABLE IF NOT EXISTS` for:
+       checkpoints, checkpoint_writes, checkpoint_blobs, checkpoint_migrations
+    Safe to re-run — existing data is preserved.
+    """
+    from src.config import settings
+    from src.db import get_checkpointer
+
+    url = settings.resolve_database_url()
+    if not url:
+        console.print(
+            "[red]No Postgres configured.[/red]\n"
+            "  Set [cyan]DATABASE_URL[/cyan] in .env (preferred), or "
+            "POSTGRES_HOST + POSTGRES_DB + POSTGRES_USER + POSTGRES_PASSWORD."
+        )
+        raise typer.Exit(code=1)
+
+    # Hide the password before echoing.
+    safe = url
+    if "@" in safe and "://" in safe:
+        scheme, rest = safe.split("://", 1)
+        creds, host = rest.split("@", 1)
+        if ":" in creds:
+            user, _ = creds.split(":", 1)
+            safe = f"{scheme}://{user}:***@{host}"
+    console.print(f"[dim]connecting to:[/dim] [cyan]{safe}[/cyan]")
+
+    try:
+        get_checkpointer(setup=True)
+        # documents_registry is our table, not LangGraph's — created here so
+        # `db init` is the single command that brings up a fresh deployment.
+        from src.registry import init_schema as _init_registry
+        _init_registry()
+    except Exception as e:
+        console.print(f"[red]setup failed:[/red] {type(e).__name__}: {e}")
+        raise typer.Exit(code=1)
+
+    console.print(
+        "[bold green]OK[/bold green] — checkpoint tables + documents_registry ready."
+    )
+
+
+@db_app.command("status")
+def db_status() -> None:
+    """Confirm we can reach Postgres and report checkpoint row counts."""
+    from src.db import connection
+
+    try:
+        with connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT version()")
+            ver = cur.fetchone()
+            # `regclass` cast returns NULL when the table doesn't exist —
+            # avoids a hard error on a fresh database (pre-`db init`).
+            cur.execute(
+                "SELECT to_regclass('public.checkpoints') AS t, "
+                "       to_regclass('public.checkpoint_writes') AS w"
+            )
+            tables = cur.fetchone()
+            counts = {"checkpoints": None, "checkpoint_writes": None}
+            if tables and tables.get("t"):
+                cur.execute("SELECT count(*) AS n FROM checkpoints")
+                counts["checkpoints"] = cur.fetchone()["n"]
+            if tables and tables.get("w"):
+                cur.execute("SELECT count(*) AS n FROM checkpoint_writes")
+                counts["checkpoint_writes"] = cur.fetchone()["n"]
+    except Exception as e:
+        console.print(f"[red]connection failed:[/red] {type(e).__name__}: {e}")
+        raise typer.Exit(code=1)
+
+    console.print(f"[green]connected[/green]: {ver['version'].split(',')[0] if ver else '?'}")
+    for name, n in counts.items():
+        if n is None:
+            console.print(f"  {name}: [yellow]table missing[/yellow] (run `researgent db init`)")
+        else:
+            console.print(f"  {name}: [cyan]{n}[/cyan] rows")
+
+
+def _uuidv6_boundary(cutoff: "datetime.datetime") -> str:
+    """
+    Build a UUIDv6 whose embedded timestamp == `cutoff`.
+
+    UUIDv6 stores a 60-bit count of 100-nanosecond intervals since the
+    Gregorian epoch (1582-10-15 UTC), split across the time_high / time_mid
+    / time_low fields with the version nibble (0110) in the middle. The
+    canonical hex form sorts lexicographically the same as the numeric
+    value, so a string `<` against this boundary correctly identifies
+    every checkpoint generated before `cutoff`.
+
+    Clock-seq and node fields are zeroed — any real UUIDv6 generated at
+    exactly `cutoff` would have non-zero bits there, so the boundary value
+    is the *minimum* UUIDv6 at that timestamp. Therefore `checkpoint_id <
+    boundary` is strictly conservative: never deletes anything that was
+    actually written at-or-after the cutoff instant.
+    """
+    import datetime as _dt
+
+    gregorian_epoch = _dt.datetime(1582, 10, 15, tzinfo=_dt.timezone.utc)
+    delta = cutoff - gregorian_epoch
+    ts_100ns = int(delta.total_seconds() * 10_000_000) & ((1 << 60) - 1)
+    time_high = (ts_100ns >> 28) & 0xFFFFFFFF
+    time_mid = (ts_100ns >> 12) & 0xFFFF
+    time_low_12 = ts_100ns & 0xFFF
+    ver_time = 0x6000 | time_low_12
+    return f"{time_high:08x}-{time_mid:04x}-{ver_time:04x}-0000-000000000000"
+
+
+@db_app.command("prune")
+def db_prune(
+    days: int = typer.Option(0, help="Override CHECKPOINT_TTL_DAYS for this run (0 = use .env)"),
+    dry_run: bool = typer.Option(False, help="Report what would be deleted without deleting."),
+) -> None:
+    """
+    Delete LangGraph checkpoints + checkpoint_writes older than the TTL.
+
+    Critical for the 500 MB free-tier budget — every agent run writes one
+    row per node to `checkpoint_writes`, which grows fast on a busy day.
+    Default TTL is 7 days; tune via CHECKPOINT_TTL_DAYS in .env.
+
+    Threads are pruned atomically: we delete every checkpoint for a thread
+    whose most recent checkpoint is older than the cutoff, so we never
+    leave orphan `checkpoint_writes` rows pointing at a missing parent.
+
+    Implementation
+    --------------
+    langgraph-checkpoint-postgres uses UUIDv6 for `checkpoint_id` (time-
+    ordered, no `created_at` column in the stock schema). We synthesize
+    the minimum UUIDv6 that could exist at the cutoff timestamp and use
+    a plain `<` comparison — portable across saver versions, no INFORMATION
+    _SCHEMA introspection needed.
+    """
+    import datetime as _dt
+    from src.config import settings
+    from src.db import connection
+
+    ttl = days or settings.checkpoint_ttl_days
+    cutoff = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=ttl)
+    boundary = _uuidv6_boundary(cutoff)
+    console.print(
+        f"[dim]TTL:[/dim] {ttl} days  [dim]cutoff:[/dim] {cutoff.isoformat()}  "
+        f"[dim]dry-run:[/dim] {dry_run}"
+    )
+
+    sql_find = """
+        SELECT thread_id
+        FROM checkpoints
+        GROUP BY thread_id
+        HAVING max(checkpoint_id::text) < %s
+    """
+
+    try:
+        with connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT count(*) AS n FROM checkpoints")
+            before = cur.fetchone()["n"]
+
+            cur.execute(sql_find, (boundary,))
+            stale = [row["thread_id"] for row in cur.fetchall()]
+            if not stale:
+                console.print("[green]nothing to prune[/green]")
+                return
+            console.print(f"  stale threads: [yellow]{len(stale)}[/yellow]")
+            if dry_run:
+                return
+
+            cur.execute(
+                "DELETE FROM checkpoint_writes WHERE thread_id = ANY(%s)",
+                (stale,),
+            )
+            wdel = cur.rowcount
+            # checkpoint_blobs is the optional third table — older saver
+            # versions don't have it. Use to_regclass so a missing table
+            # doesn't abort the transaction.
+            cur.execute("SELECT to_regclass('public.checkpoint_blobs') AS t")
+            if cur.fetchone()["t"]:
+                cur.execute(
+                    "DELETE FROM checkpoint_blobs WHERE thread_id = ANY(%s)",
+                    (stale,),
+                )
+            cur.execute(
+                "DELETE FROM checkpoints WHERE thread_id = ANY(%s)",
+                (stale,),
+            )
+            cdel = cur.rowcount
+            cur.execute("SELECT count(*) AS n FROM checkpoints")
+            after = cur.fetchone()["n"]
+    except Exception as e:
+        console.print(f"[red]prune failed:[/red] {type(e).__name__}: {e}")
+        raise typer.Exit(code=1)
+
+    console.print(
+        f"[bold green]pruned[/bold green]  "
+        f"checkpoints {before} -> {after} (-{cdel}), "
+        f"checkpoint_writes -{wdel}"
+    )
+
 
 @app.command()
 def status() -> None:
@@ -368,6 +575,21 @@ def research(
     `#researgent` tag included.
     """
     from src.agent import run_agent
+    from src.config import settings
+
+    # Checkpointer selection:
+    #   --no-checkpoint           -> in-memory only (ephemeral, no replay)
+    #   else, DATABASE_URL set    -> PostgresSaver (durable, replayable)
+    #   else                      -> fall back to MemorySaver with a notice
+    # The agent layer (`run_agent` / `build_graph`) reads
+    # settings.resolve_database_url() and picks the saver itself; we just
+    # surface what's happening to the user.
+    if not no_checkpoint and not settings.resolve_database_url():
+        console.print(
+            "[yellow]no Postgres configured — using in-memory checkpoints "
+            "(this run won't survive a restart).[/yellow]  "
+            "Run [cyan]researgent db init[/cyan] after setting DATABASE_URL."
+        )
 
     result = run_agent(
         question,

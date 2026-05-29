@@ -37,9 +37,6 @@ Failure paths (kept from earlier phases):
 
 from __future__ import annotations
 
-import sqlite3
-from pathlib import Path
-
 from langgraph.graph import END, START, StateGraph
 
 from src.agent.nodes import (
@@ -55,10 +52,6 @@ from src.agent.nodes import (
 )
 from src.agent.state import AgentState
 from src.config import settings
-
-CHECKPOINT_DIR = Path("data") / "agent_state"
-CHECKPOINT_PATH = CHECKPOINT_DIR / "checkpoints.sqlite"
-
 
 def _route_after_retriever(state: AgentState) -> str:
     """Branch right after the very first retrieve — empty = early no_answer."""
@@ -247,11 +240,18 @@ def build_graph(use_checkpointer: bool = True):
     g.add_edge("no_answer", END)
 
     if use_checkpointer:
-        from langgraph.checkpoint.sqlite import SqliteSaver
+        # Checkpointer selection — Postgres when configured, else in-memory.
+        # Sqlite is gone: a managed PG free tier survives restarts (the
+        # whole point of Phase 12), and shipping two saver code paths just
+        # rots. Local dev without DATABASE_URL silently uses MemorySaver
+        # so `researgent research ...` still works for one-off runs.
+        if settings.resolve_database_url():
+            from src.db import get_checkpointer
 
-        CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(CHECKPOINT_PATH), check_same_thread=False)
-        checkpointer = SqliteSaver(conn)
-        return g.compile(checkpointer=checkpointer)
+            return g.compile(checkpointer=get_checkpointer())
+
+        from langgraph.checkpoint.memory import MemorySaver
+
+        return g.compile(checkpointer=MemorySaver())
 
     return g.compile()

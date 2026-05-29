@@ -258,6 +258,56 @@ class Settings(BaseSettings):
     observability_enabled: bool = True
     observability_log_path: str = "data/llm_calls.jsonl"
 
+    # ---- PostgreSQL persistence (Phase 12) ---------------------------------
+    # The relational brain. Holds:
+    #   - LangGraph agent checkpoints (PostgresSaver)
+    #   - documents_registry: PDF/note metadata, file hashes, storage URLs
+    #   - (future) eval runs, user prefs
+    # ChromaDB still owns vectors; raw files still live on disk/S3.
+    #
+    # We target the 500 MB free tier (Supabase / Neon / Render). That forces
+    # discipline elsewhere — see state.py's lean-state contract for the agent
+    # (no raw HTML/PDF in checkpoints) and the 7-day TTL pruner.
+    #
+    # Either set DATABASE_URL directly (preferred — what most managed PG
+    # providers hand you) or set the discrete fields below.
+    database_url: str | None = None
+    postgres_host: str = "localhost"
+    postgres_port: int = 5432
+    postgres_db: str = "researgent"
+    postgres_user: str = "postgres"
+    postgres_password: str | None = None
+    postgres_sslmode: str = "prefer"  # "require" for Supabase/Neon
+
+    # Connection pool sizing. Free-tier Postgres usually caps at ~20-60 conns,
+    # and the agent is sync + single-process — small pool is correct.
+    postgres_pool_min_size: int = 1
+    postgres_pool_max_size: int = 8
+
+    # Checkpoint TTL in days. The pruner (see `researgent db prune`) deletes
+    # checkpoints + checkpoint_writes older than this. 7 days is enough to
+    # replay a recent run for debugging without blowing the 500 MB budget.
+    checkpoint_ttl_days: int = 7
+
+    def resolve_database_url(self) -> str | None:
+        """
+        Return a libpq-compatible URL for psycopg/SQLAlchemy.
+
+        Precedence: explicit DATABASE_URL > discrete fields (only if a
+        password is set — we refuse to silently build a passwordless URL).
+        Returns None when Postgres isn't configured at all, so callers can
+        fall back to MemorySaver during local dev.
+        """
+        if self.database_url:
+            return self.database_url
+        if not self.postgres_password:
+            return None
+        return (
+            f"postgresql://{self.postgres_user}:{self.postgres_password}"
+            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+            f"?sslmode={self.postgres_sslmode}"
+        )
+
     # ---- Validators ---------------------------------------------------------
     @field_validator(
         "primary_provider",

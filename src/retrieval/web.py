@@ -38,6 +38,20 @@ from src.config import ModelTier, settings
 from src.llm import observability as obs
 
 
+# Hard cap on per-chunk text size that lands in agent state. Tavily snippets
+# are usually ~500-1500 chars but the API can return multi-KB blurbs; Serper
+# / DDG bodies are typically smaller but unbounded by contract. Capping at
+# build time means a checkpoint row can't accidentally hold a 50KB web blob.
+# 4096 is plenty to ground a citation — well above the median snippet.
+_WEB_CHUNK_TEXT_CAP = 4096
+
+
+def _clip(text: str) -> str:
+    if len(text) <= _WEB_CHUNK_TEXT_CAP:
+        return text
+    return text[:_WEB_CHUNK_TEXT_CAP - 1].rstrip() + "…"
+
+
 @dataclass
 class WebChunk:
     """Mirrors HybridChunk's public interface so the generator can mix them."""
@@ -47,6 +61,13 @@ class WebChunk:
     title: str
     score: float  # provider-reported relevance, normalized to [0, 1]
     provider: str = ""  # which web search provider served this chunk
+
+    def __post_init__(self) -> None:
+        # Lean-state contract (see src/agent/state.py): nothing that flows
+        # into the LangGraph checkpoint may carry raw HTML or unbounded text.
+        # Clip defensively even though every provider is already configured
+        # to return snippets, not full pages.
+        self.text = _clip(self.text or "")
 
     # ---- Public interface shared with HybridChunk ----
     @property
