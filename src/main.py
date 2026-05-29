@@ -449,38 +449,219 @@ def vault_ingest(
     )
 
 
+def _validate_domain_or_exit(domain: str | None) -> str | None:
+    """
+    Resolve a --domain CLI option: empty -> None; otherwise must be registered.
+
+    Centralised so every command that takes --domain (ingest, research, seed,
+    ingest-domains) gives the same error UX on a typo.
+    """
+    if not domain:
+        return None
+    from src.domains import DOMAINS
+
+    if domain not in DOMAINS:
+        console.print(
+            f"[red]unknown domain[/red] {domain!r}\n"
+            f"  known: [cyan]{', '.join(DOMAINS.keys())}[/cyan]"
+        )
+        raise typer.Exit(code=1)
+    return domain
+
+
+@app.command()
+def domains() -> None:
+    """
+    List registered domains (the Phase 15 corpus topology).
+
+    Shows each domain's id, label, ingest directory, and one-line description.
+    Useful for sanity-checking before `researgent ingest-domains` or
+    `researgent seed`.
+    """
+    from src.domains import DOMAINS
+
+    table = Table(title="Registered domains", show_lines=False)
+    table.add_column("id", style="cyan")
+    table.add_column("label")
+    table.add_column("ingest dir", style="dim")
+    table.add_column("description")
+    for dom in DOMAINS.values():
+        # Don't error if the directory hasn't been created yet — just show
+        # it so the user knows where to drop files.
+        table.add_row(dom.id, dom.label, str(dom.ingest_dir), dom.description)
+    console.print(table)
+
+
 @app.command()
 def ingest(
     path: str = typer.Argument(
         "data/papers",
         help="PDF file or directory containing PDFs. Default: data/papers",
     ),
+    domain: str = typer.Option(
+        "",
+        "--domain",
+        help="Tag every ingested chunk with this domain id (agentic_ai | "
+             "quant_finance | time_series). Overrides path-based auto-detection.",
+    ),
 ) -> None:
     """
     Ingest a PDF (or every PDF in a directory) into the vector store.
 
     Re-running on the same file is safe — chunks are replaced by content hash.
+
+    When `--domain` is omitted, ingest_file auto-detects from the parent
+    directory: a PDF under `data/papers/agentic_ai/foo.pdf` is tagged
+    `domain=agentic_ai` automatically. Use `--domain` to override or to
+    tag PDFs that live outside the standard tree.
     """
     # Import inside the command so the heavy ChromaDB/PyMuPDF deps don't slow
     # down `researgent --help` and the lightweight Phase 0 commands.
     from src.ingest import ingest_directory, ingest_file
 
+    dom = _validate_domain_or_exit(domain)
     p = Path(path)
     if not p.exists():
         console.print(f"[red]Path not found:[/red] {p}")
         raise typer.Exit(code=1)
 
     if p.is_file():
-        result = ingest_file(p)
+        result = ingest_file(p, domain=dom)
         console.print(Panel(json.dumps(result, indent=2), title="ingested", border_style="green"))
         return
 
-    results = ingest_directory(p)
+    results = ingest_directory(p, domain=dom)
     ok = sum(1 for r in results if "error" not in r)
     total_chunks = sum(r.get("chunks_inserted", 0) for r in results)
     console.print(
         f"\n[bold green]Done.[/bold green] {ok}/{len(results)} files ingested, "
         f"{total_chunks} chunks total."
+    )
+
+
+@app.command(name="ingest-domains")
+def ingest_domains(
+    only: str = typer.Option(
+        "",
+        "--only",
+        help="Comma-separated subset of domain ids (e.g. 'agentic_ai,time_series'). "
+             "Omit to ingest every registered domain.",
+    ),
+) -> None:
+    """
+    Walk every `data/papers/<domain>/` subdir and ingest each tagged
+    with its domain id. One embedder warm-up + one BM25 rebuild across
+    the whole corpus — much cheaper than running `researgent ingest`
+    three times in a row.
+    """
+    from src.domains import all_domain_ids
+    from src.ingest import ingest_all_domains
+
+    if only:
+        requested = [s.strip() for s in only.split(",") if s.strip()]
+        unknown = [d for d in requested if d not in all_domain_ids()]
+        if unknown:
+            console.print(
+                f"[red]unknown domain(s)[/red]: {', '.join(unknown)}\n"
+                f"  known: [cyan]{', '.join(all_domain_ids())}[/cyan]"
+            )
+            raise typer.Exit(code=1)
+        domain_ids = requested
+    else:
+        domain_ids = None  # all
+
+    out = ingest_all_domains(domain_ids=domain_ids)
+
+    table = Table(title="ingest-domains summary")
+    table.add_column("domain", style="cyan")
+    table.add_column("files", justify="right")
+    table.add_column("chunks", justify="right")
+    table.add_column("errors", justify="right", style="red")
+    for dom_id, results in out.items():
+        files = len(results)
+        chunks = sum(r.get("chunks_inserted", 0) for r in results)
+        errs = sum(1 for r in results if "error" in r)
+        table.add_row(dom_id, str(files), str(chunks), str(errs))
+    console.print(table)
+
+
+@app.command()
+def seed(
+    only: str = typer.Option(
+        "",
+        "--only",
+        help="Comma-separated subset of domain ids. Omit to seed every domain.",
+    ),
+    top_n: int = typer.Option(
+        5,
+        "--top-n",
+        help="Papers per seed query (sorted by citationCount:desc). "
+             "Default 5 keeps the seed corpus to roughly 25-30 papers/domain.",
+    ),
+    abstracts_only: bool = typer.Option(
+        False,
+        "--abstracts-only",
+        help="Skip PDF downloads — persist title+abstract as one-page "
+             "markdown notes only. Faster, smaller, and avoids paywall flakiness.",
+    ),
+) -> None:
+    """
+    Stage-1 seed ingestion from Semantic Scholar.
+
+    For every (selected) domain, runs that domain's registered seed queries
+    against Semantic Scholar sorted by citationCount:desc, dedupes by
+    arXiv id / DOI / title, downloads open-access PDFs into the matching
+    `data/papers/<domain>/` directory, and runs them through the standard
+    chunking + entity-extraction + embedding pipeline.
+
+    Papers without an open-access PDF are persisted as
+    `data/papers/<domain>/_abstracts/<slug>.md` — title + abstract + metadata.
+    Those notes are NOT auto-ingested here; ingest them with
+    `researgent vault-ingest data/papers/<domain>/_abstracts` after seeding,
+    or skip them entirely.
+
+    Free-tier: no S2 API key required, rate-limited at 1 RPS.
+    """
+    from src.domains import all_domain_ids
+    from src.ingest.s2_seed import seed_all
+
+    if only:
+        requested = [s.strip() for s in only.split(",") if s.strip()]
+        unknown = [d for d in requested if d not in all_domain_ids()]
+        if unknown:
+            console.print(
+                f"[red]unknown domain(s)[/red]: {', '.join(unknown)}\n"
+                f"  known: [cyan]{', '.join(all_domain_ids())}[/cyan]"
+            )
+            raise typer.Exit(code=1)
+        domain_ids = requested
+    else:
+        domain_ids = None
+
+    results = seed_all(
+        domain_ids=domain_ids,
+        top_n_per_query=top_n,
+        download_pdfs=not abstracts_only,
+    )
+
+    table = Table(title="seed summary (Semantic Scholar, citationCount:desc)")
+    table.add_column("domain", style="cyan")
+    table.add_column("S2 hits", justify="right")
+    table.add_column("PDFs", justify="right")
+    table.add_column("abstract-notes", justify="right")
+    table.add_column("ingested", justify="right", style="green")
+    for r in results:
+        table.add_row(
+            r["domain"],
+            str(r.get("hits", 0)),
+            str(r.get("pdfs", 0)),
+            str(r.get("abstracts", 0)),
+            str(r.get("ingested", 0)),
+        )
+    console.print(table)
+    console.print(
+        "\n[dim]Tip:[/dim] ingest abstract notes too with "
+        "[cyan]researgent vault-ingest data/papers/<domain>/_abstracts[/cyan]"
     )
 
 
@@ -565,6 +746,13 @@ def research(
     k: int = typer.Option(8, help="Total chunks budget across all sub-questions"),
     run_id: str = typer.Option("", help="Stable id for checkpoint replay; auto if blank"),
     no_checkpoint: bool = typer.Option(False, help="Skip SQLite checkpointing (for tests)"),
+    domain: str = typer.Option(
+        "",
+        "--domain",
+        help="Restrict retrieval to one (or more, comma-separated) registered "
+             "domain ids: agentic_ai | quant_finance | time_series. Skips the "
+             "planner's keyword auto-router.",
+    ),
     save_to_vault: bool = typer.Option(
         False,
         "--save-to-vault",
@@ -610,11 +798,29 @@ def research(
             "Run [cyan]researgent db init[/cyan] after setting DATABASE_URL."
         )
 
+    # Parse --domain into a list. Comma-separated supports "search across
+    # two domains" without ad-hoc syntax; the validation loop catches typos
+    # against the same registry the auto-router uses.
+    domain_scope: list[str] | None = None
+    if domain:
+        from src.domains import DOMAINS
+
+        requested = [d.strip() for d in domain.split(",") if d.strip()]
+        bad = [d for d in requested if d not in DOMAINS]
+        if bad:
+            console.print(
+                f"[red]unknown domain(s)[/red]: {', '.join(bad)}\n"
+                f"  known: [cyan]{', '.join(DOMAINS.keys())}[/cyan]"
+            )
+            raise typer.Exit(code=1)
+        domain_scope = requested
+
     result = run_agent(
         question,
         k=k,
         run_id=run_id or None,
         use_checkpointer=not no_checkpoint,
+        domain_scope=domain_scope,
     )
     title = f"agent (k={k}, run_id={result.run_id})"
     if result.error:

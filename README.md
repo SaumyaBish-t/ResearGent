@@ -20,6 +20,7 @@ An **Agentic Research Engine** with Corrective RAG, Self-Reflection, hybrid retr
 | **12** | **PostgreSQL persistence** — shared `psycopg_pool`, `PostgresSaver` checkpoints, `documents_registry` table, raw bytes on disk, TTL pruner, `doc_ids` retriever filter | ✅ done |
 | **13** | **Pointer-based state** — `ChunkRef` pointers in checkpoints, hydration at node entry, `agent_artifacts` JSONB store → ~3KB/snapshot instead of ~200KB (60× smaller) | ✅ done |
 | **14** | **Semantic chunking + local NER** — `all-MiniLM-L6-v2` topic-shift chunker, GLiNER entity extraction, entity-augmented embeds & BM25 (free-tier, CPU-only) | ✅ done |
+| **15** | **Domain-aware corpus + S2 seed ingestion** — three isolated per-domain ingest roots, domain-stamped Chroma metadata + registry, keyword auto-router, Semantic Scholar `citationCount:desc` Stage-1 seeder | ✅ done |
 
 ---
 
@@ -280,6 +281,116 @@ Run `uv sync` after pulling.
 
 ---
 
+## Phase 15 — Domain-aware corpus + Semantic Scholar seed ingestion
+
+The persona contract pins ResearGent to three explicit corpora — **Agentic AI**, **Quantitative Finance**, **ML for Time-Series Forecasting** — and a Stage-1 / Stage-2 retrieval protocol where Stage 1 hits historically foundational, citation-weighted bedrock. Phase 15 makes that contract real.
+
+### 1. Domain registry — `src/domains.py`
+
+Single source of truth for the three corpora. Each `Domain` carries:
+
+- `id` — short slug used as the subfolder name AND the Chroma `domain` metadata value (`agentic_ai`, `quant_finance`, `time_series`).
+- `ingest_dir` — `data/papers/<id>/` — where PDFs for that domain live.
+- `seed_queries` — broad-coverage search strings the S2 seeder runs sorted by `citationCount:desc`.
+- `routing_keywords` — tokens the auto-router uses to map user questions to the right domain bucket.
+
+Add a fourth domain by editing one dict, nothing else.
+
+### 2. Domain-tagged ingest
+
+The pipeline now stamps `domain` onto every chunk in **two** places, in lockstep:
+
+- **Chroma metadata** — `{"domain": "<id>"}` per chunk, so retrieval filters via `where={"domain": {"$in": [...]}}`.
+- **Postgres `documents_registry.extra->>'domain'`** — so SQL-level queries (`"how many quant_finance docs ingested last week?"`) work without scanning Chroma.
+
+Three ways to set it:
+
+```powershell
+# 1. Auto-detect from path — drop PDFs under data/papers/<domain>/ and just run:
+uv run researgent ingest
+
+# 2. Explicit override — tag PDFs that live outside the standard tree:
+uv run researgent ingest /some/other/path --domain agentic_ai
+
+# 3. All-in-one — walks every data/papers/<domain>/ subdir, ingests with domain tag,
+#    ONE embedder warm-up + ONE BM25 rebuild across the whole corpus.
+uv run researgent ingest-domains
+uv run researgent ingest-domains --only agentic_ai,time_series
+```
+
+### 3. Domain-scoped retrieval
+
+`hybrid_retrieve(query, domains=[...])` plumbs the filter through:
+
+- **Dense (Chroma)** — combined with existing `doc_ids` filter via `$and`.
+- **BM25** — post-filter on `metadata["domain"]` (same approach as `doc_ids`).
+- **RRF fusion** — operates on the already-filtered pools so cross-domain noise can't leak into the top-k.
+
+Two ways to set the scope on a query:
+
+```powershell
+# Explicit (skips the auto-router):
+uv run researgent research "PatchTST vs Informer for long-horizon forecasting" --domain time_series
+uv run researgent research "..." --domain agentic_ai,quant_finance
+
+# Implicit — the planner's keyword auto-router fires when --domain is omitted.
+# Substring matches against each domain's routing_keywords; sets domain_scope
+# only when the signal is strong. Ambiguous queries fall back to "search every domain".
+uv run researgent research "How does LangGraph route between planner and critic?"
+# -> auto-routes to agentic_ai (no LLM call — deterministic, free)
+```
+
+**Why a keyword router and not an LLM classifier:** free-tier budget. A FAST-tier classification on every query would consume ~50% of a typical Cerebras free quota for zero recall gain on the common case. Substring matching hits ~80% of queries deterministically; the rest fall through to searching everywhere (which is correct behaviour for ambiguous questions).
+
+### 4. Semantic Scholar seed ingestion — `src/ingest/s2_seed.py`
+
+The Stage-1 seeder. For every registered domain, runs that domain's `seed_queries` against the public S2 search endpoint with `sort=citationCount:desc`, dedupes hits by arXiv ID / DOI / normalised title, and pulls them into the corpus:
+
+```powershell
+uv run researgent seed                                    # seed every domain
+uv run researgent seed --only agentic_ai                  # one domain
+uv run researgent seed --top-n 10                         # 10 papers / seed query
+uv run researgent seed --abstracts-only                   # skip PDF downloads
+```
+
+What lands on disk:
+
+- **Open-access PDFs** → `data/papers/<domain>/arxiv_<id>.pdf`, then run through the standard semantic chunker + GLiNER + entity-enriched embed path. Tagged `domain=<id>` automatically.
+- **No open-access PDF** → `data/papers/<domain>/_abstracts/<slug>.md` — title + abstract + citation count + arXiv/DOI/S2 URL footer. Ingest these into the same domain bucket with:
+  ```powershell
+  uv run researgent vault-ingest data/papers/agentic_ai/_abstracts
+  ```
+
+Free-tier guarantees:
+
+- **No S2 API key needed** — uses the public unauthenticated endpoint.
+- **1 RPS courtesy rate limit** — `time.sleep(1.05)` between calls.
+- **Idempotent** — re-seeding the same paper re-uses the existing content hash, replacing chunks rather than duplicating.
+
+### 5. Stage-1 / Stage-2 protocol — already wired
+
+The persona spec calls for Stage-2 (S2 deep-dive) on a Critic Low-Confidence verdict. This was already shipped as part of Phase 7 — confirmed during this session, no rewire needed:
+
+```
+critic (medium/low + retries exhausted) ──► paper_discovery ──► critic (re-grade) ──► generator
+                                                  │
+                                       arXiv + Semantic Scholar
+                                       (live, query-dependent)
+```
+
+Phase 15's domain tagging strengthens Stage 1 (the seeded local corpus is now bedrock-weighted by citation count and domain-bucketed for clean retrieval), Phase 7's paper_discovery node handles Stage 2 (just-in-time live S2 queries when local retrieval underperforms). The Critic's `low/medium + budget exhausted` decision is the single trigger.
+
+### 6. CLI surface — Phase 15 commands
+
+```powershell
+uv run researgent domains              # show the three registered domains
+uv run researgent ingest-domains       # ingest every data/papers/<domain>/ subdir
+uv run researgent seed                 # seed all domains from S2 (citationCount:desc)
+uv run researgent research "..." --domain quant_finance    # scope retrieval explicitly
+```
+
+---
+
 ## Architecture (target — final state)
 
 ```
@@ -326,12 +437,14 @@ Run `uv sync` after pulling.
 researgent/
 ├── src/
 │   ├── config.py             # typed settings via pydantic-settings
+│   ├── domains.py            # Phase 15: registered corpora (agentic_ai / quant_finance / time_series)
 │   ├── llm/
 │   │   └── provider.py       # unified chat() / embed() over NVIDIA/Groq/Ollama/Cerebras/OpenRouter
 │   ├── ingest/
 │   │   ├── pdf.py            # PyMuPDF -> Page records
 │   │   ├── chunker.py        # Phase 14: semantic chunker (MiniLM) + GLiNER entity extraction
 │   │   ├── obsidian.py       # vault parser + heading-aware chunker (entity-enriched)
+│   │   ├── s2_seed.py        # Phase 15: Semantic Scholar Stage-1 seeder (citationCount:desc)
 │   │   └── pipeline.py       # chunks -> entity-augmented embeds -> Chroma + BM25 + registry
 │   ├── retrieval/
 │   │   ├── naive.py          # dense top-k from Chroma (baseline)
@@ -345,7 +458,10 @@ researgent/
 │   ├── store.py              # ChromaDB client + collection management
 │   └── main.py               # Typer CLI
 ├── data/
-│   ├── papers/               # drop your PDFs here
+│   ├── papers/
+│   │   ├── agentic_ai/       # Phase 15: domain-scoped PDFs (auto-tagged)
+│   │   ├── quant_finance/
+│   │   └── time_series/
 │   ├── storage/              # Phase 12: raw bytes by content_hash (gitignored)
 │   └── chroma_db/            # vector store (gitignored)
 ├── .env.example

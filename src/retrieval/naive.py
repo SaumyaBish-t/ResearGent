@@ -63,6 +63,7 @@ def naive_retrieve(
     *,
     k: int = 5,
     doc_ids: list[str] | None = None,
+    domains: list[str] | None = None,
 ) -> list[RetrievedChunk]:
     """
     Top-k dense retrieval from the currently active papers collection.
@@ -72,13 +73,33 @@ def naive_retrieve(
     tagged #research". The doc_ids come from the Postgres registry
     (see `src.registry.get_doc_ids_for_filter`). When None (the default),
     the entire corpus is searched.
+
+    `domains` (Phase 15) scopes by the `domain` metadata stamped at ingest
+    — e.g. ["quant_finance"] or ["agentic_ai", "time_series"]. ANDed with
+    doc_ids when both are supplied (Chroma's `$and` operator).
     """
     col = get_or_create_papers_collection()
     if col.count() == 0:
         return []
 
     qvec = _embed_query(query)
-    where = {"doc_id": {"$in": doc_ids}} if doc_ids else None
+
+    # Compose the Chroma `where` clause. Chroma's filter DSL requires an
+    # explicit `$and` when combining multiple top-level keys, so we keep
+    # the no-filter and single-filter cases on cheap fast paths.
+    clauses: list[dict] = []
+    if doc_ids:
+        clauses.append({"doc_id": {"$in": doc_ids}})
+    if domains:
+        clauses.append({"domain": {"$in": domains}})
+
+    if not clauses:
+        where = None
+    elif len(clauses) == 1:
+        where = clauses[0]
+    else:
+        where = {"$and": clauses}
+
     res = col.query(
         query_embeddings=[qvec],
         n_results=k,

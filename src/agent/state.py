@@ -92,6 +92,13 @@ class AgentState(TypedDict, total=False):
     # without code changes elsewhere.
     doc_id_scope: list[str]
 
+    # Phase 15: optional restriction to one or more registered domain ids
+    # (e.g. ["agentic_ai", "time_series"]). When unset the agent searches
+    # across every domain bucket. Set either by the CLI's `--domain` flag
+    # (explicit user intent) or by the planner's keyword auto-router
+    # (implicit, only when the query has strong domain signals).
+    domain_scope: list[str]
+
     # ---- Planner outputs ----
     sub_questions: list[str]
     is_complex: bool

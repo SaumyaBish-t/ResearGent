@@ -126,6 +126,7 @@ def _embed_and_store(
     chunks: list[Chunk],
     *,
     registry_doc_id: str,
+    domain: str | None = None,
     verbose: bool = True,
 ) -> int:
     """
@@ -181,6 +182,10 @@ def _embed_and_store(
                 # and `wikilinks` on vault chunks. Retrieval-side filtering
                 # can still match with a `$contains` predicate.
                 "entities": ", ".join(c.entities),
+                # Phase 15: domain bucket — "" means "uncategorised" so the
+                # field is always present and the retriever can build a
+                # uniform `$in` filter without special-casing absent keys.
+                "domain": domain or "",
             }
             for c in batch
         ]
@@ -229,19 +234,68 @@ def _rebuild_bm25_from_chroma() -> int:
     return len(ids)
 
 
-def ingest_file(path: Path, *, verbose: bool = True, rebuild_bm25: bool = True) -> dict:
+def _infer_domain_from_path(path: Path) -> str | None:
+    """
+    Pull the domain id off a path that lives under `data/papers/<domain>/...`.
+
+    We do this passively so the user can drop a PDF into a domain folder
+    and `researgent ingest` Just Works without an explicit --domain flag.
+    Returns None when the path isn't inside a registered domain subdir —
+    the caller then falls back to whatever it was passed explicitly.
+    """
+    from src.domains import DOMAINS  # local import — avoids cycles + cold start cost
+
+    try:
+        rel = path.resolve().relative_to(PAPERS_ROOT.resolve())
+    except ValueError:
+        # Path isn't under data/papers/ at all (e.g. an ad-hoc PDF on the desktop).
+        return None
+    parts = rel.parts
+    if not parts:
+        return None
+    candidate = parts[0]
+    return candidate if candidate in DOMAINS else None
+
+
+# `PAPERS_ROOT` is owned by `src.domains` (the single source of truth for
+# corpus topology). Imported here lazily where used; we deliberately do not
+# re-export it from this module to avoid two definitions drifting apart.
+from src.domains import PAPERS_ROOT  # noqa: E402  (intentional bottom-up import)
+
+
+def ingest_file(
+    path: Path,
+    *,
+    domain: str | None = None,
+    verbose: bool = True,
+    rebuild_bm25: bool = True,
+) -> dict:
     """
     Ingest a single PDF. Returns a result summary dict.
 
     `rebuild_bm25=False` skips the BM25 rebuild — useful when ingesting many
     PDFs in a row (the directory ingester rebuilds once at the end).
+
+    `domain` (Phase 15): an optional registered domain id. When omitted, we
+    auto-detect from the file's parent directory (data/papers/<domain>/...).
+    The domain is stamped into every chunk's Chroma metadata AND into the
+    registry row's `extra` JSONB so retrieval can later filter by it.
     """
     if verbose:
         console.print(f"[cyan]parsing[/cyan] {path.name}")
     doc = parse_pdf(path)
 
+    # Domain resolution: explicit > inferred-from-path > None (uncategorised).
+    # We don't ERROR on unknown domain strings here because the CLI already
+    # validates them; ingest_file is also called directly from S2 seed code
+    # which always passes a verified id.
+    effective_domain = domain or _infer_domain_from_path(path)
+
     if verbose:
-        console.print(f"  pages: {doc.total_pages}  |  content_hash: {doc.doc_id}")
+        dom_disp = effective_domain or "(none)"
+        console.print(
+            f"  pages: {doc.total_pages}  |  content_hash: {doc.doc_id}  |  domain: {dom_disp}"
+        )
 
     chunks = chunk_pages(doc.pages)
     removed = _delete_existing_doc(doc.doc_id)
@@ -258,6 +312,10 @@ def ingest_file(path: Path, *, verbose: bool = True, rebuild_bm25: bool = True) 
         from src.registry import upsert_document
 
         storage_url = _persist_raw(path, content_hash=doc.doc_id, ext=".pdf")
+        # Domain lives in `extra` rather than as a dedicated column so we
+        # avoid a schema migration; the `extra` JSONB was already designed
+        # as the bag for source-type-specific metadata. Queryable via
+        # `extra->>'domain' = 'agentic_ai'` from SQL when needed.
         registry_uuid = upsert_document(
             content_hash=doc.doc_id,
             filename=path.name,
@@ -266,6 +324,7 @@ def ingest_file(path: Path, *, verbose: bool = True, rebuild_bm25: bool = True) 
             file_storage_url=storage_url,
             file_size=file_size,
             chunk_count=len(chunks),
+            extra={"domain": effective_domain} if effective_domain else None,
         )
         registry_doc_id = str(registry_uuid)
     else:
@@ -280,7 +339,9 @@ def ingest_file(path: Path, *, verbose: bool = True, rebuild_bm25: bool = True) 
         )
         console.print("  [cyan]embedding[/cyan]...")
 
-    inserted = _embed_and_store(doc, chunks, registry_doc_id=registry_doc_id)
+    inserted = _embed_and_store(
+        doc, chunks, registry_doc_id=registry_doc_id, domain=effective_domain
+    )
 
     bm25_count = 0
     if rebuild_bm25:
@@ -293,6 +354,7 @@ def ingest_file(path: Path, *, verbose: bool = True, rebuild_bm25: bool = True) 
         "doc_id": registry_doc_id,
         "content_hash": doc.doc_id,
         "title": doc.title,
+        "domain": effective_domain,
         "pages": doc.total_pages,
         "chunks_inserted": inserted,
         "chunks_replaced": removed,
@@ -302,7 +364,7 @@ def ingest_file(path: Path, *, verbose: bool = True, rebuild_bm25: bool = True) 
     }
 
 
-def ingest_directory(dir_path: Path) -> list[dict]:
+def ingest_directory(dir_path: Path, *, domain: str | None = None) -> list[dict]:
     """
     Ingest every PDF in a directory (non-recursive). BM25 rebuilds once at end.
 
@@ -336,7 +398,9 @@ def ingest_directory(dir_path: Path) -> list[dict]:
         try:
             # verbose=True so users see live per-batch progress on every PDF.
             # BM25 rebuilds once at the end (it scans ALL chunks anyway).
-            r = ingest_file(pdf, verbose=True, rebuild_bm25=False)
+            # `domain` here propagates the directory-level override; if None,
+            # ingest_file's per-path auto-detection still runs.
+            r = ingest_file(pdf, domain=domain, verbose=True, rebuild_bm25=False)
             results.append(r)
             console.print(
                 f"  [green]done[/green]  {r['pages']} pages, {r['chunks_inserted']} chunks\n"
@@ -351,6 +415,85 @@ def ingest_directory(dir_path: Path) -> list[dict]:
     bm25_n = _rebuild_bm25_from_chroma()
     console.print(f"  [green]BM25[/green] indexed {bm25_n} chunks")
     return results
+
+
+def ingest_all_domains(
+    *,
+    domain_ids: list[str] | None = None,
+) -> dict[str, list[dict]]:
+    """
+    Phase 15 orchestrator: walk every registered domain subdir under
+    `data/papers/<domain>/` and ingest each as a tagged batch.
+
+    Why a single entry-point
+    ------------------------
+    Three benefits over `for d in domains: ingest_directory(...)`:
+      1. ONE embedder warm-up cost amortised across all three domains
+         (warm-up alone is ~1-2s on cold MiniLM / GLiNER caches; doing it
+         per-domain triples that for no recall gain).
+      2. ONE BM25 rebuild at the very end. BM25's IDF is corpus-wide, so
+         rebuilding three times in a row is wasted work — only the last
+         result matters.
+      3. The returned dict is keyed by domain so the CLI can render a clean
+         per-corpus summary table without re-iterating the filesystem.
+
+    `domain_ids` lets callers run a subset (e.g. just `["agentic_ai"]`).
+    Defaults to every registered domain.
+    """
+    from src.domains import DOMAINS, all_domain_ids
+
+    target = domain_ids or all_domain_ids()
+    out: dict[str, list[dict]] = {}
+
+    # Single shared warm-up. We bypass ingest_directory's own warm-up because
+    # we want to warm exactly once and surface failures BEFORE filesystem
+    # walking — same reasoning as Phase 1's directory ingester.
+    console.print("[cyan]pre-warming embedder...[/cyan]")
+    try:
+        t0 = time.perf_counter()
+        embed(["warmup"], tier=ModelTier.EMBED)
+        console.print(f"  [green]warm[/green]  ({int((time.perf_counter() - t0) * 1000)} ms)")
+    except Exception as e:
+        console.print(f"  [red]warmup FAIL[/red]: {type(e).__name__}: {e}")
+        return {d: [{"error": "embedder warmup failed"}] for d in target}
+
+    for dom_id in target:
+        if dom_id not in DOMAINS:
+            console.print(f"[red]skip unknown domain[/red] {dom_id}")
+            out[dom_id] = [{"error": f"unknown domain {dom_id}"}]
+            continue
+        dom = DOMAINS[dom_id]
+        dom.ingest_dir.mkdir(parents=True, exist_ok=True)
+        pdfs = sorted(dom.ingest_dir.glob("*.pdf"))
+
+        console.print(
+            f"\n[bold]── {dom.label} ──[/bold]  "
+            f"[dim]{dom.ingest_dir}[/dim]  ({len(pdfs)} PDFs)"
+        )
+        if not pdfs:
+            out[dom_id] = []
+            continue
+
+        results: list[dict] = []
+        for i, pdf in enumerate(pdfs, start=1):
+            console.print(f"[bold blue]({i}/{len(pdfs)})[/bold blue] {pdf.name}")
+            try:
+                # rebuild_bm25=False — we do ONE rebuild at the bottom across
+                # the entire corpus (BM25 IDF is corpus-wide).
+                r = ingest_file(pdf, domain=dom_id, verbose=True, rebuild_bm25=False)
+                results.append(r)
+                console.print(
+                    f"  [green]done[/green]  {r['pages']} pages, {r['chunks_inserted']} chunks\n"
+                )
+            except Exception as e:
+                console.print(f"  [red]FAIL[/red] {type(e).__name__}: {e}\n")
+                results.append({"source_file": pdf.name, "error": str(e)})
+        out[dom_id] = results
+
+    console.print("\n[cyan]rebuilding BM25 index[/cyan]...")
+    bm25_n = _rebuild_bm25_from_chroma()
+    console.print(f"  [green]BM25[/green] indexed {bm25_n} chunks across all domains")
+    return out
 
 
 # ---------------------------------------------------------------------------

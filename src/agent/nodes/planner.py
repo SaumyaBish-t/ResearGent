@@ -128,16 +128,33 @@ def plan(state: AgentState) -> dict[str, Any]:
 
     dur_ms = int((time.perf_counter() - t0) * 1000)
 
-    return {
+    # ---- Phase 15: keyword auto-router -------------------------------------
+    # When the caller didn't pass `--domain` (state.domain_scope is unset),
+    # try to infer from the question text. This is intentionally cheap and
+    # deterministic — no extra LLM call — and it returns [] for ambiguous
+    # queries so the retriever falls back to searching every domain bucket.
+    out: dict[str, Any] = {
         "sub_questions": sub_questions,
         "is_complex": is_complex,
         "planner_reasoning": reasoning,
-        "trace": [
-            {
-                "node": "planner",
-                "duration_ms": dur_ms,
-                "sub_q_count": len(sub_questions),
-                "is_complex": is_complex,
-            }
-        ],
     }
+    inferred_scope: list[str] = []
+    if not state.get("domain_scope"):
+        from src.domains import infer_domains_from_query
+
+        inferred_scope = infer_domains_from_query(question)
+        if inferred_scope:
+            # Only set when we have a signal — preserves "search everywhere"
+            # semantics for ambiguous queries.
+            out["domain_scope"] = inferred_scope
+
+    out["trace"] = [
+        {
+            "node": "planner",
+            "duration_ms": dur_ms,
+            "sub_q_count": len(sub_questions),
+            "is_complex": is_complex,
+            "inferred_domain_scope": inferred_scope,
+        }
+    ]
+    return out
