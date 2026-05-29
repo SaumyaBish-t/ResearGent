@@ -82,6 +82,7 @@ def hybrid_retrieve(
     k: int = 5,
     pool_size: int | None = None,
     doc_ids: list[str] | None = None,
+    domains: list[str] | None = None,
 ) -> list[HybridChunk]:
     """
     Run dense + BM25 in parallel-ish, fuse with RRF, return top-k.
@@ -90,19 +91,27 @@ def hybrid_retrieve(
     fusion. A larger pool gives RRF more documents to consider — useful when
     one retriever surfaces a great candidate that the other ranks low. Default
     `pool_size = 2*k` strikes a good balance for academic corpora.
+
+    `domains` (Phase 15) restricts both retrievers to chunks whose ingest-time
+    `domain` metadata is in the set. Combined with `doc_ids` they AND together
+    on the dense side (Chroma `$and`); on the BM25 side both are post-filters.
     """
     pool = pool_size or max(20, k * 4)
 
     # ---- Retrieve from both sides ----
-    # `doc_ids` is honoured by the dense side via Chroma metadata filtering.
-    # BM25 doesn't speak that filter today, so we filter its hits post-hoc.
-    # Same end result; small efficiency penalty (BM25 still scans the full
-    # index). Worth tightening only if doc-scoped queries become hot.
-    dense_hits = naive_retrieve(query, k=pool, doc_ids=doc_ids)
+    # `doc_ids` and `domains` are honoured by the dense side via Chroma's
+    # metadata filter. BM25 doesn't speak that filter today, so we apply
+    # both as post-hoc filters on its hits. Same end result; small
+    # efficiency penalty (BM25 still scans the full index). Worth
+    # tightening only if scoped queries become hot.
+    dense_hits = naive_retrieve(query, k=pool, doc_ids=doc_ids, domains=domains)
     bm25_hits = bm25_idx.search(query, k=pool)
     if doc_ids:
-        allowed = set(doc_ids)
-        bm25_hits = [h for h in bm25_hits if h.metadata.get("doc_id") in allowed]
+        allowed_docs = set(doc_ids)
+        bm25_hits = [h for h in bm25_hits if h.metadata.get("doc_id") in allowed_docs]
+    if domains:
+        allowed_doms = set(domains)
+        bm25_hits = [h for h in bm25_hits if h.metadata.get("domain") in allowed_doms]
 
     # ---- Index by chunk id (= "<doc_id>:<chunk_index>") for join ----
     # The naive retriever returns RetrievedChunk without an explicit id, so we

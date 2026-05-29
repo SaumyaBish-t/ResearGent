@@ -134,12 +134,18 @@ def run_agent(
     k: int = 8,
     run_id: str | None = None,
     use_checkpointer: bool = True,
+    domain_scope: list[str] | None = None,
 ) -> AgentResult:
     """
     Execute the agent graph end-to-end.
 
     `run_id` doubles as the checkpoint thread_id — pass the same id again
     to resume from the last checkpoint (useful for crash recovery / replay).
+
+    `domain_scope` (Phase 15) hard-restricts retrieval to one or more
+    registered domain ids (`agentic_ai`, `quant_finance`, `time_series`).
+    When None, the planner's keyword auto-router decides; explicit values
+    take precedence and skip the inference step.
     """
     graph = build_graph(use_checkpointer=use_checkpointer)
     rid = run_id or uuid.uuid4().hex[:12]
@@ -150,6 +156,8 @@ def run_agent(
         # k is consumed by the retriever node; not a state field, passed in via initial.
         "k": k,  # type: ignore[typeddict-unknown-key]
     }
+    if domain_scope:
+        initial["domain_scope"] = list(domain_scope)
 
     # LangGraph requires a thread_id when using a checkpointer, so the run is
     # addressable for replay. Without a checkpointer this is ignored.

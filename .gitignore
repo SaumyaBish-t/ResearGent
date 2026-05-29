@@ -33,6 +33,18 @@ notes/*
 # Data — never commit corpora, vector stores, or downloaded papers
 data/papers/*
 !data/papers/.gitkeep
+# Phase 15: preserve the three per-domain ingest roots in git so a fresh
+# clone has the topology ready for `researgent ingest-domains` / `seed`.
+# The directories are tracked; their PDF/MD contents are not.
+!data/papers/agentic_ai/
+!data/papers/quant_finance/
+!data/papers/time_series/
+data/papers/agentic_ai/*
+data/papers/quant_finance/*
+data/papers/time_series/*
+!data/papers/agentic_ai/.gitkeep
+!data/papers/quant_finance/.gitkeep
+!data/papers/time_series/.gitkeep
 data/chroma_db/
 data/store/
 data/bm25_idx/

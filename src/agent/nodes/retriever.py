@@ -77,10 +77,15 @@ def retrieve(state: AgentState) -> dict[str, Any]:
 
     # `doc_id_scope` lets callers restrict retrieval to a registry doc subset.
     doc_id_scope: list[str] | None = state.get("doc_id_scope")  # type: ignore[assignment]
+    # Phase 15: `domain_scope` restricts to one or more registered domain
+    # buckets. Set by the CLI's --domain or the planner's auto-router.
+    domain_scope: list[str] | None = state.get("domain_scope")  # type: ignore[assignment]
 
     for sq in to_retrieve:
         t0 = time.perf_counter()
-        hits = hybrid_retrieve(sq, k=per_subq_k, doc_ids=doc_id_scope)
+        hits = hybrid_retrieve(
+            sq, k=per_subq_k, doc_ids=doc_id_scope, domains=domain_scope
+        )
         chunks_by_subq[sq] = hits
         timings.append(
             {
@@ -88,6 +93,7 @@ def retrieve(state: AgentState) -> dict[str, Any]:
                 "sub_q": sq[:80],
                 "k": per_subq_k,
                 "hits": len(hits),
+                "domain_scope": domain_scope or [],
                 "duration_ms": int((time.perf_counter() - t0) * 1000),
             }
         )
