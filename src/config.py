@@ -123,6 +123,23 @@ class Settings(BaseSettings):
     )
     reasoning_provider: ProviderName | None = None
     fast_provider: ProviderName | None = None
+
+    # Per-tier cascade override (Phase 15+).
+    #
+    # By default `resolve_cascade()` walks `_AUTO_PRIORITY` and adds every
+    # configured provider in that order — fine for most setups, but not when
+    # you want, say, "Cerebras Llama-3.3 primary, fall straight through to
+    # Groq Llama-3.3 on a 429, skip NVIDIA's 8B in between."
+    #
+    # When set, this list REPLACES the auto-derived chain for the FAST tier.
+    # Comma-separated env var: FAST_CASCADE=cerebras,groq
+    #
+    # Unknown / unconfigured providers in the list are silently dropped at
+    # resolve time, so a bad value degrades to "use whichever subset works"
+    # rather than crashing the run.
+    fast_cascade: list[str] | None = None
+    reasoning_cascade: list[str] | None = None
+    tool_cascade: list[str] | None = None
     tool_provider: ProviderName | None = None
     embed_provider: ProviderName | None = None
 
@@ -339,6 +356,31 @@ class Settings(BaseSettings):
             return None
         return v
 
+    @field_validator(
+        "fast_cascade",
+        "reasoning_cascade",
+        "tool_cascade",
+        mode="before",
+    )
+    @classmethod
+    def _parse_csv_cascade(cls, v):
+        """
+        Let users write FAST_CASCADE=cerebras,groq in .env instead of the
+        JSON form pydantic-settings expects by default for list[str] fields.
+        Tolerant of whitespace and case ("Cerebras, Groq" → ["cerebras","groq"]).
+        Empty string → None (treated as "no override").
+        """
+        if v is None:
+            return None
+        if isinstance(v, list):
+            return [str(x).strip().lower() for x in v if str(x).strip()]
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return None
+            return [tok.strip().lower() for tok in s.split(",") if tok.strip()]
+        return v
+
     # ---- Helpers ------------------------------------------------------------
     def configured_providers(self) -> list[ProviderName]:
         """Which providers have credentials? Ollama is 'always available'."""
@@ -398,10 +440,46 @@ class Settings(BaseSettings):
         providers that can serve this tier, in `_AUTO_PRIORITY` order.
 
         When `cascade_fallback_enabled=False`, returns just the primary.
+
+        Per-tier override (Phase 15+):
+        When `<tier>_cascade` is set (e.g. FAST_CASCADE=cerebras,groq), it
+        REPLACES the auto-derived chain — useful when you want a specific
+        primary→fallback pairing (e.g. Cerebras Llama-3.3 → Groq Llama-3.3)
+        and don't want some other configured provider sneaking into the
+        middle of the chain just because it appears earlier in
+        `_AUTO_PRIORITY`. Unknown / unconfigured providers in the override
+        are silently dropped so a typo degrades gracefully.
         """
         primary = self.resolve_provider(tier)
         if not self.cascade_fallback_enabled:
             return [primary]
+
+        # Per-tier override path. Honoured even when the user's primary
+        # provider doesn't appear in the override list — we still prepend
+        # the resolved primary so `<tier>_provider` and `<tier>_cascade`
+        # don't silently fight each other.
+        override = {
+            ModelTier.FAST: self.fast_cascade,
+            ModelTier.REASONING: self.reasoning_cascade,
+            ModelTier.TOOL: self.tool_cascade,
+        }.get(tier)
+        if override:
+            configured = set(self.configured_providers())
+            seen: set[str] = set()
+            chain_o: list[ProviderName] = []
+            for p_raw in [primary, *override]:
+                p = str(p_raw).strip().lower()
+                if p in seen or p not in configured:
+                    continue
+                # Filter against the typed ProviderName universe (mypy-friendly,
+                # also drops obvious garbage values from a typo'd env var).
+                if p not in _AUTO_PRIORITY:
+                    continue
+                seen.add(p)
+                chain_o.append(p)  # type: ignore[arg-type]
+            if chain_o:
+                return chain_o
+            # Override produced nothing usable — fall through to auto-derive.
 
         chain: list[ProviderName] = [primary]
         candidates = list(_AUTO_PRIORITY)
