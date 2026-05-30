@@ -149,6 +149,21 @@ class Settings(BaseSettings):
     #    Uses HTML scrape via the `ddgs` library. Rate-limited (~1 req/sec).
     #    Always considered "configured" — guaranteed working fallback.
 
+    # ---- Semantic Scholar API key (Phase 15+) ------------------------------
+    # OPTIONAL. The public endpoint works without a key but 429s under any
+    # real burst (the Phase 15 seed run hit this on the back half of an
+    # 18-query sweep). Email s2-api@allenai.org with a short blurb about
+    # your usage and they issue a personal key, also rate-limited at "≈1
+    # request per second cumulative across all endpoints" but reliably so.
+    #
+    # When set, every Semantic Scholar HTTP call (the seeder + the agent's
+    # Stage-2 paper-discovery fallback) sends the key as the `x-api-key`
+    # header — the official auth scheme documented at
+    #   https://www.semanticscholar.org/product/api/tutorial
+    # and the in-process courtesy gap drops from 3s (public) to ~1.1s
+    # (just under the documented 1 RPS ceiling).
+    semantic_scholar_api_key: str | None = None
+
     # Order of attempts when the agent calls web_fallback.
     web_search_cascade: list[str] = ["tavily", "serper", "duckduckgo"]
     # Max bounded retries when Critic flags retrieval as low quality. Each

@@ -66,14 +66,43 @@ from src.llm import ModelTier, embed
 console = Console()
 
 
-# S2's documented unauthenticated rate is "approximately 1 req/sec" but in
-# practice (observed 2026-05) the free tier 429s aggressively when ~15+
-# queries hit in rapid succession — exactly the seeder's burst pattern.
-# A 3-second courtesy gap empirically clears the throttle even when seeding
-# all three domains back-to-back (~18 queries total). Slower seeds are a
-# small price for actually getting results on the time_series tail of the
-# run instead of "no hits — S2 returned nothing".
-_S2_RATE_LIMIT_SECONDS = 3.0
+# Courtesy gap between S2 calls.
+#
+# Two regimes:
+#   * No API key: the public endpoint says "≈1 req/sec" but 429s under any
+#     real burst (observed 2026-05 on the back half of an 18-query sweep).
+#     3.0s empirically clears the throttle.
+#   * With an API key (x-api-key header): S2's issued personal keys are
+#     also documented at "1 req/sec cumulative across all endpoints" with
+#     an explicit "stay BELOW this threshold" guidance. 1.1s sits just
+#     under the ceiling — reliable, and ~3× faster than the public path.
+#
+# `_s2_gap()` picks the right value at call time so a key added (or
+# removed) in .env takes effect on the next request without reloading.
+_S2_GAP_PUBLIC = 3.0
+_S2_GAP_KEYED = 1.1
+
+
+def _s2_gap() -> float:
+    """Return the right courtesy gap for the current auth state."""
+    from src.config import settings  # local import; avoids module-load cost
+
+    return _S2_GAP_KEYED if settings.semantic_scholar_api_key else _S2_GAP_PUBLIC
+
+
+def _s2_headers() -> dict[str, str]:
+    """
+    Build request headers for an S2 call.
+
+    Returns `{"x-api-key": ...}` when a key is configured — the official
+    auth scheme per https://www.semanticscholar.org/product/api/tutorial.
+    Returns an empty dict when no key is set so the call falls back to the
+    public unauthenticated endpoint (slower throttle, otherwise identical).
+    """
+    from src.config import settings
+
+    key = settings.semantic_scholar_api_key
+    return {"x-api-key": key} if key else {}
 
 # Per-query result cap. S2 sorts by citation count when requested, so the
 # first N hits are by definition the most-cited; pulling more diminishes
@@ -132,21 +161,32 @@ def _s2_search_sorted_by_citations(
         "sort": "citationCount:desc",
         "fields": "title,abstract,year,venue,citationCount,openAccessPdf,externalIds,url",
     }
+    gap = _s2_gap()
     try:
-        r = httpx.get(url, params=params, timeout=20.0)
+        # `x-api-key` header sent when the user has an issued S2 key in .env;
+        # falls back to the unauthenticated endpoint otherwise (same URL,
+        # same payload, just a stricter throttle).
+        r = httpx.get(url, params=params, headers=_s2_headers(), timeout=20.0)
     except Exception as e:
         console.print(f"  [yellow]S2 request failed[/yellow]: {type(e).__name__}: {e}")
         # Sleep even on transport failure — a flapping endpoint shouldn't
         # be hammered by the retry on the next query.
-        time.sleep(_S2_RATE_LIMIT_SECONDS)
+        time.sleep(gap)
         return []
     # Courtesy delay AFTER every S2 request, before we return. Putting the
     # sleep here (rather than in the caller's loop) means ANY future caller
     # of this function inherits the throttle automatically — there is no
-    # code path that talks to S2 without paying the gap. 429s observed at
-    # 1 RPS disappear cleanly at 3 RPS — we burn ~45s seeding all three
-    # domains, but `time_series` (the tail) actually returns results.
-    time.sleep(_S2_RATE_LIMIT_SECONDS)
+    # code path that talks to S2 without paying the gap. The gap is chosen
+    # by `_s2_gap()` per the active auth regime (see constant docs above).
+    time.sleep(gap)
+    if r.status_code == 429:
+        # Explicit 429 surface — most useful diagnostic when a key has been
+        # issued but the user forgot to set SEMANTIC_SCHOLAR_API_KEY in .env.
+        console.print(
+            f"  [yellow]S2 throttled (429)[/yellow] for {query!r}  "
+            f"({'authed' if _s2_headers() else 'public endpoint'}, gap={gap}s)"
+        )
+        return []
     if r.status_code != 200:
         console.print(f"  [yellow]S2 status {r.status_code}[/yellow] for {query!r}")
         return []
