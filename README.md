@@ -1,8 +1,10 @@
 # ResearGent
 
-An **Agentic Research Engine** with Corrective RAG, Self-Reflection, hybrid retrieval, web fallback, and end-to-end evaluation.
+An **Agentic Research Engine** with Corrective RAG, Self-Reflection, hybrid retrieval, semantic chunking with local entity extraction, domain-aware corpora, a Semantic Scholar Stage-1 seeder, an arXiv + S2 Stage-2 deep-dive on low-confidence retrieval, a web fallback cascade, and end-to-end evaluation.
 
 > Built phase-by-phase — each phase ships a system that works end-to-end before the next layer is added.
+
+**Architecture in one line:** five LLM providers behind a tier router → semantic chunker (`all-MiniLM-L6-v2`) + GLiNER entity extraction → domain-tagged hybrid retrieval (dense + BM25 + RRF) → LangGraph DAG with Critic-gated rewriter, **arXiv/Semantic Scholar paper discovery**, web cascade (Tavily → Serper → DDG), Reflector with bounded loop-back → Postgres-backed pointer-state checkpoints (~3 KB/snapshot) — 100% free-tier, CPU-only for everything that isn't an LLM call.
 
 ---
 
@@ -391,43 +393,78 @@ uv run researgent research "..." --domain quant_finance    # scope retrieval exp
 
 ---
 
-## Architecture (target — final state)
+## Architecture (current shipped state — Phases 0–15)
 
 ```
-                  ┌─────────────┐
-   user query ─►  │   Planner   │  decomposes into sub-questions
-                  └──────┬──────┘
-                         │
-                  ┌──────▼──────┐
-                  │  Retriever  │  hybrid: dense + BM25 + RRF
-                  └──────┬──────┘
-                         │
-                  ┌──────▼──────┐
-                  │   Critic    │  grades chunks for relevance
-                  └──┬───────┬──┘
-       low confidence│       │ enough evidence
-                     │       │
-              ┌──────▼──┐    │
-              │  Web    │    │
-              │ Scraper │    │
-              └────┬────┘    │
-                   │         │
-                   └────┬────┘
-                        │
-                  ┌─────▼─────┐
-                  │ Generator │  drafts answer with citations
-                  └─────┬─────┘
-                        │
-                  ┌─────▼─────┐
-                  │ Reflector │  critiques draft, finds gaps
-                  └─────┬─────┘
-                        │
-            (loop back if needed, ≤ N iterations)
-                        │
-                  ┌─────▼──────┐
-                  │   Report   │  final markdown with eval scores
-                  └────────────┘
+                       ┌──────────────────┐
+        user query ──► │     Planner      │  decompose into sub-questions
+                       │  + auto-router   │  + keyword-infer domain_scope
+                       └────────┬─────────┘     (free, deterministic)
+                                │
+                       ┌────────▼─────────┐
+                       │    Retriever     │  Stage 1: hybrid (dense + BM25 + RRF)
+                       │  domain-filtered │  scoped by domain_scope + doc_id_scope
+                       │  + KG expansion  │  + 1-hop wikilink expansion (vault)
+                       └────────┬─────────┘
+                                │
+                       ┌────────▼─────────┐
+                       │      Critic      │  grades each sub-q's chunks {high|med|low}
+                       └─┬──┬────┬────┬───┘
+              high       │  │    │    │     budget exhausted + low/medium
+           (sufficient)  │  │    │    │
+                         │  │    │    └────────┐
+                         │  │    │             │
+                  ┌──────┘  │    │       ┌─────▼───────────┐
+                  │         │    │       │ paper_discovery │  Stage 2: arXiv + S2 live
+                  │         │    │       │  (Critic-gated) │  query rewritten to
+                  │         │    │       └─────┬───────────┘  keywords; ranked by
+                  │         │    │             │              relevance + citations
+                  │         │    │             └────► Critic re-grade (loop ≤1)
+                  │         │    │
+                  │   medium/low │   papers tried but still weak
+                  │   + budget   │
+                  │   left       │   ┌─────────────────┐
+                  │         │    └──►│  web_fallback   │  Tavily → Serper → DDG
+                  │         │        │   (cascade)     │  cascade on transient errors
+                  │         │        └────────┬────────┘
+                  │         │                 │
+                  │         │                 └────► Critic re-grade (loop ≤1)
+                  │         │
+                  │  ┌──────▼─────┐
+                  │  │  rewriter  │  Critic-driven sub-q rephrase + retry
+                  │  └──────┬─────┘  (≤ crag_max_rewrites)
+                  │         │
+                  │         └────► Critic re-grade
+                  │
+                  ▼
+           ┌────────────┐                  no usable evidence at all
+           │ Generator  │ ◄──────────┐     ┌─────────────────┐
+           │   cited    │            └─────┤  llm_reasoning  │  LAST-RESORT priors
+           └─────┬──────┘                  │  ("no sources") │  with loud disclaimer
+                 │                         └─────────────────┘
+                 ▼
+           ┌────────────┐  audits draft for gaps; if any AND
+           │ Reflector  │  budget left → appends follow-up
+           └─────┬──────┘  sub-questions, loops back to retriever
+                 │
+       gaps + budget left  │  no gaps OR budget done
+                 │         │
+                 │         └──► END (+ optional auto-save to notes folder)
+                 │
+                 └──► retriever  (Phase 5 reflection loop, ≤ N iters)
+
+
+  ──────  state lives as ChunkRef pointers in Postgres checkpoints (~3 KB/snapshot, Phase 13)
+  ──────  chunk text + entity manifests live in Chroma (Phase 14) / agent_artifacts JSONB
+  ──────  per-domain corpora seeded from S2 citationCount:desc (Phase 15)
 ```
+
+Key flow notes:
+
+- **Stage 1** is the seeded local corpus (Phase 15 S2 seeder → domain-bucketed Chroma).
+- **Stage 2** is `paper_discovery` — fires when Critic is unhappy AND rewriter budget is exhausted. arXiv + S2 live, abstract-only, ranked by query relevance, fed BACK through the Critic for re-grading rather than straight to the generator.
+- **Domain scope** is set either by `--domain` (explicit) or by the planner's keyword auto-router (implicit). The Retriever passes it into every hybrid call as a Chroma `where` filter + BM25 post-filter.
+- **Web fallback** runs only AFTER paper_discovery has been tried — peer-reviewed abstracts beat web snippets for research questions.
 
 ---
 
