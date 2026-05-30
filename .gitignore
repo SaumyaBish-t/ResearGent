@@ -47,6 +47,7 @@ data/papers/time_series/*
 !data/papers/time_series/.gitkeep
 data/chroma_db/
 data/store/
+data/storage/                # Phase 12: raw bytes by content_hash, never committed
 data/bm25_idx/
 data/agent_state/
 data/cache/

@@ -408,6 +408,14 @@ def vault_ingest(
         help="Path to a folder of .md notes. Defaults to NOTES_FOLDER_PATH "
              "(or OBSIDIAN_VAULT_PATH, or ./notes) from .env if blank.",
     ),
+    domain: str = typer.Option(
+        "",
+        "--domain",
+        help="Tag every ingested chunk with this registered domain id "
+             "(agentic_ai | quant_finance | time_series). When omitted, "
+             "auto-detected from the path: a vault under "
+             "data/papers/<domain>/_abstracts auto-tags to <domain>.",
+    ),
 ) -> None:
     """
     Ingest a folder of markdown notes as the local knowledge corpus.
@@ -438,7 +446,8 @@ def vault_ingest(
         raise typer.Exit(code=1)
 
     console.print(f"[dim]ingesting from:[/dim] [cyan]{p.resolve()}[/cyan]\n")
-    results = ingest_vault(p)
+    dom = _validate_domain_or_exit(domain)
+    results = ingest_vault(p, domain=dom)
     ok = sum(1 for r in results if "error" not in r)
     total_chunks = sum(r.get("chunks_inserted", 0) for r in results)
     total_tags = len({t for r in results for t in (r.get("tags") or [])})
@@ -490,6 +499,95 @@ def domains() -> None:
         # it so the user knows where to drop files.
         table.add_row(dom.id, dom.label, str(dom.ingest_dir), dom.description)
     console.print(table)
+
+
+@app.command(name="retag-domain")
+def retag_domain(
+    domain: str = typer.Option(
+        ...,
+        "--domain",
+        help="Registered domain id to apply (agentic_ai | quant_finance | time_series).",
+    ),
+    source_file_contains: str = typer.Option(
+        "",
+        "--match",
+        help="Optional substring filter on the chunk's source_file. "
+             "When omitted EVERY chunk currently tagged domain='' gets "
+             "the new tag — useful right after a fresh ingest+seed when "
+             "you know the whole untagged set belongs to one domain.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Show how many chunks would be retagged without modifying anything.",
+    ),
+) -> None:
+    """
+    Backfill `domain` metadata on already-ingested Chroma chunks.
+
+    Why this exists
+    ---------------
+    When the vault-ingest path was missing the Phase 15 domain stamp
+    (pre-fix), abstract notes landed in Chroma with `domain=""`. Re-ingesting
+    works but means re-embedding everything. This command updates the
+    metadata in place — same chunk ids, new domain field, no re-embed.
+
+    Examples:
+      researgent retag-domain --domain agentic_ai --dry-run
+      researgent retag-domain --domain agentic_ai --match "_abstracts"
+      researgent retag-domain --domain quant_finance --match "quant_finance/"
+    """
+    dom = _validate_domain_or_exit(domain)
+    from src.store import get_or_create_papers_collection
+
+    col = get_or_create_papers_collection()
+    # Pull only what we need to evaluate the filter — no embeddings.
+    res = col.get(include=["metadatas"])
+    ids = res.get("ids") or []
+    metas = res.get("metadatas") or []
+    if not ids:
+        console.print("[yellow]collection is empty — nothing to retag.[/yellow]")
+        return
+
+    # Match logic: pick chunks currently tagged with no domain (the empty
+    # string is what the pipeline stamps when domain is unset), OPTIONALLY
+    # further narrowed by the source_file substring. Re-tagging chunks
+    # that already have a (different) domain is intentionally NOT supported
+    # here — that's a rarer surgical case where the user should re-ingest
+    # to avoid mass-rewrites going wrong.
+    to_update_ids: list[str] = []
+    to_update_metas: list[dict] = []
+    for cid, meta in zip(ids, metas):
+        if (meta.get("domain") or "") != "":
+            continue
+        if source_file_contains and source_file_contains not in (meta.get("source_file") or ""):
+            continue
+        new_meta = dict(meta)
+        new_meta["domain"] = dom
+        to_update_ids.append(cid)
+        to_update_metas.append(new_meta)
+
+    console.print(
+        f"[bold]match:[/bold] {len(to_update_ids)} chunks (of {len(ids)} total) "
+        f"will get [cyan]domain={dom}[/cyan]"
+    )
+    if not to_update_ids:
+        return
+    if dry_run:
+        console.print("[yellow]dry-run; no changes written.[/yellow]")
+        return
+
+    # Chroma's `update` rewrites just the metadata fields supplied —
+    # documents and embeddings are untouched. Cheap and idempotent.
+    col.update(ids=to_update_ids, metadatas=to_update_metas)
+    # BM25's per-chunk metadata cache also stores domain, so a rebuild is
+    # required to keep the lexical-side filter consistent with Chroma.
+    console.print("[cyan]rebuilding BM25 index…[/cyan]")
+    from src.ingest.pipeline import _rebuild_bm25_from_chroma
+
+    n = _rebuild_bm25_from_chroma()
+    console.print(f"  [green]BM25[/green] indexed {n} chunks")
+    console.print(f"[bold green]retagged {len(to_update_ids)} chunks.[/bold green]")
 
 
 @app.command()
