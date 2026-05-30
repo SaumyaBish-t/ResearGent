@@ -41,7 +41,22 @@ Rules:
   matching the sub-questions you were given evidence for.
 - If the sources do not contain the answer, say so plainly. Do NOT invent facts.
 - Quote sparingly; paraphrase otherwise.
-- Prefer concise, direct prose over bullet lists unless the question itself is a list."""
+- Prefer concise, direct prose over bullet lists unless the question itself is a list.
+
+YEAR / RECENCY DISCIPLINE — read carefully.
+- The user may ask about "recent", "latest", a specific year ("2026 developments"),
+  or "what's new". When they do:
+    1. Check the publication year of EACH source you intend to cite (it's in the
+       chunk header, e.g. "Title (2024)").
+    2. ONLY make a "in <year> X happened" claim when AT LEAST ONE cited source
+       is actually from that year and that source supports the claim.
+    3. If most sources predate the year the user asked about, say so explicitly:
+       "The available evidence is mostly from <year_range>; one 2026 paper [S3]
+       discusses ...". Do NOT paper over the gap with vague phrases like
+       "advancements published in 2026 include..." when only an older paper is
+       cited for that bullet.
+- Do NOT repeat the same point under multiple section headers. If two sub-questions
+  produce overlapping answers, merge them into one section."""
 
 
 def _chunk_key(c: HydratedChunk) -> tuple[str, int]:

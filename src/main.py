@@ -1029,11 +1029,32 @@ def research(
                             f"&file={quote(str(rel).replace(chr(92), '/'))}"
                         )
                         if sys.platform == "win32":
-                            subprocess.Popen(["cmd", "/c", "start", "", uri], shell=False)
+                            # Bug fix: the old `cmd /c start "" <uri>` path
+                            # broke on Windows because `cmd.exe` parses the
+                            # unquoted `&` in the obsidian:// URI as a
+                            # command separator, then tries to execute the
+                            # tail as its own command — producing a stray
+                            # `'file' is not recognized as an internal or
+                            # external command` on every successful save.
+                            # `os.startfile` passes the URI to the shell
+                            # via the ShellExecute API directly, bypassing
+                            # cmd's argument parser entirely. Safe for any
+                            # registered scheme; no-op when Obsidian isn't
+                            # installed (the URI handler just isn't found).
+                            import os as _os
+                            _os.startfile(uri)  # type: ignore[attr-defined]
                         elif sys.platform == "darwin":
-                            subprocess.Popen(["open", uri])
+                            subprocess.Popen(
+                                ["open", uri],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                            )
                         else:
-                            subprocess.Popen(["xdg-open", uri])
+                            subprocess.Popen(
+                                ["xdg-open", uri],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                            )
                     except Exception:
                         # URI open is a nicety — never fail the command on it.
                         pass
