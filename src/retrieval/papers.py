@@ -158,32 +158,44 @@ def _arxiv_search(query: str, max_results: int = 5) -> list[PaperChunk]:
 
 def _semantic_scholar_search(query: str, max_results: int = 5) -> list[PaperChunk]:
     """
-    Free unauthenticated API. Documented at "≈1 req/sec" but observed to
-    429 under burst load — we pay a 3-second courtesy gap AFTER the call so
-    a flurry of low-confidence agent runs (each one firing this on the
-    Critic-gated fallback path) can't trip the throttle. One in-flight
-    query per process; latency cost is bounded by `max_results`, not by
-    the gap.
+    Semantic Scholar paper search.
+
+    Two auth regimes:
+      * No key set:  public endpoint, 3.0s courtesy gap after each call.
+                     Documented as "≈1 req/sec" but 429s under burst.
+      * Key set:     `x-api-key` header per the official tutorial
+                     (https://www.semanticscholar.org/product/api/tutorial),
+                     1.1s courtesy gap — just under the documented 1 RPS
+                     ceiling, ~3× faster than the public path.
 
     Endpoint: /graph/v1/paper/search?query=...&limit=...&fields=...
     """
+    from src.config import settings
+
     url = "https://api.semanticscholar.org/graph/v1/paper/search"
     params = {
         "query": query,
         "limit": str(max_results),
         "fields": "title,abstract,year,venue,authors,citationCount,openAccessPdf,externalIds,url",
     }
+    # Auth + gap chosen at call time so a .env change takes effect on the
+    # next agent run without a restart.
+    key = settings.semantic_scholar_api_key
+    headers = {"x-api-key": key} if key else {}
+    gap = 1.1 if key else 3.0
     try:
-        r = httpx.get(url, params=params, timeout=15.0)
-        # Match the seeder's gap; see src/ingest/s2_seed.py for the
-        # rationale on why 1 RPS wasn't enough for free-tier S2 in 2026.
-        time.sleep(3.0)
+        r = httpx.get(url, params=params, headers=headers, timeout=15.0)
+        # Match s2_seed.py's pattern — sleep AFTER every successful or
+        # 4xx-returning call so the next caller in the same process gets
+        # the throttle for free.
+        time.sleep(gap)
         if r.status_code != 200:
             return []
         data = r.json()
     except Exception:
-        # Sleep even on transport failure — same reasoning as in s2_seed.
-        time.sleep(3.0)
+        # Sleep even on transport failure — a flapping endpoint shouldn't
+        # be hammered by the next query in the same agent run.
+        time.sleep(gap)
         return []
 
     out: list[PaperChunk] = []

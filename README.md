@@ -365,8 +365,8 @@ What lands on disk:
 
 Free-tier guarantees:
 
-- **No S2 API key needed** — uses the public unauthenticated endpoint.
-- **1 RPS courtesy rate limit** — `time.sleep(1.05)` between calls.
+- **No S2 API key required** — works against the public unauthenticated endpoint out of the box, with a 3.0s courtesy gap between calls (empirically clears the 429s observed on free-tier bursts of ~18 queries).
+- **Optional `SEMANTIC_SCHOLAR_API_KEY`** — email `s2-api@allenai.org` for a personal key. When set in `.env`, every S2 call sends it as the `x-api-key` header (per the [official tutorial](https://www.semanticscholar.org/product/api/tutorial)) and the courtesy gap drops to 1.1s — just under their documented 1 RPS cumulative ceiling, ~3× faster than the public path. Both the seeder AND the Stage-2 paper-discovery fallback pick the key up automatically.
 - **Idempotent** — re-seeding the same paper re-uses the existing content hash, replacing chunks rather than duplicating.
 
 ### 5. Stage-1 / Stage-2 protocol — already wired
