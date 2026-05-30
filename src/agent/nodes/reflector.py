@@ -214,8 +214,27 @@ Now audit the draft. Return JSON only."""
                 toks.add(raw)
         return toks
 
-    existing_lower = {s.strip().lower() for s in existing_sub_qs}
-    existing_token_sets = [_content_tokens(s) for s in existing_sub_qs]
+    # ALWAYS include the original user question in the comparison set, even
+    # when it happens to equal one of the sub-questions already. Observed
+    # 2026-05: the reflector emitted "What are the recent advancements in
+    # federated learning for time series anomaly detection in 2026?" as a
+    # follow-up to the user's original "What are the latest 2026 developments
+    # in federated learning for time series anomaly detection?" — 0.75 token
+    # overlap with the original, only 0.05 above the old 0.70 threshold, so
+    # it slipped through. Dropping the threshold to 0.60 + comparing against
+    # the question itself catches these "the LLM just paraphrased your prompt"
+    # cases without rejecting genuinely new sub-questions (which usually share
+    # only the core domain nouns, ~0.4-0.5 overlap).
+    compare_set = list(existing_sub_qs)
+    if question and question not in compare_set:
+        compare_set.append(question)
+    existing_lower = {s.strip().lower() for s in compare_set}
+    existing_token_sets = [_content_tokens(s) for s in compare_set]
+
+    # 0.60 was chosen empirically on the federated-learning trace — fu1
+    # ("recent advancements") sat at 0.75 vs the original, fu2 (a genuinely
+    # different framing) at 0.50. The new threshold drops fu1 and keeps fu2.
+    _NEAR_DUP_THRESHOLD = 0.60
 
     follow_ups: list[str] = []
     max_per_loop = settings.reflection_max_follow_ups_per_loop
@@ -235,7 +254,7 @@ Now audit the draft. Return JSON only."""
         q_tokens = _content_tokens(q)
         if q_tokens:
             is_near_dup = any(
-                (len(q_tokens & ex_tokens) / max(len(q_tokens), 1)) >= 0.7
+                (len(q_tokens & ex_tokens) / max(len(q_tokens), 1)) >= _NEAR_DUP_THRESHOLD
                 for ex_tokens in existing_token_sets
                 if ex_tokens
             )
