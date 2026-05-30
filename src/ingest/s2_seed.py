@@ -66,10 +66,14 @@ from src.llm import ModelTier, embed
 console = Console()
 
 
-# S2 enforces a courtesy rate of 1 request/sec when unauthenticated.
-# We add a tiny safety margin so a parallel script + this seeder don't both
-# tip into 429-territory.
-_S2_RATE_LIMIT_SECONDS = 1.05
+# S2's documented unauthenticated rate is "approximately 1 req/sec" but in
+# practice (observed 2026-05) the free tier 429s aggressively when ~15+
+# queries hit in rapid succession — exactly the seeder's burst pattern.
+# A 3-second courtesy gap empirically clears the throttle even when seeding
+# all three domains back-to-back (~18 queries total). Slower seeds are a
+# small price for actually getting results on the time_series tail of the
+# run instead of "no hits — S2 returned nothing".
+_S2_RATE_LIMIT_SECONDS = 3.0
 
 # Per-query result cap. S2 sorts by citation count when requested, so the
 # first N hits are by definition the most-cited; pulling more diminishes
@@ -132,7 +136,17 @@ def _s2_search_sorted_by_citations(
         r = httpx.get(url, params=params, timeout=20.0)
     except Exception as e:
         console.print(f"  [yellow]S2 request failed[/yellow]: {type(e).__name__}: {e}")
+        # Sleep even on transport failure — a flapping endpoint shouldn't
+        # be hammered by the retry on the next query.
+        time.sleep(_S2_RATE_LIMIT_SECONDS)
         return []
+    # Courtesy delay AFTER every S2 request, before we return. Putting the
+    # sleep here (rather than in the caller's loop) means ANY future caller
+    # of this function inherits the throttle automatically — there is no
+    # code path that talks to S2 without paying the gap. 429s observed at
+    # 1 RPS disappear cleanly at 3 RPS — we burn ~45s seeding all three
+    # domains, but `time_series` (the tail) actually returns results.
+    time.sleep(_S2_RATE_LIMIT_SECONDS)
     if r.status_code != 200:
         console.print(f"  [yellow]S2 status {r.status_code}[/yellow] for {query!r}")
         return []
@@ -177,8 +191,11 @@ def _collect_domain_hits(
 
     for q in dom.seed_queries:
         console.print(f"  [cyan]query[/cyan] {q!r}")
+        # No outer sleep needed — `_s2_search_sorted_by_citations` now
+        # throttles internally so every code path that touches S2 pays
+        # the same gap. Removing the duplicate avoids accidentally
+        # doubling the courtesy delay to 6s/query.
         hits = _s2_search_sorted_by_citations(q, limit=top_n_per_query)
-        time.sleep(_S2_RATE_LIMIT_SECONDS)  # courtesy rate limit
         for h in hits:
             if h.arxiv_id and h.arxiv_id in seen_arxiv:
                 continue
