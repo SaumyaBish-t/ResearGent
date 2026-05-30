@@ -158,7 +158,12 @@ def _arxiv_search(query: str, max_results: int = 5) -> list[PaperChunk]:
 
 def _semantic_scholar_search(query: str, max_results: int = 5) -> list[PaperChunk]:
     """
-    Free unauthenticated API. Rate-limited to 1 req/sec; we're well under.
+    Free unauthenticated API. Documented at "≈1 req/sec" but observed to
+    429 under burst load — we pay a 3-second courtesy gap AFTER the call so
+    a flurry of low-confidence agent runs (each one firing this on the
+    Critic-gated fallback path) can't trip the throttle. One in-flight
+    query per process; latency cost is bounded by `max_results`, not by
+    the gap.
 
     Endpoint: /graph/v1/paper/search?query=...&limit=...&fields=...
     """
@@ -170,10 +175,15 @@ def _semantic_scholar_search(query: str, max_results: int = 5) -> list[PaperChun
     }
     try:
         r = httpx.get(url, params=params, timeout=15.0)
+        # Match the seeder's gap; see src/ingest/s2_seed.py for the
+        # rationale on why 1 RPS wasn't enough for free-tier S2 in 2026.
+        time.sleep(3.0)
         if r.status_code != 200:
             return []
         data = r.json()
     except Exception:
+        # Sleep even on transport failure — same reasoning as in s2_seed.
+        time.sleep(3.0)
         return []
 
     out: list[PaperChunk] = []
