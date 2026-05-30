@@ -379,42 +379,81 @@ def seed_domain(
         f"{len(abstracts_in)} abstract-notes"
     )
 
-    # Ingest the PDFs through the standard pipeline. Abstract-notes are
-    # markdown; we route them through ingest_file's vault-side path via
-    # ingest_vault — but ingest_vault expects an Obsidian-shaped folder.
-    # Simpler: synthesise tiny one-file "documents" by reusing ingest_file
-    # for PDFs and skipping abstract markdown here. Abstract notes get
-    # picked up on the next `researgent vault-ingest <abstracts_dir>` —
-    # documented in the CLI help.
-    ingested = 0
-    if pdfs_in:
-        # Single shared embedder warm-up, single BM25 rebuild at end.
-        console.print(f"  [cyan]embedding {len(pdfs_in)} seed PDFs…[/cyan]")
+    # ---- Ingest PDFs through the standard pipeline ----
+    ingested_pdfs = 0
+    warmup_failed = False
+    if pdfs_in or abstracts_in:
+        console.print(
+            f"  [cyan]embedding {len(pdfs_in)} PDFs + {len(abstracts_in)} abstract-notes…[/cyan]"
+        )
         try:
             embed(["warmup"], tier=ModelTier.EMBED)
         except Exception as e:
             console.print(f"  [red]embed warmup FAIL[/red]: {type(e).__name__}: {e}")
-            return {
-                "domain": domain_id,
-                "hits": len(hits),
-                "pdfs": len(pdfs_in),
-                "abstracts": len(abstracts_in),
-                "ingested": 0,
-                "error": "embedder warmup failed",
-            }
+            warmup_failed = True
+
+    if pdfs_in and not warmup_failed:
         for pdf in pdfs_in:
             try:
                 ingest_file(pdf, domain=domain_id, verbose=False, rebuild_bm25=False)
-                ingested += 1
+                ingested_pdfs += 1
             except Exception as e:
                 console.print(f"  [red]FAIL[/red] {pdf.name}: {type(e).__name__}: {e}")
+
+    # ---- Phase 15 fix: auto-ingest abstract notes too -------------------
+    # The previous behaviour wrote abstract .md files to disk but stopped
+    # there, expecting the user to remember `researgent vault-ingest
+    # data/papers/<domain>/_abstracts` as a second step. That was the root
+    # cause of "0 hits with --domain agentic_ai" after a successful seed
+    # — the user thought their corpus was ingested when only the PDFs
+    # were. Ingest them inline through the vault path, with the same
+    # domain tag, so a single `researgent seed` produces a fully-indexed,
+    # domain-scoped corpus.
+    ingested_abstracts = 0
+    if abstracts_in and not warmup_failed:
+        from src.ingest.pipeline import ingest_vault
+
+        try:
+            # `domain=domain_id` is explicit — even though
+            # _infer_domain_from_path would pick up `data/papers/<id>/
+            # _abstracts`, passing it explicitly future-proofs against a
+            # layout change and makes the seeder's intent unambiguous.
+            # rebuild_bm25=False because seed_all does ONE rebuild at the
+            # very end across every domain's chunks.
+            vault_results = ingest_vault(
+                abstracts_dir,
+                domain=domain_id,
+                rebuild_bm25=False,
+                verbose=False,
+            )
+            ingested_abstracts = sum(
+                1 for r in vault_results if "error" not in r
+            )
+        except Exception as e:
+            console.print(
+                f"  [red]abstract ingest FAIL[/red]: {type(e).__name__}: {e}"
+            )
+
+    if warmup_failed:
+        return {
+            "domain": domain_id,
+            "hits": len(hits),
+            "pdfs": len(pdfs_in),
+            "abstracts": len(abstracts_in),
+            "ingested": 0,
+            "ingested_pdfs": 0,
+            "ingested_abstracts": 0,
+            "error": "embedder warmup failed",
+        }
 
     return {
         "domain": domain_id,
         "hits": len(hits),
         "pdfs": len(pdfs_in),
         "abstracts": len(abstracts_in),
-        "ingested": ingested,
+        "ingested": ingested_pdfs + ingested_abstracts,
+        "ingested_pdfs": ingested_pdfs,
+        "ingested_abstracts": ingested_abstracts,
     }
 
 

@@ -54,8 +54,40 @@ from src.agent.state import AgentState
 from src.config import settings
 
 def _route_after_retriever(state: AgentState) -> str:
-    """Branch right after the very first retrieve — empty = early no_answer."""
-    return "critic" if retriever.has_any_chunks(state) else "no_answer"
+    """
+    Branch right after the very first retrieve.
+
+    Phase 15 fix: empty retrieval is NOT a terminal state.
+
+    The old behaviour ("hits == 0 -> no_answer") orphaned the entire
+    Critic-driven fallback ladder (rewriter / paper_discovery /
+    web_fallback / llm_reasoning), which is exactly the cascade that
+    exists to RESCUE empty retrieval. The visible symptom was a
+    domain-scoped query returning 0 chunks and the agent giving up
+    immediately, even though the persona contract pins Stage-2 live
+    Semantic Scholar specifically for this case.
+
+    New ladder when retrieval came back empty:
+      1. paper_discovery — Stage-2 live arXiv + S2 (if enabled).
+      2. web_fallback    — Tavily/Serper/DDG cascade (if a key is set).
+      3. llm_reasoning   — last-resort priors (if enabled).
+      4. no_answer       — graceful "I don't know" with no sources.
+
+    When retrieval found ANYTHING, we go straight to Critic — unchanged.
+    """
+    if retriever.has_any_chunks(state):
+        return "critic"
+
+    # Empty retrieval → escalate. We don't bother calling the Critic on
+    # zero chunks (it has nothing to grade) and skip straight to the
+    # fallback most appropriate for the persona's Stage 1/Stage 2 model.
+    if settings.paper_discovery_enabled and not state.get("papers_used"):
+        return "paper_discovery"
+    if settings.tavily_api_key and not state.get("web_used"):
+        return "web_fallback"
+    if settings.llm_reasoning_fallback_enabled:
+        return "llm_reasoning"
+    return "no_answer"
 
 
 def _route_after_critic(state: AgentState) -> str:
@@ -201,7 +233,16 @@ def build_graph(use_checkpointer: bool = True):
     g.add_conditional_edges(
         "retriever",
         _route_after_retriever,
-        {"critic": "critic", "no_answer": "no_answer"},
+        {
+            "critic": "critic",
+            # Phase 15 fix: empty retrieval escalates through the same
+            # fallback ladder the Critic would have triggered, instead of
+            # terminating at no_answer.
+            "paper_discovery": "paper_discovery",
+            "web_fallback": "web_fallback",
+            "llm_reasoning": "llm_reasoning",
+            "no_answer": "no_answer",
+        },
     )
     g.add_conditional_edges(
         "critic",

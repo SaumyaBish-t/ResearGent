@@ -86,6 +86,32 @@ def retrieve(state: AgentState) -> dict[str, Any]:
         hits = hybrid_retrieve(
             sq, k=per_subq_k, doc_ids=doc_id_scope, domains=domain_scope
         )
+        widened = False
+        # Phase 15 fix: a domain-scoped retrieval that returns 0 hits is
+        # almost always one of two cases:
+        #   (a) the user's corpus IS in that domain bucket but the chunks
+        #       were ingested before Phase 15 (so they carry domain="")
+        #       — common for vault-ingested abstracts pre-fix.
+        #   (b) the question only tangentially mentions a domain keyword
+        #       but the relevant evidence lives in another bucket.
+        # Both cases want the same recovery: drop the domain filter for
+        # one retry. We do NOT drop doc_id_scope here — that's set by an
+        # explicit "search only this upload" intent which empty results
+        # don't refute. We DO record `widened=True` in the trace so the
+        # CLI/UI can show what happened.
+        if not hits and domain_scope:
+            t1 = time.perf_counter()
+            hits = hybrid_retrieve(sq, k=per_subq_k, doc_ids=doc_id_scope, domains=None)
+            widened = True
+            timings.append(
+                {
+                    "node": "retriever",
+                    "sub_q": sq[:80],
+                    "widened_domain_scope": True,
+                    "hits_after_widen": len(hits),
+                    "duration_ms": int((time.perf_counter() - t1) * 1000),
+                }
+            )
         chunks_by_subq[sq] = hits
         timings.append(
             {
@@ -94,6 +120,7 @@ def retrieve(state: AgentState) -> dict[str, Any]:
                 "k": per_subq_k,
                 "hits": len(hits),
                 "domain_scope": domain_scope or [],
+                "widened": widened,
                 "duration_ms": int((time.perf_counter() - t0) * 1000),
             }
         )

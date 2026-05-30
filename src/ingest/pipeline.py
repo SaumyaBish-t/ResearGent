@@ -490,6 +490,43 @@ def ingest_all_domains(
                 results.append({"source_file": pdf.name, "error": str(e)})
         out[dom_id] = results
 
+    # Phase 15 fix: also walk each domain's `_abstracts/` subfolder so the
+    # vault-ingest step the seeder used to ask the user to remember is now
+    # part of one command. ingest_vault auto-detects the domain from the
+    # path (`data/papers/<id>/_abstracts`) and stamps every chunk; we pass
+    # it explicitly anyway for clarity.
+    for dom_id in target:
+        if dom_id not in DOMAINS:
+            continue
+        dom = DOMAINS[dom_id]
+        abstracts_dir = dom.ingest_dir / "_abstracts"
+        if not abstracts_dir.exists():
+            continue
+        md_files = list(abstracts_dir.glob("*.md"))
+        if not md_files:
+            continue
+        console.print(
+            f"\n[bold]── {dom.label} abstracts ──[/bold]  "
+            f"[dim]{abstracts_dir}[/dim]  ({len(md_files)} notes)"
+        )
+        try:
+            vault_results = ingest_vault(
+                abstracts_dir,
+                domain=dom_id,
+                rebuild_bm25=False,
+                verbose=False,
+            )
+            # Tack abstract-note results onto the same domain bucket so
+            # the CLI summary reflects the full corpus per domain.
+            out.setdefault(dom_id, []).extend(vault_results)
+            ok = sum(1 for r in vault_results if "error" not in r)
+            console.print(
+                f"  [green]done[/green]  {ok}/{len(vault_results)} abstract notes ingested"
+            )
+        except Exception as e:
+            console.print(f"  [red]abstract ingest FAIL[/red]: {type(e).__name__}: {e}")
+            out.setdefault(dom_id, []).append({"error": str(e)})
+
     console.print("\n[cyan]rebuilding BM25 index[/cyan]...")
     bm25_n = _rebuild_bm25_from_chroma()
     console.print(f"  [green]BM25[/green] indexed {bm25_n} chunks across all domains")
@@ -506,6 +543,7 @@ def _embed_and_store_vault_chunks(
     chunks: list[VaultChunk],
     *,
     registry_doc_id: str,
+    domain: str | None = None,
     verbose: bool = True,
 ) -> int:
     """Embed vault chunks and insert into the same papers collection."""
@@ -551,6 +589,11 @@ def _embed_and_store_vault_chunks(
                 # Phase 14: GLiNER entities, comma-joined to fit Chroma's
                 # scalar-only metadata. Same convention as `tags`/`wikilinks`.
                 "entities": ", ".join(c.entities),
+                # Phase 15 fix: stamp the domain bucket on vault chunks so
+                # the retrieval-side `domain` filter matches them. Without
+                # this every vault-ingested abstract was tagged domain=""
+                # and excluded by any `--domain agentic_ai`-style query.
+                "domain": domain or "",
             }
             for c in batch
         ]
@@ -574,6 +617,7 @@ def _embed_and_store_vault_chunks(
 def ingest_vault(
     vault_path: Path,
     *,
+    domain: str | None = None,
     rebuild_bm25: bool = True,
     verbose: bool = True,
 ) -> list[dict]:
@@ -595,6 +639,16 @@ def ingest_vault(
     if not notes:
         console.print(f"[yellow]No .md notes found in {vault_path}[/yellow]")
         return []
+
+    # Phase 15 fix: auto-detect domain from the vault path the same way
+    # `ingest_file` does for PDFs. `data/papers/<domain>/_abstracts` is the
+    # canonical layout the seeder produces — without this auto-detect, a
+    # user running `vault-ingest data/papers/agentic_ai/_abstracts` would
+    # silently get domain="" on every chunk and any domain-scoped query
+    # would skip the abstracts entirely.
+    effective_domain = domain or _infer_domain_from_path(vault_path)
+    if effective_domain and verbose:
+        console.print(f"[dim]domain:[/dim] [cyan]{effective_domain}[/cyan]")
 
     # Pre-warm — same reasoning as the PDF path.
     console.print("[cyan]pre-warming embedder...[/cyan]")
@@ -629,6 +683,15 @@ def ingest_vault(
                 storage_url = _persist_raw(
                     note_path, content_hash=note.doc_id, ext=".md"
                 )
+                # Phase 15 fix: stamp domain into the registry's `extra`
+                # bag, same convention as the PDF path. Keeps tags/wikilinks
+                # intact via dict merge so we don't clobber prior metadata.
+                extra_payload: dict = {
+                    "tags": note.tags,
+                    "wikilinks": note.wikilinks,
+                }
+                if effective_domain:
+                    extra_payload["domain"] = effective_domain
                 registry_uuid = upsert_document(
                     content_hash=note.doc_id,
                     filename=str(rel),
@@ -637,7 +700,7 @@ def ingest_vault(
                     file_storage_url=storage_url,
                     file_size=file_size,
                     chunk_count=len(chunks),
-                    extra={"tags": note.tags, "wikilinks": note.wikilinks},
+                    extra=extra_payload,
                 )
                 registry_doc_id = str(registry_uuid)
             else:
@@ -650,13 +713,18 @@ def ingest_vault(
                     f"doc_id: {registry_doc_id}"
                 )
             inserted = _embed_and_store_vault_chunks(
-                note, chunks, registry_doc_id=registry_doc_id, verbose=verbose,
+                note,
+                chunks,
+                registry_doc_id=registry_doc_id,
+                domain=effective_domain,
+                verbose=verbose,
             )
             results.append({
                 "source_file": str(rel),
                 "doc_id": registry_doc_id,
                 "content_hash": note.doc_id,
                 "title": note.title,
+                "domain": effective_domain,
                 "tags": note.tags,
                 "wikilinks": note.wikilinks,
                 "chunks_inserted": inserted,
