@@ -35,6 +35,7 @@ ArXiv ID where available, otherwise by exact-title match.
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 from dataclasses import dataclass
@@ -49,8 +50,19 @@ class PaperChunk:
     A discovered paper, exposed as the same interface as HybridChunk/WebChunk
     so generators/critics can mix all three without type-branching.
 
-    `text` is the paper's TITLE + ABSTRACT — that's what the generator
-    sees as evidence. Full-text retrieval is a separate path.
+    `text` is the paper's evidence body that the generator and critic see.
+    Three sources, used in priority order:
+      1. `chunk_text` — one semantic slice of the parsed PDF (Phase 15.1).
+         When the open-access PDF was fetched + parsed + chunked, the
+         original PaperChunk gets cloned into multiple, each holding one
+         slice. Each slice cites the same paper but quotes a specific
+         passage.
+      2. `full_text`  — the full parsed PDF, before semantic chunking.
+         Surfaces when the caller wants the raw document (e.g. saving the
+         whole PDF body to disk) but normally you should not see this in
+         a generator prompt — it'd blow the token budget.
+      3. `abstract`   — the title + abstract fallback. Used when the PDF
+         was paywalled, 404'd, captcha-walled, or unparseable.
     """
 
     title: str
@@ -65,10 +77,24 @@ class PaperChunk:
     pdf_url: str = ""      # when openly available
     score: float = 0.0     # query-relevance, [0..1], filled by ranker
 
+    # Phase 15.1: full-text enrichment fields. Both empty by default so all
+    # legacy callers keep getting title+abstract via the `.text` fallback.
+    full_text: str = ""    # raw concatenated PDF page text, set by fetcher
+    chunk_text: str = ""   # one semantic slice; set by the chunker after fetch
+    chunk_idx: int = 0     # 0-based index when this PaperChunk is a slice
+
     # ---- Public interface shared with HybridChunk / WebChunk ----
     @property
     def text(self) -> str:
-        """What the generator sees as evidence. Title + abstract."""
+        """What the generator/critic sees. Slice > full_text > abstract."""
+        # `chunk_text` wins when set — that's a bounded passage (~500-800
+        # tokens) safe to feed straight into the generator prompt.
+        if self.chunk_text:
+            return f"{self.title}\n\n{self.chunk_text}"
+        # `full_text` fallback. Rarely emitted to the prompt path; mostly
+        # useful when a caller wants the whole document for offline use.
+        if self.full_text:
+            return f"{self.title}\n\n{self.full_text}"
         if self.abstract:
             return f"{self.title}\n\n{self.abstract}"
         return self.title
@@ -83,7 +109,11 @@ class PaperChunk:
 
     @property
     def chunk_index(self) -> int:
-        return -1
+        # `chunk_idx` is set by the post-fetch chunker when this PaperChunk
+        # is one slice of a parsed PDF (0, 1, 2…). Otherwise it's a single
+        # abstract-only chunk and we return -1 for backward compatibility
+        # with the dedup keys downstream code computes from chunk_index.
+        return self.chunk_idx if self.chunk_text else -1
 
     @property
     def doc_title(self) -> str:
@@ -294,12 +324,322 @@ def _rank_by_relevance(query: str, papers: list[PaperChunk], top_k: int) -> list
     return papers[:top_k]
 
 
-def discover_papers(query: str, *, max_results: int = 5) -> list[PaperChunk]:
-    """
-    Search arXiv + Semantic Scholar, dedupe, rerank by query relevance.
+# ---------------------------------------------------------------------------
+# Phase 15.1 — async full-text enrichment for open-access PDFs
+# ---------------------------------------------------------------------------
+#
+# When a discovered paper exposes an `openAccessPdf.url`, we fetch the raw PDF
+# bytes asynchronously, parse the text with pypdf, semantically chunk it, and
+# RANK each chunk by its query relevance. The original abstract-only PaperChunk
+# is then replaced with the top-N most relevant slices. Net effect: the Critic
+# now grades real passages from the paper rather than blurbs, and the Generator
+# can cite specific evidence rather than restate abstracts.
+#
+# Robustness contract: ANY failure (HTTP 4xx/5xx, captcha redirect, timeout,
+# corrupted bytes, pypdf parse error, network drop) falls back to the
+# abstract-only path with a warning. The agent's discovery cascade never
+# breaks because of a flaky open-access mirror.
 
-    Returns up to `max_results` PaperChunks. Returns [] gracefully if every
-    provider fails or returns nothing — caller can route to other fallbacks.
+# Standard browser-ish User-Agent. Many open-access mirrors 403 on `python-httpx`
+# default. We don't lie about being a real browser — just identify ourselves
+# clearly enough to pass the trivial bot filters most journal CDNs apply.
+_HTTP_HEADERS = {
+    "User-Agent": (
+        "ResearGent/0.1 (+https://github.com/SaumyaBish-t/ResearGent) "
+        "httpx/async pypdf"
+    ),
+    "Accept": "application/pdf, */*",
+}
+
+# Per-PDF timeout for the async GET. 15s is the user-spec value; chosen so a
+# slow mirror doesn't gate the agent on one paper while N-1 others succeed.
+_PDF_FETCH_TIMEOUT = 15.0
+
+# Max parallel downloads. Open-access mirrors aren't rate-limit-friendly the
+# way the S2 search API is; 4 is a good "fast but not abusive" default.
+_MAX_PARALLEL_FETCHES = 4
+
+# Max semantic slices kept per paper after chunking. The cascade returns at
+# most ~5 papers; expanding each into 3 chunks puts ~15 evidence units in
+# front of the Critic — enough to grade specifics, not so many that the
+# generator's prompt budget blows.
+_MAX_CHUNKS_PER_PAPER = 3
+
+# Hard cap on raw extracted PDF text. Some open-access PDFs are 80+ page
+# theses; semantically chunking 200K chars per paper is wasted work since
+# we only keep top-N anyway. Truncating to the first ~60K chars covers
+# title + abstract + intro + most of methods, where research-question
+# evidence almost always lives.
+_MAX_FULL_TEXT_CHARS = 60_000
+
+
+async def _fetch_pdf_bytes(client: "httpx.AsyncClient", url: str) -> bytes | None:
+    """
+    Download one PDF asynchronously. Returns the raw bytes on success, None
+    on any failure (logged but non-fatal).
+    """
+    try:
+        # follow_redirects: openAccessPdf URLs commonly chain through DOI
+        # resolvers → publisher landing → CDN before hitting the actual file.
+        r = await client.get(url, follow_redirects=True)
+    except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.RemoteProtocolError) as e:
+        print(f"  [paper-fetch warn] timeout/protocol: {url[:80]}: {type(e).__name__}")
+        return None
+    except Exception as e:
+        print(f"  [paper-fetch warn] transport: {url[:80]}: {type(e).__name__}: {e}")
+        return None
+
+    if r.status_code != 200:
+        # 403 = bot wall, 404 = link rot, 451 = legal gate. All resolve to
+        # "fall back to abstract", same code path.
+        print(f"  [paper-fetch warn] HTTP {r.status_code}: {url[:80]}")
+        return None
+
+    # Content-type sniff — many "open access" pages return an HTML paywall
+    # or captcha shim when the actual PDF is gated. The PDF magic number
+    # check is the ground truth.
+    body = r.content or b""
+    ctype = (r.headers.get("content-type") or "").lower()
+    if "pdf" not in ctype and not body[:5].startswith(b"%PDF-"):
+        print(f"  [paper-fetch warn] non-PDF response ({ctype}): {url[:80]}")
+        return None
+    return body
+
+
+def _parse_pdf_bytes(data: bytes) -> str:
+    """
+    Extract text from PDF bytes using pypdf. Concatenates all pages into one
+    document string for downstream semantic chunking.
+
+    Raises on parse failure — callers should wrap in try/except and fall back
+    to abstract on any error (matches the spec's "fall back to abstract" rule
+    for `pypdf.errors.PdfReadError` and friends).
+    """
+    import io
+    import pypdf  # local import — heavy module, only loaded on the cascade path
+
+    reader = pypdf.PdfReader(io.BytesIO(data))
+    pages: list[str] = []
+    for page in reader.pages:
+        # `extract_text()` itself can raise on pages with weird font tables;
+        # swallowing one bad page is better than discarding the rest of the
+        # document. The OUTER try in `_enrich_one_paper` catches any failure
+        # the per-page swallow couldn't.
+        try:
+            t = page.extract_text() or ""
+        except Exception:
+            t = ""
+        if t.strip():
+            pages.append(t)
+    return "\n\n".join(pages)
+
+
+async def _enrich_one_paper(client: "httpx.AsyncClient", paper: PaperChunk) -> None:
+    """
+    Fetch + parse one paper's open-access PDF, mutate `paper.full_text`
+    in place. Silent no-op when the paper has no `pdf_url` or anything
+    fails — the abstract fallback in `PaperChunk.text` then takes over.
+    """
+    url = (paper.pdf_url or "").strip()
+    if not url:
+        return
+
+    try:
+        data = await _fetch_pdf_bytes(client, url)
+        if not data:
+            return
+        text = _parse_pdf_bytes(data)
+    except Exception as e:
+        # Catches pypdf.errors.PdfReadError, malformed-stream errors,
+        # decryption-required errors, and anything else pypdf surfaces.
+        # We never want one bad paper to break the whole discovery cascade.
+        print(f"  [paper-parse warn] {paper.citation}: {type(e).__name__}: {e}")
+        return
+
+    if not text.strip():
+        # PDF parsed but yielded no text — usually a scanned/image-only PDF
+        # (theses, very old papers). No point setting full_text="".
+        return
+
+    paper.full_text = text[:_MAX_FULL_TEXT_CHARS]
+
+
+async def _enrich_async(papers: list[PaperChunk]) -> None:
+    """
+    Concurrently fetch + parse all papers that have an open-access PDF URL.
+    Mutates each paper's `full_text` in place; no return value.
+
+    Concurrency is bounded by `_MAX_PARALLEL_FETCHES` via a semaphore so
+    we don't open 50 sockets when discovery returns a big list.
+    """
+    pdf_papers = [p for p in papers if p.pdf_url]
+    if not pdf_papers:
+        return
+
+    sem = asyncio.Semaphore(_MAX_PARALLEL_FETCHES)
+
+    async with httpx.AsyncClient(
+        timeout=_PDF_FETCH_TIMEOUT,
+        headers=_HTTP_HEADERS,
+        follow_redirects=True,
+    ) as client:
+        async def _bound(p: PaperChunk) -> None:
+            async with sem:
+                await _enrich_one_paper(client, p)
+
+        await asyncio.gather(*(_bound(p) for p in pdf_papers), return_exceptions=False)
+
+
+def _enrich_with_full_text(papers: list[PaperChunk]) -> None:
+    """
+    Synchronous entry point used by `discover_papers`.
+
+    We `asyncio.run` rather than spinning a long-lived loop because
+    paper-discovery is a one-shot fan-out: open N sockets, gather, close.
+    Inside an existing event loop (the FastAPI streaming path could
+    in principle call this), `asyncio.run` would raise — we catch that
+    and silently fall back, preserving the abstract path.
+    """
+    if not papers:
+        return
+    try:
+        asyncio.run(_enrich_async(papers))
+    except RuntimeError:
+        # Already inside an event loop. Skip enrichment rather than try to
+        # nest; the abstract fallback is correct and bounded.
+        return
+    except Exception as e:
+        # Defensive — _enrich_async swallows its own errors per-paper, but
+        # an asyncio-level surprise shouldn't kill the cascade.
+        print(f"  [paper-enrich warn] async pool failed: {type(e).__name__}: {e}")
+
+
+def _expand_with_semantic_chunks(
+    query: str, papers: list[PaperChunk]
+) -> list[PaperChunk]:
+    """
+    For papers with `full_text` set, run the semantic chunker and replace
+    the single PaperChunk with the top-N slices most relevant to `query`.
+
+    Papers without full_text are passed through unchanged (abstract path).
+    Order is preserved: original rank-by-relevance ordering at the paper
+    level still holds; within an expanded paper, slices come in
+    relevance-descending order.
+
+    Why expand here, not in the node
+    --------------------------------
+    Keeping fetch + parse + chunk all inside `discover_papers` means:
+      * The async event loop is opened and closed exactly once per cascade.
+      * Downstream nodes (paper_discovery.py, the critic, the generator)
+        keep treating every PaperChunk as opaque evidence — no chunking
+        logic leaks into the graph layer.
+    """
+    if not papers:
+        return papers
+
+    # Lazy import — the chunker module pulls torch via sentence-transformers,
+    # which is expensive cold. Only paid when we actually have full-text PDFs.
+    try:
+        from src.ingest.chunker import semantic_chunk_text
+    except Exception:
+        # Chunker unavailable (e.g. sentence-transformers missing). Falls
+        # back to "use the full_text as one big chunk" — the generator will
+        # take the first ~K tokens and the rest will be wasted, but at
+        # least no crash.
+        semantic_chunk_text = None  # type: ignore[assignment]
+
+    out: list[PaperChunk] = []
+    # For ranking slices within one paper, compute the query embedding once
+    # and reuse. Embedding the query per-paper would be wasted work.
+    import numpy as np
+    qvec = None
+    try:
+        from src.config import ModelTier
+        from src.llm import embed as _embed_fn
+        qvec_raw = _embed_fn([query], tier=ModelTier.EMBED)
+        if qvec_raw and qvec_raw[0]:
+            qv = np.asarray(qvec_raw[0], dtype=np.float32)
+            qvec = qv / (np.linalg.norm(qv) + 1e-12)
+    except Exception:
+        qvec = None  # rank-fallback path below uses original chunk order
+
+    for p in papers:
+        if not p.full_text or semantic_chunk_text is None:
+            out.append(p)
+            continue
+
+        # Semantic chunker yields ~500-800 token chunks aligned on topical
+        # boundaries. Same primitive the ingest pipeline uses.
+        try:
+            slices = semantic_chunk_text(p.full_text)
+        except Exception as e:
+            print(f"  [paper-chunk warn] {p.citation}: {type(e).__name__}: {e}")
+            slices = []
+
+        if not slices:
+            out.append(p)
+            continue
+
+        # Rank slices by similarity to the query. When embedder is broken,
+        # fall back to "first N slices" — usually intro + methods, decent
+        # default for research questions.
+        scored: list[tuple[float, str]] = []
+        if qvec is not None:
+            try:
+                from src.config import ModelTier
+                from src.llm import embed as _embed_fn
+                slice_vecs = _embed_fn([s[:2000] for s in slices], tier=ModelTier.EMBED)
+                for s, v in zip(slices, slice_vecs):
+                    sv = np.asarray(v, dtype=np.float32)
+                    sn = sv / (np.linalg.norm(sv) + 1e-12)
+                    scored.append((float(np.dot(qvec, sn)), s))
+                scored.sort(reverse=True)
+            except Exception:
+                scored = [(0.0, s) for s in slices]
+        else:
+            scored = [(0.0, s) for s in slices]
+
+        top_n = scored[:_MAX_CHUNKS_PER_PAPER]
+        # Emit one PaperChunk per kept slice. We shallow-copy the original
+        # paper's metadata so each slice keeps the same citation / year /
+        # url — downstream code dedupes by (source_file, chunk_index) which
+        # we keep distinct via chunk_idx.
+        for i, (score_i, slice_text) in enumerate(top_n):
+            sliced = PaperChunk(
+                title=p.title,
+                abstract=p.abstract,
+                url=p.url,
+                authors=list(p.authors),
+                year=p.year,
+                venue=p.venue,
+                source=p.source,
+                citations=p.citations,
+                arxiv_id=p.arxiv_id,
+                pdf_url=p.pdf_url,
+                score=score_i if score_i > 0 else p.score,
+                full_text="",          # don't carry the 60KB blob on every slice
+                chunk_text=slice_text,
+                chunk_idx=i,
+            )
+            out.append(sliced)
+
+    return out
+
+
+def discover_papers(
+    query: str, *, max_results: int = 5, enrich_full_text: bool = True
+) -> list[PaperChunk]:
+    """
+    Search arXiv + Semantic Scholar, dedupe, rerank by query relevance, then
+    enrich the open-access papers with full-text PDF parsing (Phase 15.1).
+
+    Returns up to ~max_results × _MAX_CHUNKS_PER_PAPER PaperChunks when
+    enrichment is on (each open-access paper expands into multiple slices).
+    Returns up to `max_results` abstract-only chunks when off, or when no
+    papers have OA PDFs.
+
+    Set `enrich_full_text=False` for the CLI `discover` command (display-only)
+    where the fetch+parse latency isn't worth paying for a list view.
     """
     # Each provider gets a generous pool so dedupe + rerank can pick the best.
     per_provider = max(max_results, 5)
@@ -313,5 +653,16 @@ def discover_papers(query: str, *, max_results: int = 5) -> list[PaperChunk]:
         return []
 
     ranked = _rank_by_relevance(query, merged, top_k=max_results)
+
+    if enrich_full_text:
+        # Async fetch + parse mutates each paper's full_text in place. Bounded
+        # at _MAX_PARALLEL_FETCHES concurrent sockets so we don't hammer
+        # journal mirrors. Total wall-time: ~1-3s for 5 papers on a warm
+        # connection, dominated by the slowest single download.
+        _enrich_with_full_text(ranked)
+        # Expand each PDF-enriched paper into top-N semantic slices ranked
+        # by query relevance. Papers without full_text pass through unchanged.
+        ranked = _expand_with_semantic_chunks(query, ranked)
+
     _ = time.perf_counter() - t0  # caller logs timing into the agent trace
     return ranked

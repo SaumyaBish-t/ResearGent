@@ -1195,7 +1195,10 @@ def discover(
     from src.retrieval import discover_papers
 
     console.print(f"[cyan]searching arXiv + Semantic Scholar for:[/cyan] {topic}\n")
-    papers = discover_papers(topic, max_results=max_results)
+    # Phase 15.1: the CLI list view is display-only. Skip the async PDF
+    # fetch+parse pass to keep `researgent discover` snappy (~1s vs ~5-15s).
+    # Agent-driven discovery (paper_discovery node) still enriches.
+    papers = discover_papers(topic, max_results=max_results, enrich_full_text=False)
     if not papers:
         console.print("[yellow]No papers found.[/yellow]")
         return

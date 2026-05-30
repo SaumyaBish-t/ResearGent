@@ -50,6 +50,14 @@ dependencies = [
     # Both models are cached after first download (~80MB MiniLM + ~150MB GLiNER-small).
     "sentence-transformers>=3.0.0",
     "gliner>=0.2.13",
+    # ---- Phase 15.1: full-text enrichment for Stage-2 paper discovery ----
+    # pypdf is pure-Python — no native deps. PyMuPDF is already in the tree
+    # for the ingestion path (and is faster), but the paper-discovery fallback
+    # runs ad-hoc on arbitrary OA URLs where robustness matters more than
+    # throughput. pypdf's exception surface (`PdfReadError` for corrupted
+    # bytes, clear password-prompt detection) maps cleanly to the try/except
+    # fallback flow the spec calls for.
+    "pypdf>=5.0",
 ]
 
 [project.optional-dependencies]
