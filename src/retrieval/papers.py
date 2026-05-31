@@ -60,7 +60,7 @@ _PAPER_LOG_PATH = Path(
 
 
 def _debug(msg: str) -> None:
-    """
+    r"""
     Route discovery/PDF-cascade debug lines to BOTH stderr AND a sidecar
     log file at logs/paper_cascade.log (or $RESEARGENT_PAPER_LOG).
 
@@ -542,10 +542,19 @@ _PDF_FETCH_TIMEOUT = 15.0
 _MAX_PARALLEL_FETCHES = 4
 
 # Max semantic slices kept per paper after chunking. The cascade returns at
-# most ~5 papers; expanding each into 3 chunks puts ~15 evidence units in
-# front of the Critic — enough to grade specifics, not so many that the
-# generator's prompt budget blows.
-_MAX_CHUNKS_PER_PAPER = 3
+# most ~5 papers; expanding each into 5 chunks puts ~25 evidence units in
+# front of the Critic — enough breadth that the intro+methods+results
+# sections all have a shot at surviving the per-chunk relevance grading,
+# without blowing the generator's prompt budget.
+#
+# Why 5 not 3: empirically (AutoGen paper, 157K chars), the section that
+# *defines the class taxonomy* (§2.1 — ConversableAgent / AssistantAgent /
+# UserProxyAgent) didn't rank in the top-3 by cosine to the generic query
+# "AutoGen conversational programming" — deeper methodology sections
+# scored higher and crowded it out, so the Critic graded all surviving
+# slices irrelevant to "what are the two classes of agents". 5 slices
+# gives the intro a reliable seat at the table.
+_MAX_CHUNKS_PER_PAPER = 5
 
 # Hard cap on raw extracted PDF text. Some open-access PDFs are 80+ page
 # theses; semantically chunking 200K chars per paper is wasted work since
@@ -769,7 +778,8 @@ def _expand_with_semantic_chunks(
         try:
             slices = semantic_chunk_text(p.full_text)
         except Exception as e:
-            print(f"  [paper-chunk warn] {p.citation}: {type(e).__name__}: {e}")
+            _debug(f"⚠️ semantic_chunk_text failed for {p.citation}: {type(e).__name__}: {e}")
+            traceback.print_exc(file=sys.stderr)
             slices = []
 
         if not slices:
@@ -796,6 +806,27 @@ def _expand_with_semantic_chunks(
             scored = [(0.0, s) for s in slices]
 
         top_n = scored[:_MAX_CHUNKS_PER_PAPER]
+
+        # Pin the FIRST slice (paper intro / abstract section).
+        #
+        # Research papers almost always state their core taxonomy and
+        # key definitions in the intro — that's exactly the type of
+        # evidence the Critic needs to answer "what are the two classes
+        # of X" style questions. But the intro often ranks LOW on
+        # cosine-to-query because the query has specific tail terms
+        # ("control flow", "execution") that match deeper methodology
+        # sections better.
+        #
+        # If the intro isn't already in top_n, swap it in for the
+        # lowest-scoring kept slice. We never grow the budget — just
+        # rebalance which slices fill it.
+        intro = slices[0]
+        if not any(s == intro for _, s in top_n):
+            if len(top_n) >= _MAX_CHUNKS_PER_PAPER:
+                top_n[-1] = (top_n[-1][0], intro)  # replace lowest-scored
+            else:
+                top_n.append((0.0, intro))
+
         # Emit one PaperChunk per kept slice. We shallow-copy the original
         # paper's metadata so each slice keeps the same citation / year /
         # url — downstream code dedupes by (source_file, chunk_index) which
