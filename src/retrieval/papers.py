@@ -37,12 +37,26 @@ from __future__ import annotations
 
 import asyncio
 import re
+import sys
 import time
 import traceback
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
+
+
+def _debug(msg: str) -> None:
+    """
+    Route discovery/PDF-cascade debug lines to stderr with an explicit flush.
+
+    Why: on Windows under `uv run`, stdout from inside the LangGraph async
+    cascade is line-buffered and frequently never reaches the terminal
+    before the Rich `Panel` renders the final result — so plain `print()`
+    calls in this module appear to be silently swallowed. stderr is
+    unbuffered for TTYs and is NOT captured by the agent's Panel.
+    """
+    print(msg, file=sys.stderr, flush=True)
 
 
 @dataclass
@@ -239,8 +253,8 @@ def _semantic_scholar_search(query: str, max_results: int = 5) -> list[PaperChun
         pdf_url = (oa.get("url") if isinstance(oa, dict) else "") or ""
         # Explicit per-paper trace so we can SEE whether S2 returned an
         # openAccessPdf URL for each candidate, vs. silently no-OA.
-        print(
-            f"Checking for OA PDF: {item.get('title')!r} "
+        _debug(
+            f"[S2] Checking for OA PDF: {item.get('title')!r} "
             f"→ {pdf_url if pdf_url else '(none returned by S2)'}"
         )
 
@@ -390,18 +404,18 @@ async def _fetch_pdf_bytes(client: "httpx.AsyncClient", url: str) -> bytes | Non
         # resolvers → publisher landing → CDN before hitting the actual file.
         r = await client.get(url, follow_redirects=True)
     except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.RemoteProtocolError) as e:
-        print(f"⚠️ PDF Fetch Failed (timeout/protocol) for {url}: {type(e).__name__}: {e}")
-        traceback.print_exc()
+        _debug(f"⚠️ PDF Fetch Failed (timeout/protocol) for {url}: {type(e).__name__}: {e}")
+        traceback.print_exc(file=sys.stderr)
         return None
     except Exception as e:
-        print(f"⚠️ PDF Fetch Failed (transport) for {url}: {type(e).__name__}: {e}")
-        traceback.print_exc()
+        _debug(f"⚠️ PDF Fetch Failed (transport) for {url}: {type(e).__name__}: {e}")
+        traceback.print_exc(file=sys.stderr)
         return None
 
     if r.status_code != 200:
         # 403 = bot wall, 404 = link rot, 451 = legal gate. All resolve to
         # "fall back to abstract", same code path.
-        print(f"⚠️ PDF Fetch Failed (HTTP {r.status_code}) for {url}")
+        _debug(f"⚠️ PDF Fetch Failed (HTTP {r.status_code}) for {url}")
         return None
 
     # Content-type sniff — many "open access" pages return an HTML paywall
@@ -410,7 +424,7 @@ async def _fetch_pdf_bytes(client: "httpx.AsyncClient", url: str) -> bytes | Non
     body = r.content or b""
     ctype = (r.headers.get("content-type") or "").lower()
     if "pdf" not in ctype and not body[:5].startswith(b"%PDF-"):
-        print(f"⚠️ PDF Fetch Failed (non-PDF response, content-type={ctype!r}) for {url}")
+        _debug(f"⚠️ PDF Fetch Failed (non-PDF response, content-type={ctype!r}) for {url}")
         return None
     return body
 
@@ -451,7 +465,10 @@ async def _enrich_one_paper(client: "httpx.AsyncClient", paper: PaperChunk) -> N
     """
     url = (paper.pdf_url or "").strip()
     if not url:
+        _debug(f"[enrich] SKIP (no pdf_url) source={paper.source} title={paper.title!r}")
         return
+
+    _debug(f"[enrich] FETCH source={paper.source} url={url}")
 
     try:
         data = await _fetch_pdf_bytes(client, url)
@@ -462,12 +479,17 @@ async def _enrich_one_paper(client: "httpx.AsyncClient", paper: PaperChunk) -> N
         # Catches pypdf.errors.PdfReadError, malformed-stream errors,
         # decryption-required errors, and anything else pypdf surfaces.
         # We never want one bad paper to break the whole discovery cascade.
-        print(
+        _debug(
             f"⚠️ PDF Parse Failed for {url} "
             f"(paper: {paper.citation}): {type(e).__name__}: {e}"
         )
-        traceback.print_exc()
+        traceback.print_exc(file=sys.stderr)
         return
+
+    _debug(
+        f"[enrich] OK url={url} parsed_chars={len(text)} "
+        f"(truncated to {_MAX_FULL_TEXT_CHARS})"
+    )
 
     if not text.strip():
         # PDF parsed but yielded no text — usually a scanned/image-only PDF
