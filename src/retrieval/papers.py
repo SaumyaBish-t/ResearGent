@@ -46,17 +46,46 @@ from typing import Any
 import httpx
 
 
+import os
+from datetime import datetime
+from pathlib import Path
+
+# Sidecar log file — written in addition to stderr so we have ground truth
+# even when terminal capture, Rich panels, or Windows stdout buffering hide
+# the live output. Path is overridable via `RESEARGENT_PAPER_LOG`.
+_PAPER_LOG_PATH = Path(
+    os.environ.get("RESEARGENT_PAPER_LOG")
+    or (Path.cwd() / "logs" / "paper_cascade.log")
+)
+
+
 def _debug(msg: str) -> None:
     """
-    Route discovery/PDF-cascade debug lines to stderr with an explicit flush.
+    Route discovery/PDF-cascade debug lines to BOTH stderr AND a sidecar
+    log file at logs/paper_cascade.log (or $RESEARGENT_PAPER_LOG).
 
-    Why: on Windows under `uv run`, stdout from inside the LangGraph async
-    cascade is line-buffered and frequently never reaches the terminal
-    before the Rich `Panel` renders the final result — so plain `print()`
-    calls in this module appear to be silently swallowed. stderr is
-    unbuffered for TTYs and is NOT captured by the agent's Panel.
+    Why both: on Windows under `uv run`, stdout from inside the LangGraph
+    async cascade is line-buffered and frequently never reaches the
+    terminal before the Rich `Panel` renders the final result. stderr is
+    *usually* unbuffered, but Rich and some agent runtimes still capture
+    it. The sidecar log is the ground-truth source — if the cascade ran,
+    these lines exist there regardless of what the terminal shows.
+
+    Inspect after a run with (PowerShell):
+        Get-Content .\logs\paper_cascade.log -Wait
     """
-    print(msg, file=sys.stderr, flush=True)
+    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    line = f"[{ts}] {msg}"
+    # 1) stderr — visible in the terminal when not captured
+    print(line, file=sys.stderr, flush=True)
+    # 2) sidecar log — always works, regardless of terminal capture
+    try:
+        _PAPER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _PAPER_LOG_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except Exception:
+        # Logging must NEVER break the cascade. Silently swallow disk errors.
+        pass
 
 
 @dataclass
@@ -679,9 +708,16 @@ def discover_papers(
     # Each provider gets a generous pool so dedupe + rerank can pick the best.
     per_provider = max(max_results, 5)
 
+    _debug(
+        f"=== discover_papers START query={query!r} "
+        f"max_results={max_results} enrich={enrich_full_text} ==="
+    )
+
     t0 = time.perf_counter()
     arxiv_hits = _arxiv_search(query, max_results=per_provider)
+    _debug(f"[arxiv] returned {len(arxiv_hits)} hits")
     ss_hits = _semantic_scholar_search(query, max_results=per_provider)
+    _debug(f"[S2] returned {len(ss_hits)} hits")
 
     merged = _dedupe(arxiv_hits + ss_hits)
     if not merged:
@@ -690,6 +726,10 @@ def discover_papers(
     ranked = _rank_by_relevance(query, merged, top_k=max_results)
 
     if enrich_full_text:
+        _debug(
+            f"[enrich] ranked={len(ranked)} papers, "
+            f"with_pdf_url={sum(1 for p in ranked if p.pdf_url)}"
+        )
         # Async fetch + parse mutates each paper's full_text in place. Bounded
         # at _MAX_PARALLEL_FETCHES concurrent sockets so we don't hammer
         # journal mirrors. Total wall-time: ~1-3s for 5 papers on a warm
@@ -698,6 +738,8 @@ def discover_papers(
         # Expand each PDF-enriched paper into top-N semantic slices ranked
         # by query relevance. Papers without full_text pass through unchanged.
         ranked = _expand_with_semantic_chunks(query, ranked)
+        _debug(f"[enrich] DONE after_expand={len(ranked)} chunks")
 
-    _ = time.perf_counter() - t0  # caller logs timing into the agent trace
+    dur = time.perf_counter() - t0
+    _debug(f"=== discover_papers END total={len(ranked)} chunks in {dur:.1f}s ===")
     return ranked
