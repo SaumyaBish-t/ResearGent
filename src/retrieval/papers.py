@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+import traceback
 from dataclasses import dataclass
 from typing import Any
 
@@ -236,6 +237,12 @@ def _semantic_scholar_search(query: str, max_results: int = 5) -> list[PaperChun
         arxiv_id = (ext.get("ArXiv") or "").strip()
         oa = item.get("openAccessPdf") or {}
         pdf_url = (oa.get("url") if isinstance(oa, dict) else "") or ""
+        # Explicit per-paper trace so we can SEE whether S2 returned an
+        # openAccessPdf URL for each candidate, vs. silently no-OA.
+        print(
+            f"Checking for OA PDF: {item.get('title')!r} "
+            f"→ {pdf_url if pdf_url else '(none returned by S2)'}"
+        )
 
         out.append(
             PaperChunk(
@@ -384,9 +391,11 @@ async def _fetch_pdf_bytes(client: "httpx.AsyncClient", url: str) -> bytes | Non
         r = await client.get(url, follow_redirects=True)
     except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.RemoteProtocolError) as e:
         print(f"⚠️ PDF Fetch Failed (timeout/protocol) for {url}: {type(e).__name__}: {e}")
+        traceback.print_exc()
         return None
     except Exception as e:
         print(f"⚠️ PDF Fetch Failed (transport) for {url}: {type(e).__name__}: {e}")
+        traceback.print_exc()
         return None
 
     if r.status_code != 200:
@@ -457,6 +466,7 @@ async def _enrich_one_paper(client: "httpx.AsyncClient", paper: PaperChunk) -> N
             f"⚠️ PDF Parse Failed for {url} "
             f"(paper: {paper.citation}): {type(e).__name__}: {e}"
         )
+        traceback.print_exc()
         return
 
     if not text.strip():
