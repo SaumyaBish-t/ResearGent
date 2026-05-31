@@ -233,38 +233,69 @@ def _arxiv_search(query: str, max_results: int = 5) -> list[PaperChunk]:
 # Connectives / interrogatives / generic CS-lingo that hurt S2 ranking when
 # mixed in with named entities. Kept lowercase, compared case-insensitively.
 _S2_STOPWORDS: frozenset[str] = frozenset({
-    "a", "an", "and", "are", "as", "at", "based", "be", "by", "complex",
-    "control", "do", "does", "during", "each", "et", "execution", "exactly",
-    "explain", "explained", "for", "from", "handle", "handles", "have", "her",
-    "here", "his", "how", "i", "in", "into", "introduce", "introduced", "introduces",
-    "is", "it", "its", "latest", "method", "methods", "model", "models", "new",
-    "novel", "now", "of", "on", "or", "paper", "paradigm", "recent", "study",
-    "studies", "system", "systems", "technique", "techniques", "than", "that",
-    "the", "their", "them", "then", "this", "those", "through", "to", "two",
-    "use", "uses", "using", "via", "way", "what", "when", "where", "which",
-    "while", "who", "whom", "why", "with", "work", "works", "would",
+    "a", "an", "and", "are", "as", "at", "based", "be", "broad", "by", "class",
+    "classes", "complex", "control", "deep", "design", "designed", "do", "does",
+    "during", "each", "et", "execution", "exactly", "explain", "explained",
+    # "flow" is overloaded — "control flow" intent gets dragged to "flow-shop
+    # scheduling" on S2 unless removed
+    "flow",
+    "for", "from", "general", "handle", "handles", "have", "her", "here",
+    "his", "how", "i", "in", "into", "introduce", "introduced", "introduces",
+    "is", "it", "its", "large", "latest", "learning", "method", "methods",
+    "model", "models", "multi", "network", "new", "novel", "now", "of", "on",
+    "or", "paper", "paradigm", "process", "real", "recent", "review", "study",
+    "studies", "survey", "system", "systems", "technique", "techniques", "than",
+    "that", "the", "their", "them", "then", "this", "those", "through", "to",
+    "two", "use", "uses", "using", "via", "way", "what", "when", "where",
+    "which", "while", "who", "whom", "why", "with", "work", "works", "would",
     # "et al." artifacts after punctuation strip
     "al",
 })
 
 
-def _shorten_for_s2(query: str, *, max_terms: int = 5) -> str:
+def _is_anchor_token(tok: str) -> bool:
+    """
+    True for entity-anchor tokens — PascalCase / CamelCase compounds
+    (AutoGen, ChatGPT, LangChain), or ALLCAPS acronyms ≥3 chars (BERT,
+    GLiNER, GPT). These are the strongest signal for S2 keyword search
+    because they almost certainly name THE thing the user wants.
+
+    Single-char or 2-char capitalized tokens ("Wu", "Li") are NOT anchors
+    even if technically capitalized — they're surname noise.
+    """
+    if len(tok) < 3:
+        return False
+    if tok.isupper():
+        return True  # ALLCAPS acronym (BERT, GPT, GLiNER-ish written as such)
+    # PascalCase / CamelCase: starts upper AND has another upper later
+    # (AutoGen, LangChain, ChatGPT). Plain "Conversational" doesn't qualify.
+    return tok[0].isupper() and any(c.isupper() for c in tok[1:])
+
+
+def _shorten_for_s2(query: str, *, max_terms: int = 4) -> str:
     """
     Distill a verbose research query into a short, S2-friendly keyword string.
 
     S2's /paper/search ranks by token-overlap and severely penalizes long
     keyword piles: a 12-word query like "Wu et al. AutoGen multi-agent
     complex control flow conversational programming paradigm" returns
-    near-random results (colitis studies, manufacturing libraries) because
+    near-random results (manufacturing flow-shop, colitis studies) because
     every extra generic term ("complex", "control", "system", "paradigm")
-    dilutes the signal from the actual named entity ("AutoGen").
+    dilutes the signal from the actual named entity ("AutoGen") and broad
+    terms like "flow" actively mis-rank toward the wrong sub-literature.
 
     Heuristic, in priority order:
-      1. Prefer CapitalCase / ALLCAPS / mixed-case tokens (proper nouns,
-         acronyms, framework names — these are the real semantic anchors)
-      2. Then content words ≥4 chars that survive the stoplist
-      3. Cap at `max_terms` tokens, preserving original order so phrase-y
-         queries ("conversational programming") stay together
+      1. ENTITY ANCHORS — PascalCase / CamelCase / ALLCAPS-≥3 tokens
+         (AutoGen, ChatGPT, BERT). When at least one anchor is present
+         the budget tightens to ≤3 tokens (1-2 anchors + ≤1 supporting
+         content word) because S2 ranks much better with a tight query
+         centered on the entity.
+      2. TitleCase common-words (Conversational, Programming) — kept as
+         secondary signal when no PascalCase anchor exists.
+      3. Content words ≥4 chars that survive the stoplist — only used
+         to round out the query when entity signal is weak.
+      4. Single/two-char tokens ("Wu", "Li", "et al." remnants) DROPPED —
+         too generic, drag in unrelated papers by other authors.
 
     arXiv handles the verbose query fine, so this is S2-only.
     """
@@ -272,11 +303,12 @@ def _shorten_for_s2(query: str, *, max_terms: int = 5) -> str:
     cleaned = re.sub(r"\bet\s+al\.?", "", query, flags=re.IGNORECASE)
     cleaned = cleaned.replace("'", "").replace('"', "")
 
-    # Token boundaries on whitespace; keep internal hyphens/dots (e.g. "Wu",
+    # Token boundaries on whitespace; keep internal hyphens/dots (e.g.
     # "AutoGen", "GPT-4", "v2.0")
     raw_tokens = re.findall(r"[A-Za-z][A-Za-z0-9.\-]*", cleaned)
 
-    capitalized: list[str] = []
+    anchors: list[str] = []
+    titlecase: list[str] = []
     content: list[str] = []
     seen: set[str] = set()
 
@@ -284,19 +316,32 @@ def _shorten_for_s2(query: str, *, max_terms: int = 5) -> str:
         key = tok.lower()
         if key in seen or key in _S2_STOPWORDS:
             continue
-        # ALLCAPS acronyms (LLM, RAG, AutoGen-ish) and TitleCase entities are
-        # the highest-signal tokens for S2 keyword matching.
-        if tok[0].isupper() and tok.lower() != tok:
-            capitalized.append(tok)
-            seen.add(key)
+        # Drop short surname-like tokens — even capitalized "Wu" / "Li"
+        # are net negative for S2 ranking on framework questions.
+        if len(tok) <= 2:
+            continue
+        if _is_anchor_token(tok):
+            anchors.append(tok)
+        elif tok[0].isupper() and len(tok) >= 4:
+            titlecase.append(tok)
         elif len(tok) >= 4:
             content.append(tok)
-            seen.add(key)
+        else:
+            continue
+        seen.add(key)
 
-    # Capitalized tokens first (entities anchor the query), then content
-    # tokens to fill the budget. Preserve insertion order within each bucket
-    # so multi-word entity phrases stay co-occurring.
-    picked = (capitalized + content)[:max_terms]
+    # Budget allocation:
+    #   anchors present  → ≤2 anchors, then fill to 3 total from titlecase → content
+    #   no anchors       → ≤2 titlecase + ≤2 content (4 total)
+    if anchors:
+        picked: list[str] = list(anchors[:2])
+        for tok in titlecase + content:
+            if len(picked) >= 3:
+                break
+            picked.append(tok)
+    else:
+        picked = (titlecase[:2] + content[:2])[:max_terms]
+
     if not picked:
         # No usable tokens (degenerate query) — fall back to original so we
         # don't send an empty string to S2.
