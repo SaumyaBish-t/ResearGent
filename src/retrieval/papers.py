@@ -230,6 +230,82 @@ def _arxiv_search(query: str, max_results: int = 5) -> list[PaperChunk]:
 # ---------------------------------------------------------------------------
 
 
+# Connectives / interrogatives / generic CS-lingo that hurt S2 ranking when
+# mixed in with named entities. Kept lowercase, compared case-insensitively.
+_S2_STOPWORDS: frozenset[str] = frozenset({
+    "a", "an", "and", "are", "as", "at", "based", "be", "by", "complex",
+    "control", "do", "does", "during", "each", "et", "execution", "exactly",
+    "explain", "explained", "for", "from", "handle", "handles", "have", "her",
+    "here", "his", "how", "i", "in", "into", "introduce", "introduced", "introduces",
+    "is", "it", "its", "latest", "method", "methods", "model", "models", "new",
+    "novel", "now", "of", "on", "or", "paper", "paradigm", "recent", "study",
+    "studies", "system", "systems", "technique", "techniques", "than", "that",
+    "the", "their", "them", "then", "this", "those", "through", "to", "two",
+    "use", "uses", "using", "via", "way", "what", "when", "where", "which",
+    "while", "who", "whom", "why", "with", "work", "works", "would",
+    # "et al." artifacts after punctuation strip
+    "al",
+})
+
+
+def _shorten_for_s2(query: str, *, max_terms: int = 5) -> str:
+    """
+    Distill a verbose research query into a short, S2-friendly keyword string.
+
+    S2's /paper/search ranks by token-overlap and severely penalizes long
+    keyword piles: a 12-word query like "Wu et al. AutoGen multi-agent
+    complex control flow conversational programming paradigm" returns
+    near-random results (colitis studies, manufacturing libraries) because
+    every extra generic term ("complex", "control", "system", "paradigm")
+    dilutes the signal from the actual named entity ("AutoGen").
+
+    Heuristic, in priority order:
+      1. Prefer CapitalCase / ALLCAPS / mixed-case tokens (proper nouns,
+         acronyms, framework names — these are the real semantic anchors)
+      2. Then content words ≥4 chars that survive the stoplist
+      3. Cap at `max_terms` tokens, preserving original order so phrase-y
+         queries ("conversational programming") stay together
+
+    arXiv handles the verbose query fine, so this is S2-only.
+    """
+    # Strip common author-citation noise that fragments tokenization
+    cleaned = re.sub(r"\bet\s+al\.?", "", query, flags=re.IGNORECASE)
+    cleaned = cleaned.replace("'", "").replace('"', "")
+
+    # Token boundaries on whitespace; keep internal hyphens/dots (e.g. "Wu",
+    # "AutoGen", "GPT-4", "v2.0")
+    raw_tokens = re.findall(r"[A-Za-z][A-Za-z0-9.\-]*", cleaned)
+
+    capitalized: list[str] = []
+    content: list[str] = []
+    seen: set[str] = set()
+
+    for tok in raw_tokens:
+        key = tok.lower()
+        if key in seen or key in _S2_STOPWORDS:
+            continue
+        # ALLCAPS acronyms (LLM, RAG, AutoGen-ish) and TitleCase entities are
+        # the highest-signal tokens for S2 keyword matching.
+        if tok[0].isupper() and tok.lower() != tok:
+            capitalized.append(tok)
+            seen.add(key)
+        elif len(tok) >= 4:
+            content.append(tok)
+            seen.add(key)
+
+    # Capitalized tokens first (entities anchor the query), then content
+    # tokens to fill the budget. Preserve insertion order within each bucket
+    # so multi-word entity phrases stay co-occurring.
+    picked = (capitalized + content)[:max_terms]
+    if not picked:
+        # No usable tokens (degenerate query) — fall back to original so we
+        # don't send an empty string to S2.
+        return query.strip()
+    short = " ".join(picked)
+    _debug(f"[S2] query shortened: {query!r} → {short!r}")
+    return short
+
+
 def _semantic_scholar_search(query: str, max_results: int = 5) -> list[PaperChunk]:
     """
     Semantic Scholar paper search.
@@ -246,9 +322,14 @@ def _semantic_scholar_search(query: str, max_results: int = 5) -> list[PaperChun
     """
     from src.config import settings
 
+    # S2 ranking collapses on long keyword piles — distill to ≤5 high-signal
+    # tokens (entities + acronyms first) before hitting the endpoint. Logged
+    # via _debug so we can audit the rewrite in paper_cascade.log.
+    s2_query = _shorten_for_s2(query)
+
     url = "https://api.semanticscholar.org/graph/v1/paper/search"
     params = {
-        "query": query,
+        "query": s2_query,
         "limit": str(max_results),
         "fields": "title,abstract,year,venue,authors,citationCount,openAccessPdf,externalIds,url",
     }
@@ -264,11 +345,17 @@ def _semantic_scholar_search(query: str, max_results: int = 5) -> list[PaperChun
         # the throttle for free.
         time.sleep(gap)
         if r.status_code != 200:
+            _debug(
+                f"[S2] HTTP {r.status_code} on /paper/search "
+                f"q={s2_query!r} body={r.text[:200]!r}"
+            )
             return []
         data = r.json()
-    except Exception:
+    except Exception as e:
         # Sleep even on transport failure — a flapping endpoint shouldn't
         # be hammered by the next query in the same agent run.
+        _debug(f"[S2] transport error on /paper/search q={s2_query!r}: {type(e).__name__}: {e}")
+        traceback.print_exc(file=sys.stderr)
         time.sleep(gap)
         return []
 
