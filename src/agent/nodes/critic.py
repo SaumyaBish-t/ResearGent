@@ -109,6 +109,17 @@ Examples of correct grading:
     chunk about 2025 Nobel Chemistry               -> irrelevant (different prize / year)
     chunk that names the 2026 Physics laureates   -> relevant
 
+CRITERIA AMENDMENT: Be constructive and lenient when grading newly discovered \
+papers or live web fallbacks from recent dates (e.g., 2026). If a chunk contains \
+the explicit core entities, numbers, or agent names requested by the user — even \
+if the surrounding text or snippet formatting is partial or noisy — grade it as \
+"relevant" or a high-value "partial". Do not penalise fresh, correct information \
+for layout or formatting fragments. The chunk header tells you the source: lines \
+beginning with `arxiv:`, `https://www.semanticscholar.org/`, or `web:` are fresh \
+external discoveries from the Stage-2 cascade — they have already paid the cost \
+of being fetched live, so reward content that hits the user's named specifics \
+even when sentence structure is broken.
+
 Output ONLY a JSON object, no preamble, no markdown fence:
 {
   "grades": ["relevant" | "partial" | "irrelevant", ...],
@@ -220,49 +231,81 @@ def _grade_one_subq(
     return grades, reasoning, dur_ms, prompt_chars
 
 
-def _derive_verdict(all_grades: list[str]) -> str:
+def _has_external_fresh_source(chunks: list[HydratedChunk]) -> bool:
+    """
+    True iff the pool contains any chunk freshly discovered by the Stage-2
+    cascade — `paper_discovery` (arxiv / semantic_scholar) or `web_fallback`
+    (tavily / serper / duckduckgo).
+
+    HydratedChunk.signal carries the provenance verbatim:
+      - "local"                — Chroma / BM25 hit
+      - "paper:arxiv"          — arXiv discovery
+      - "paper:semantic_scholar" — S2 discovery
+      - "web:tavily" / "web:serper" / "web:duckduckgo"
+      - "graph"                — knowledge-graph expansion
+
+    Used by `_derive_verdict` to relax the HIGH threshold (0.85 -> 0.70)
+    when fresh external evidence is in play. The cascade paid for these
+    chunks (S2 round-trip, PDF fetch+parse, web search) so when they
+    contain the user's named specifics they should be allowed to settle
+    the verdict at HIGH without needing local-corpus levels of redundancy.
+    """
+    for c in chunks:
+        sig = (getattr(c, "signal", "") or "").lower()
+        if sig.startswith("paper:") or sig.startswith("web:"):
+            return True
+    return False
+
+
+def _derive_verdict(
+    all_grades: list[str], all_chunks: list[HydratedChunk] | None = None
+) -> str:
     """
     Deterministic confidence verdict from grades.
 
-    Tightened policy (Phase 15 v2 — "do NOT be generous"). The user
-    rationale: anything below HIGH triggers paper_discovery + web_fallback
-    automatically, so we want HIGH reserved for cases where the local corpus
-    genuinely answers the question. False positives (HIGH on thin evidence)
-    silently degrade the final answer because the cascade never fires;
-    false negatives (MEDIUM on slightly-thin evidence) cost a few seconds of
-    live S2 latency and produce a strictly better answer.
+    Phase 15.2 weighted-score policy. Per the spec:
+      - "partial" is now worth 0.75 (was the implicit 0.5 baked into the
+        absolute-count bands). The rationale: a partial grade means "right
+        topic, missing some details" — that's most of the way to a
+        usable answer, especially when paired with the cascade-generated
+        evidence that surrounds it.
+      - HIGH threshold relaxes from 0.85 -> 0.70 when the chunk pool
+        includes a fresh external discovery (paper_discovery or
+        web_fallback). These chunks cost a live API call to surface; we
+        should not require them to also clear the strictest local-corpus
+        bar before auto-saving the answer.
 
-    New bands:
-      high    = strong evidence:
-                  relevant_n >= 4 AND fraction_relevant >= 0.6 AND
-                  irrelevant_n / total <= 0.25
-                ("at least 4 directly-relevant chunks, majority of the pool
-                 is relevant, and the pool isn't half-irrelevant noise")
-      medium  = any signal worth synthesising:
-                  relevant_n >= 1 OR partial_n >= 2
-                (one direct hit OR enough on-topic background to draft an
-                 answer the cascade can then strengthen)
-      low     = nothing meaningful: zero relevant, <2 partial
-                (forces escalation through paper_discovery / web_fallback)
+    Final formula:
+        score        = (1.00 * relevant_n + 0.75 * partial_n) / total
+        threshold_hi = 0.70 if pool has external-fresh chunks else 0.85
 
-    Why no "frac_relevant>=X without absolute floor": small-batch retrieval
-    (k=3) used to award HIGH at 2/3 relevant; the cascade never fired and
-    thin evidence shipped. The absolute floor of 4 closes that path.
+        score >= threshold_hi                  -> high
+        relevant_n >= 1 OR partial_n >= 2       -> medium
+        otherwise                               -> low
+
+    The MEDIUM and LOW bands are deliberately unchanged: any real signal
+    (one relevant hit OR two partials) is worth synthesising into a draft
+    the cascade can then strengthen. Empty / all-irrelevant pools still
+    force escalation.
     """
     if not all_grades:
         return "low"
+
     n = len(all_grades)
     relevant_n = sum(1 for g in all_grades if g == "relevant")
     partial_n = sum(1 for g in all_grades if g == "partial")
-    irrelevant_n = n - relevant_n - partial_n
-    frac_rel = relevant_n / n
-    frac_irrel = irrelevant_n / n
 
-    # HIGH — earned only by a strong, predominantly-relevant pool.
-    if relevant_n >= 4 and frac_rel >= 0.6 and frac_irrel <= 0.25:
+    # Phase 15.2: partial weight bumped 0.5 -> 0.75 per the leniency spec.
+    _W_RELEVANT = 1.00
+    _W_PARTIAL = 0.75
+    score = (relevant_n * _W_RELEVANT + partial_n * _W_PARTIAL) / n
+
+    # Source-aware HIGH threshold. Empty pool defaults to the strict bar.
+    has_external = bool(all_chunks) and _has_external_fresh_source(all_chunks)
+    threshold_hi = 0.70 if has_external else 0.85
+
+    if score >= threshold_hi:
         return "high"
-    # MEDIUM — some real signal. One genuine hit OR two on-topic chunks
-    # to anchor the draft; the cascade will fill the rest.
     if relevant_n >= 1 or partial_n >= 2:
         return "medium"
     return "low"
@@ -299,6 +342,10 @@ def critique(state: AgentState) -> dict[str, Any]:
     total_chunks_in = 0
     total_chunks_kept = 0
     total_prompt_chars = 0
+    # Phase 15.2: collect every chunk we grade so `_derive_verdict` can
+    # inspect provenance signals (paper:* / web:*) and pick the right
+    # HIGH threshold. We only need the chunk objects, not the refs.
+    all_graded_chunks: list[HydratedChunk] = []
 
     for sq, chunks in chunks_by_subq.items():
         total_chunks_in += len(chunks)
@@ -306,6 +353,7 @@ def critique(state: AgentState) -> dict[str, Any]:
         total_ms += ms
         total_prompt_chars += prompt_chars
         all_grades.extend(grades)
+        all_graded_chunks.extend(chunks)
         if reasoning:
             reasonings.append(reasoning)
         # Keep relevant + partial. Drop irrelevant. Refs sliced from the
@@ -319,7 +367,15 @@ def critique(state: AgentState) -> dict[str, Any]:
         new_refs_by_subq[sq] = kept_refs
         total_chunks_kept += len(kept_refs)
 
-    verdict = _derive_verdict(all_grades)
+    verdict = _derive_verdict(all_grades, all_graded_chunks)
+    has_external = _has_external_fresh_source(all_graded_chunks)
+    threshold_hi = 0.70 if has_external else 0.85
+    # Weighted-score snapshot so the trace shows WHY a given verdict landed.
+    rel_n = all_grades.count("relevant")
+    par_n = all_grades.count("partial")
+    weighted_score = (
+        (rel_n * 1.00 + par_n * 0.75) / max(len(all_grades), 1)
+    )
     summary = "; ".join(reasonings)[:300] if reasonings else ""
 
     return {
@@ -333,6 +389,12 @@ def critique(state: AgentState) -> dict[str, Any]:
                 "chunks_in": total_chunks_in,
                 "chunks_kept": total_chunks_kept,
                 "verdict": verdict,
+                # Phase 15.2: surface the new weighted-score math + which
+                # threshold applied so a low/medium verdict is explainable
+                # without having to reproduce the formula by hand.
+                "score": round(weighted_score, 3),
+                "threshold_hi": threshold_hi,
+                "external_fresh_pool": has_external,
                 # Phase 15.1 telemetry: rough payload size across all sub-Q
                 # grading calls combined. Divide by ~4 for a ballpark token
                 # count. Bubbles into the CLI trace so day-budget pressure
