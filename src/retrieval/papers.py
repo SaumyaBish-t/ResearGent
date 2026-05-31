@@ -383,16 +383,16 @@ async def _fetch_pdf_bytes(client: "httpx.AsyncClient", url: str) -> bytes | Non
         # resolvers → publisher landing → CDN before hitting the actual file.
         r = await client.get(url, follow_redirects=True)
     except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.RemoteProtocolError) as e:
-        print(f"  [paper-fetch warn] timeout/protocol: {url[:80]}: {type(e).__name__}")
+        print(f"⚠️ PDF Fetch Failed (timeout/protocol) for {url}: {type(e).__name__}: {e}")
         return None
     except Exception as e:
-        print(f"  [paper-fetch warn] transport: {url[:80]}: {type(e).__name__}: {e}")
+        print(f"⚠️ PDF Fetch Failed (transport) for {url}: {type(e).__name__}: {e}")
         return None
 
     if r.status_code != 200:
         # 403 = bot wall, 404 = link rot, 451 = legal gate. All resolve to
         # "fall back to abstract", same code path.
-        print(f"  [paper-fetch warn] HTTP {r.status_code}: {url[:80]}")
+        print(f"⚠️ PDF Fetch Failed (HTTP {r.status_code}) for {url}")
         return None
 
     # Content-type sniff — many "open access" pages return an HTML paywall
@@ -401,7 +401,7 @@ async def _fetch_pdf_bytes(client: "httpx.AsyncClient", url: str) -> bytes | Non
     body = r.content or b""
     ctype = (r.headers.get("content-type") or "").lower()
     if "pdf" not in ctype and not body[:5].startswith(b"%PDF-"):
-        print(f"  [paper-fetch warn] non-PDF response ({ctype}): {url[:80]}")
+        print(f"⚠️ PDF Fetch Failed (non-PDF response, content-type={ctype!r}) for {url}")
         return None
     return body
 
@@ -453,7 +453,10 @@ async def _enrich_one_paper(client: "httpx.AsyncClient", paper: PaperChunk) -> N
         # Catches pypdf.errors.PdfReadError, malformed-stream errors,
         # decryption-required errors, and anything else pypdf surfaces.
         # We never want one bad paper to break the whole discovery cascade.
-        print(f"  [paper-parse warn] {paper.citation}: {type(e).__name__}: {e}")
+        print(
+            f"⚠️ PDF Parse Failed for {url} "
+            f"(paper: {paper.citation}): {type(e).__name__}: {e}"
+        )
         return
 
     if not text.strip():
