@@ -140,16 +140,18 @@ def _extract_json(text: str) -> dict[str, Any] | None:
         return None
 
 
-def _grade_one_subq(sub_q: str, chunks: list[HydratedChunk]) -> tuple[list[str], str, int]:
+def _grade_one_subq(
+    sub_q: str, chunks: list[HydratedChunk]
+) -> tuple[list[str], str, int, int]:
     """
-    Grade chunks for a single sub-question. Returns (grades, reasoning, ms).
+    Grade chunks for a single sub-question.
 
-    Falls back to all-"partial" on parse failure — safer default than
-    all-"relevant" (would skip CRAG corrections) or all-"irrelevant"
-    (would trigger unnecessary rewrites).
+    Returns (grades, reasoning, ms, prompt_chars). prompt_chars surfaces the
+    rough payload size in the trace so daily-token-budget pressure is
+    visible (Groq free tier: 100K TPD on llama-3.3-70b-versatile).
     """
     if not chunks:
-        return [], "no chunks retrieved", 0
+        return [], "no chunks retrieved", 0, 0
 
     # Surface `doc_title` in the per-chunk header — for PaperChunks it
     # carries the form "Title (YEAR) — Venue", which the year-discipline
@@ -163,11 +165,27 @@ def _grade_one_subq(sub_q: str, chunks: list[HydratedChunk]) -> tuple[list[str],
             bits.append(title)
         return "  ".join(bits)
 
+    # Phase 15.1 fix: bound the per-call payload.
+    #
+    # Per-chunk char cap dropped from 1500 -> 800. Year, named entities,
+    # and "is-this-on-topic" signal all live in the first ~500 chars of
+    # any chunk; we lose nothing by truncating the rest. Halves the
+    # Critic's input tokens.
+    #
+    # Total-chunks cap MAX_CHUNKS_PER_CALL prevents paper_discovery's
+    # 15-slice expansion (5 papers × 3 OA slices) from flooding one
+    # Critic prompt. When over the cap we keep the FIRST N — they
+    # already arrive in relevance-descending order from RRF/rerank.
+    MAX_CHUNK_CHARS = 800
+    MAX_CHUNKS_PER_CALL = 12
+
+    chunks_to_grade = chunks[:MAX_CHUNKS_PER_CALL]
     numbered = "\n\n".join(
-        f"[Chunk {i+1}] {_hdr(c)}\n{c.text.strip()[:1500]}"
-        for i, c in enumerate(chunks)
+        f"[Chunk {i+1}] {_hdr(c)}\n{c.text.strip()[:MAX_CHUNK_CHARS]}"
+        for i, c in enumerate(chunks_to_grade)
     )
     user = f"Question: {sub_q}\n\nChunks to grade:\n{numbered}"
+    prompt_chars = len(_SYSTEM) + len(user)
 
     t0 = time.perf_counter()
     raw = chat(
@@ -182,16 +200,24 @@ def _grade_one_subq(sub_q: str, chunks: list[HydratedChunk]) -> tuple[list[str],
     grades_raw = parsed.get("grades") or []
     reasoning = str(parsed.get("reasoning") or "")
 
-    # Normalize + validate length
+    # Normalize + validate length. We graded `chunks_to_grade` (capped at
+    # MAX_CHUNKS_PER_CALL). Any chunks past the cap default to "partial"
+    # so the caller can still slot a grade for every input chunk and the
+    # filter step downstream behaves correctly. "partial" not "relevant"
+    # because we genuinely haven't graded them — we don't want to wave
+    # through ungraded evidence as if it were vetted.
     valid = {"relevant", "partial", "irrelevant"}
     grades = [g.lower().strip() if isinstance(g, str) else "partial" for g in grades_raw]
     grades = [g if g in valid else "partial" for g in grades]
-    if len(grades) != len(chunks):
-        # Length mismatch — fill or truncate. Conservative default = "partial"
-        grades = (grades + ["partial"] * len(chunks))[: len(chunks)]
+    if len(grades) != len(chunks_to_grade):
+        # LLM returned wrong-length list — fill/truncate to the GRADED slice.
+        grades = (grades + ["partial"] * len(chunks_to_grade))[: len(chunks_to_grade)]
         reasoning = f"(length mismatch; padded) {reasoning}"
+    if len(chunks) > len(chunks_to_grade):
+        # Extend with "partial" for the chunks we deliberately skipped.
+        grades = grades + ["partial"] * (len(chunks) - len(chunks_to_grade))
 
-    return grades, reasoning, dur_ms
+    return grades, reasoning, dur_ms, prompt_chars
 
 
 def _derive_verdict(all_grades: list[str]) -> str:
@@ -272,11 +298,13 @@ def critique(state: AgentState) -> dict[str, Any]:
     total_ms = 0
     total_chunks_in = 0
     total_chunks_kept = 0
+    total_prompt_chars = 0
 
     for sq, chunks in chunks_by_subq.items():
         total_chunks_in += len(chunks)
-        grades, reasoning, ms = _grade_one_subq(sq, chunks)
+        grades, reasoning, ms, prompt_chars = _grade_one_subq(sq, chunks)
         total_ms += ms
+        total_prompt_chars += prompt_chars
         all_grades.extend(grades)
         if reasoning:
             reasonings.append(reasoning)
@@ -305,6 +333,12 @@ def critique(state: AgentState) -> dict[str, Any]:
                 "chunks_in": total_chunks_in,
                 "chunks_kept": total_chunks_kept,
                 "verdict": verdict,
+                # Phase 15.1 telemetry: rough payload size across all sub-Q
+                # grading calls combined. Divide by ~4 for a ballpark token
+                # count. Bubbles into the CLI trace so day-budget pressure
+                # (Groq free tier: 100K TPD) is observable per-run.
+                "prompt_chars": total_prompt_chars,
+                "est_tokens": total_prompt_chars // 4,
                 "grades": {
                     "relevant": all_grades.count("relevant"),
                     "partial": all_grades.count("partial"),
