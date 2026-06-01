@@ -184,11 +184,38 @@ def _grade_one_subq(
     # Critic's input tokens.
     #
     # Total-chunks cap MAX_CHUNKS_PER_CALL prevents paper_discovery's
-    # 15-slice expansion (5 papers × 3 OA slices) from flooding one
-    # Critic prompt. When over the cap we keep the FIRST N — they
-    # already arrive in relevance-descending order from RRF/rerank.
+    # 5-papers × 5-slices expansion from flooding one Critic prompt.
+    # When over the cap, chunks past the cap get auto-stamped "partial"
+    # downstream — they're NOT actually graded by the LLM. So WHICH 20
+    # we send matters: that's exactly the reorder logic below.
+    #
+    # Bumped 12 -> 20 because the Critic was upgraded from llama-3.1-8b
+    # (Groq) to llama-3.3-70b (Cerebras/Groq cascade). The 70B model
+    # handles ~25 chunks per call comfortably inside the token budget,
+    # and 12 was leaving paper_discovery's fresh PDF slices ungraded.
     MAX_CHUNK_CHARS = 800
-    MAX_CHUNKS_PER_CALL = 12
+    MAX_CHUNKS_PER_CALL = 20
+
+    # Critical ordering rule for the FIRST MAX_CHUNKS_PER_CALL chunks:
+    # fresh external discoveries (paper:*, web:*) must beat local chunks
+    # for the grading window. paper_discovery.py appends new PaperChunks
+    # *after* existing retriever chunks in the merged refs list, so
+    # without this reorder the freshly-downloaded AutoGen PDF slices sit
+    # at positions 10-25 and never see the LLM — they get the silent
+    # "partial" auto-fill on line "Extend with partial ..." below.
+    #
+    # The reorder is stable within each bucket so the upstream RRF +
+    # paper-rerank ordering is preserved.
+    def _bucket(c: HydratedChunk) -> int:
+        sig = (getattr(c, "signal", "") or "").lower()
+        if sig.startswith("paper:"):
+            return 0  # cascade-fetched PDFs first — they paid the cost
+        if sig.startswith("web:"):
+            return 1  # web fallbacks second
+        return 2      # local Chroma/BM25 chunks last
+
+    chunks_ordered = sorted(enumerate(chunks), key=lambda iv: (_bucket(iv[1]), iv[0]))
+    chunks = [c for _, c in chunks_ordered]
 
     chunks_to_grade = chunks[:MAX_CHUNKS_PER_CALL]
     numbered = "\n\n".join(
