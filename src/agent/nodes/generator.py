@@ -58,21 +58,44 @@ YEAR / RECENCY DISCIPLINE — read carefully.
 - Do NOT repeat the same point under multiple section headers. If two sub-questions
   produce overlapping answers, merge them into one section.
 
-PRIMARY SOURCE PREFERENCE — read carefully.
-- Sources are presented in priority order: PAPER PDFs first (low S<n>),
-  then WEB summaries, then LOCAL notes. Each source header tells you the
-  type: lines starting with `arxiv:` or a semanticscholar URL are
-  primary-source PDF excerpts the cascade fetched live for THIS query.
-- When the user names a specific paper, framework, author, or method
-  (e.g. "the AutoGen paper by Wu et al.", "ReAct's planning step",
-  "BERT's masking objective"), you MUST prefer citations to the
-  primary-source PDF chunks over web summaries that paraphrase the
-  same content. Cite [S1]-[S5] for main claims when those slots are
-  paper:* — the web summaries are corroboration, not the source of record.
-- If a web source and a paper source say the same thing, cite the paper.
-  Web sources are only the right citation when the claim is about the
-  framework's ECOSYSTEM (tutorials, blog reception, third-party use)
-  rather than the paper's content itself."""
+SYNTHESIZE PAPER + WEB — read carefully.
+
+Sources are presented in priority order:
+  - PAPER PDFs first (low S<n>):  headers like `arxiv:2308.08155` or a
+    semanticscholar URL. These are primary-source PDF excerpts the
+    cascade fetched live for THIS query — the paper itself.
+  - WEB summaries next:           headers like `https://...` with
+    `signal=web:tavily`. These are blog posts, docs sites, and
+    third-party explainers paraphrasing the paper.
+  - LOCAL notes last:             your own ingested corpus.
+
+Your job is to COMBINE these into one coherent answer using BOTH the
+primary papers AND the web summaries together:
+
+1. ANCHOR every paper-content claim on the paper itself.
+   When the claim is about WHAT THE PAPER SAYS (definitions, class
+   taxonomy, algorithms, equations, benchmarks reported), cite the
+   paper:* tags. The paper is the source of record — web summaries
+   paraphrasing it are not.
+
+2. CORROBORATE with web where it adds value.
+   When a web source CONFIRMS what the paper says with the same fact,
+   stack the citations: "AutoGen introduces ConversableAgent as the
+   base class [S1][S6]" where [S1] is the paper and [S6] is a web
+   explainer. The reader sees both the primary source AND the
+   accessible summary in one citation.
+
+3. USE WEB ALONE for ecosystem context.
+   When the claim is about adoption, tutorials, the framework's
+   reception, or third-party usage patterns, those don't appear in
+   the original paper — cite the web sources directly.
+
+4. NEVER cite ONLY the web for a paper-content claim when paper:*
+   chunks are present in the evidence pool. If the paper covers the
+   claim, the paper goes in the citation either alone or first.
+
+Goal: a reader should be able to verify every claim by checking the
+paper, and use the web sources for the accessible/contextual reading."""
 
 
 def _chunk_key(c: HydratedChunk) -> tuple[str, int]:
