@@ -923,6 +923,41 @@ def discover_papers(
 
     ranked = _rank_by_relevance(query, merged, top_k=max_results)
 
+    # RELEVANCE FLOOR: drop papers below the query-similarity threshold.
+    #
+    # Empirically on the AutoGen run, the cascade returned 5 papers:
+    #   AutoGen          0.82   ← the user actually asked about this one
+    #   Multi-Agent RL    0.70
+    #   AutoGen-Powered  0.69   ← related framework, not the paper named
+    #   AUTOGEN STUDIO   0.68   ← also not the paper named
+    #   Hanabi           0.67   ← totally unrelated
+    # All 5 then expanded into 5 slices each → 25 paper chunks reaching
+    # the Critic and generator, of which only the 5 AutoGen slices were
+    # genuinely relevant to the question. The 20 off-topic slices filled
+    # source slots [S6]-[S25] with noise that diluted the reasoning LLM's
+    # synthesis budget.
+    #
+    # 0.75 is the threshold the user picked after seeing the score
+    # distribution. Empirically on framework-named queries this keeps the
+    # 1-2 directly-on-target papers and drops the topically-adjacent ones.
+    # Web fallback then fills in the breadth.
+    #
+    # SAFETY: if the floor would leave 0 papers, keep the top-1 anyway —
+    # never return an empty discovery just because nothing crossed the bar.
+    _PAPER_SCORE_FLOOR = 0.75
+    if ranked:
+        kept = [p for p in ranked if p.score >= _PAPER_SCORE_FLOOR]
+        if not kept:
+            kept = ranked[:1]  # fall back to single best paper
+        dropped = len(ranked) - len(kept)
+        _debug(
+            f"[filter] score_floor={_PAPER_SCORE_FLOOR} "
+            f"kept={len(kept)} dropped={dropped} "
+            f"(top_score={ranked[0].score:.3f}, "
+            f"kept_scores={[round(p.score, 3) for p in kept]})"
+        )
+        ranked = kept
+
     if enrich_full_text:
         _debug(
             f"[enrich] ranked={len(ranked)} papers, "
