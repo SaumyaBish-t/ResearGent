@@ -50,6 +50,39 @@ Rules:
 Output ONLY the search query, no quotes, no explanation."""
 
 
+def _extract_named_entities(question: str) -> list[str]:
+    """
+    Extract framework/model/method NAMES from the question deterministically.
+
+    These are tokens we MUST keep in the search query — they're the only
+    way arxiv/S2 can land the specific paper the user is asking about.
+
+    What counts as an "entity anchor":
+      - PascalCase / CamelCase compounds with internal capitals
+        (AutoGen, LangChain, ChatGPT, ReAct, RAG-Fusion)
+      - ALLCAPS acronyms ≥3 chars (BERT, LLM, RAG, GLiNER written as such)
+
+    Single-letter and 2-char tokens (author initials, "Wu", "Li") are
+    excluded — they're surname noise that drags S2 to unrelated work.
+    """
+    tokens = re.findall(r"[A-Za-z][A-Za-z0-9.\-]*", question)
+    anchors: list[str] = []
+    seen: set[str] = set()
+    for tok in tokens:
+        if len(tok) < 3:
+            continue
+        is_all_caps = tok.isupper()
+        is_camel = tok[0].isupper() and any(c.isupper() for c in tok[1:])
+        if not (is_all_caps or is_camel):
+            continue
+        key = tok.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        anchors.append(tok)
+    return anchors
+
+
 def _extract_search_query(question: str) -> str:
     """Use the FAST tier to shorten verbose questions for academic search."""
     # Heuristic short-circuit: if the question is already short and entity-rich,
@@ -58,6 +91,16 @@ def _extract_search_query(question: str) -> str:
     if word_count <= 6:
         return question
 
+    # Deterministic anchor extraction — what arxiv/S2 *must* see in order
+    # to land the paper the user is asking about. The LLM-based shortener
+    # below has a documented failure mode of dropping the framework name
+    # (e.g. compressing "the AutoGen multi-agent paper by Wu et al." down
+    # to "Wu et al. conversational programming multi-agent control flow"
+    # — no "AutoGen"). When that happens, arXiv ranks by the surviving
+    # tokens and returns Multi-Agent RL Survey instead of arxiv:2308.08155.
+    anchors = _extract_named_entities(question)
+
+    cleaned = ""
     try:
         cleaned = chat(
             messages=[
@@ -70,11 +113,21 @@ def _extract_search_query(question: str) -> str:
         ).strip().strip('"').strip("'")
         # Drop any trailing newline / explanation the model may have added.
         cleaned = cleaned.split("\n")[0].strip()
-        if cleaned and len(cleaned) < len(question):
-            return cleaned
     except Exception:
-        pass
-    return question
+        cleaned = ""
+
+    if not cleaned or len(cleaned) >= len(question):
+        cleaned = question
+
+    # ENTITY GUARD: if the LLM dropped any anchor token from the question,
+    # prepend the missing ones. Anchors are the strongest possible signal
+    # for the search engines; losing them silently is catastrophic for
+    # framework-named queries.
+    cleaned_lower = cleaned.lower()
+    missing = [a for a in anchors if a.lower() not in cleaned_lower]
+    if missing:
+        cleaned = " ".join(missing) + " " + cleaned
+    return cleaned.strip()
 
 
 def discover(state: AgentState) -> dict[str, Any]:
