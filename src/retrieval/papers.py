@@ -430,6 +430,20 @@ def _semantic_scholar_search(query: str, max_results: int = 5) -> list[PaperChun
             f"→ {pdf_url if pdf_url else '(none returned by S2)'}"
         )
 
+        # FALLBACK: if S2 doesn't expose an openAccessPdf URL but the paper
+        # HAS an arXiv ID, synthesize the arxiv.org/pdf URL directly.
+        #
+        # Why this matters: S2's `openAccessPdf` field is sparsely populated
+        # — many high-impact papers (including 2308.08155 AutoGen itself
+        # with 1700+ citations) have an empty openAccessPdf despite being
+        # freely available on arxiv. Without this synthesis, the cascade
+        # discovers the paper but can't download it, falls back to abstract,
+        # and the answer ends up grounded on Tavily web scrapes instead of
+        # the real PDF text.
+        if not pdf_url and arxiv_id:
+            pdf_url = f"https://arxiv.org/pdf/{arxiv_id}"
+            _debug(f"[S2] synthesized arxiv PDF URL for {arxiv_id} → {pdf_url}")
+
         out.append(
             PaperChunk(
                 title=(item.get("title") or "").strip(),

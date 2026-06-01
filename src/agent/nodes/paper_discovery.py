@@ -116,18 +116,33 @@ def discover(state: AgentState) -> dict[str, Any]:
         new_refs.get(question) or []
     )
 
-    discovered_summary = [
-        {
-            "title": p.title[:120],
-            "citation": p.citation,
-            "year": p.year,
-            "venue": p.venue,
-            "source": p.source,
-            "score": round(p.score, 3),
-            "citations": p.citations,
-        }
-        for p in papers
-    ]
+    # Dedupe the display summary by (arxiv_id, title) — after
+    # `_expand_with_semantic_chunks` each PDF-enriched paper appears once
+    # per kept slice (up to 5), which makes the discovery list look like
+    # we found "5 copies of a Hanabi paper" when we really found one paper
+    # sliced 5 ways. Keep the FIRST occurrence of each unique paper so the
+    # highest-scoring slice's score is the one displayed.
+    discovered_summary: list[dict[str, Any]] = []
+    seen_papers: set[tuple[str, str]] = set()
+    for p in papers:
+        key = (
+            (p.arxiv_id or "").strip().lower(),
+            re.sub(r"\W+", " ", (p.title or "").lower()).strip(),
+        )
+        if key in seen_papers:
+            continue
+        seen_papers.add(key)
+        discovered_summary.append(
+            {
+                "title": p.title[:120],
+                "citation": p.citation,
+                "year": p.year,
+                "venue": p.venue,
+                "source": p.source,
+                "score": round(p.score, 3),
+                "citations": p.citations,
+            }
+        )
 
     return {
         "chunk_refs_by_subq": merged_refs,
