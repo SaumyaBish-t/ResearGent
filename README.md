@@ -23,6 +23,8 @@ An **Agentic Research Engine** with Corrective RAG, Self-Reflection, hybrid retr
 | **13** | **Pointer-based state** — `ChunkRef` pointers in checkpoints, hydration at node entry, `agent_artifacts` JSONB store → ~3KB/snapshot instead of ~200KB (60× smaller) | ✅ done |
 | **14** | **Semantic chunking + local NER** — `all-MiniLM-L6-v2` topic-shift chunker, GLiNER entity extraction, entity-augmented embeds & BM25 (free-tier, CPU-only) | ✅ done |
 | **15** | **Domain-aware corpus + S2 seed ingestion** — three isolated per-domain ingest roots, domain-stamped Chroma metadata + registry, keyword auto-router, Semantic Scholar `citationCount:desc` Stage-1 seeder | ✅ done |
+| **15.1** | **Async PDF enrichment for Stage-2** — `httpx.AsyncClient` + `pypdf` fetch/parse for open-access papers, ranked semantic slices replace abstract-only stubs, graceful fallback on 404/captcha/corrupted bytes | ✅ done |
+| **15.2** | **Critic strictness & telemetry** — weighted score (`partial=0.75`), source-aware HIGH threshold (`0.70` external / `0.85` local), per-call payload bounds + `prompt_chars`/`est_tokens` trace, year-discipline rule | ✅ done |
 
 ---
 
@@ -393,7 +395,88 @@ uv run researgent research "..." --domain quant_finance    # scope retrieval exp
 
 ---
 
-## Architecture (current shipped state — Phases 0–15)
+## Phase 15.1 — Async PDF enrichment for Stage-2 paper discovery
+
+Before 15.1, `paper_discovery` fed only title+abstract into the Critic and Generator — 5 abstract stubs total per cascade fire. For research questions that need specific evidence (formulae, metrics, dataset names, year-anchored claims), abstracts are too thin and the generator paraphrases around the gaps.
+
+### What changed (`src/retrieval/papers.py`)
+
+1. **Async fetch.** `httpx.AsyncClient(timeout=15.0)` + ResearGent User-Agent header. `asyncio.Semaphore(4)` bounds parallel downloads so journal mirrors aren't hammered. `follow_redirects=True` for DOI → publisher → CDN chains.
+2. **pypdf parse.** `pypdf.PdfReader(io.BytesIO(...))`, iterate `reader.pages`, concat extracted text. Per-page extract is itself wrapped so one bad page doesn't lose the document. 60 KB hard cap on raw text per paper.
+3. **Semantic chunking.** Parsed full text runs through the Phase 14 `semantic_chunk_text` (`all-MiniLM-L6-v2`). Slices ranked by cosine similarity to the original query using the EMBED tier; top **3** per paper kept.
+4. **Per-slice PaperChunks.** Each kept slice becomes its own `PaperChunk` with `chunk_idx` set; all citation metadata (title, year, url, arxiv_id) preserved so generator citations remain coherent across slices of the same paper.
+5. **Graceful fallback contract.** Three layered guards — HTTP non-200, content-type/magic-number check rejecting HTML paywalls, `try/except` around the entire fetch + parse path. Any failure logs one concise warning and falls back to abstract via the `PaperChunk.text` priority chain (`chunk_text > full_text > abstract > title`). The cascade never breaks on a flaky mirror.
+
+### Verified end-to-end
+
+Real arXiv PDF (Self-RAG, 2310.11511): fetch+parse 60 000 chars → semantic chunker emits 3 slices → query-relevance scores `[0.65, 0.63, 0.62]` → generator sees bounded 1–3 KB passages from the actual paper body.
+
+Failure modes (404, HTML masquerade, DNS-fail): all three cleanly fell back to abstract-only with one warning each. No exception escaped.
+
+### New dependency
+
+```toml
+"pypdf>=5.0"
+```
+
+---
+
+## Phase 15.2 — Critic strictness, leniency for fresh sources, and load bounds
+
+Three rounds of Critic improvements landed in quick succession, all in `src/agent/nodes/critic.py`. Net effect: better verdict quality, better cost control, and the cascade's fresh discoveries actually count toward the auto-save gate.
+
+### 1. Strict year-aware grading (commit `e8a8969`)
+
+The Critic gates the entire Stage-2 escalation cascade. Over-grading thin local evidence as HIGH silently degrades answers because the cascade never fires. Tightened rubric:
+
+- **Recency discipline.** If the question asks about a specific year (`"latest 2026 developments"`), the chunk must be from that exact year for `relevant`. A 2024 paper on the same topic is `partial` at best. A 2021 paper is `irrelevant`.
+- **Domain-match-is-not-relevance.** Same domain bucket (`agentic_ai`, `quant_finance`, `time_series`) is the floor, not the ceiling. A LangGraph chunk doesn't answer a ReAct question just because both are agentic-AI.
+- **`doc_title` surfaced in chunk headers** so the model can actually see the year (`PaperChunk.doc_title` carries `"Title (YEAR) — Venue"`).
+
+### 2. Source-aware leniency for cascade discoveries (commit `50ecfe0`)
+
+Replaced absolute-count bands with a weighted score and a source-aware threshold:
+
+```
+score = (relevant_n × 1.00 + partial_n × 0.75) / total
+
+threshold_hi = 0.70  if pool has external-fresh chunks (signal startswith "paper:" or "web:")
+threshold_hi = 0.85  otherwise (all-local pool)
+
+score ≥ threshold_hi              → high
+relevant_n ≥ 1 OR partial_n ≥ 2   → medium
+otherwise                         → low
+```
+
+Cascade-discovered chunks (arxiv / semantic_scholar / tavily / serper / duckduckgo) get the lenient 0.70 bar — they already paid a live API call to surface, so a single Tavily hit or a Stage-2 S2 paper full of partials can settle the verdict at HIGH and auto-save to your vault. Local-only pools keep the strict 0.85 bar.
+
+The Critic prompt also carries a **CRITERIA AMENDMENT** instructing the model to be constructive on fresh discoveries: "if a chunk contains the explicit core entities, numbers, or agent names requested by the user — even if the surrounding text or snippet formatting is partial or noisy — grade it as `relevant` or a high-value `partial`. Do not penalise fresh, correct information for layout or formatting fragments."
+
+### 3. Per-call payload bounds + token telemetry (commit `b60e75b`)
+
+Phase 15.1's PDF enrichment ballooned Critic input ~9× (5 abstracts → up to 15 PDF slices), and the stricter year-aware rules ~2-3×'d the call count. Combined → daily Groq TPD exhausted by run 4–5.
+
+Bounds added:
+
+- Per-chunk char truncation **1500 → 800**. Year, named entities, and on-topic signal all sit in the first ~500 chars; the rest was filler.
+- **`MAX_CHUNKS_PER_CALL = 12`**. paper_discovery floods get sliced (excess defaults to `partial` so downstream filter still emits a grade per input chunk).
+- Critic trace now surfaces `score`, `threshold_hi`, `external_fresh_pool`, `prompt_chars`, `est_tokens` — every verdict is fully explainable from the CLI trace.
+
+Combined: ~85% reduction in per-Critic-call payload. The same run that ate ~100K tokens at Groq now uses ~15K.
+
+### Resilient FAST cascade
+
+Companion `.env` change (not committed — `.env` is gitignored):
+
+```
+FAST_CASCADE=cerebras,groq,openrouter,nvidia,ollama
+```
+
+Five fallback rungs. When Cerebras (5 RPM) and Groq (100K TPD) both exhaust, the Critic seamlessly hops to OpenRouter (`deepseek-v4-flash:free`), then NVIDIA (`Llama-3.1-8B`), then offline Ollama. No more terminal 429s.
+
+---
+
+## Architecture (current shipped state — Phases 0–15.2)
 
 ```
                        ┌──────────────────┐
@@ -473,32 +556,37 @@ Key flow notes:
 ```
 researgent/
 ├── src/
-│   ├── config.py             # typed settings via pydantic-settings
-│   ├── domains.py            # Phase 15: registered corpora (agentic_ai / quant_finance / time_series)
+│   ├── config.py             # typed settings via pydantic-settings (+ FAST/REASONING/TOOL_CASCADE overrides)
+│   ├── domains.py            # Phase 15: registered corpora + consolidated data/{domain}/{papers,abstract_notes,research_data}/ layout
 │   ├── llm/
 │   │   └── provider.py       # unified chat() / embed() over NVIDIA/Groq/Ollama/Cerebras/OpenRouter
 │   ├── ingest/
 │   │   ├── pdf.py            # PyMuPDF -> Page records
 │   │   ├── chunker.py        # Phase 14: semantic chunker (MiniLM) + GLiNER entity extraction
 │   │   ├── obsidian.py       # vault parser + heading-aware chunker (entity-enriched)
-│   │   ├── s2_seed.py        # Phase 15: Semantic Scholar Stage-1 seeder (citationCount:desc)
-│   │   └── pipeline.py       # chunks -> entity-augmented embeds -> Chroma + BM25 + registry
+│   │   ├── s2_seed.py        # Phase 15: Semantic Scholar Stage-1 seeder (citationCount:desc, x-api-key authed)
+│   │   └── pipeline.py       # chunks -> entity-augmented embeds -> Chroma + BM25 + registry (domain-tagged on both PDF + vault paths)
 │   ├── retrieval/
-│   │   ├── naive.py          # dense top-k from Chroma (baseline)
-│   │   └── bm25.py           # persisted BM25Okapi + RRF fusion
+│   │   ├── naive.py          # dense top-k from Chroma (baseline) + domain filter
+│   │   ├── bm25.py           # persisted BM25Okapi + RRF fusion + domain post-filter
+│   │   └── papers.py         # Phase 15.1: async httpx + pypdf fetch/parse for OA papers -> ranked semantic slices
 │   ├── rag/
 │   │   └── naive.py          # retrieve -> stuff -> generate (cited)
 │   ├── agent/
-│   │   ├── graph.py          # LangGraph DAG (planner/retriever/critic/web/gen/reflector)
+│   │   ├── graph.py          # LangGraph DAG (planner/retriever/critic/paper_discovery/web/gen/reflector); empty-retrieval escalation
+│   │   ├── nodes/
+│   │   │   └── critic.py     # Phase 15.2: weighted score, source-aware HIGH threshold, year-discipline prompt, payload bounds
 │   │   └── artifacts.py      # Phase 13: ChunkRef pointers + agent_artifacts JSONB store
 │   ├── registry.py           # Phase 12: documents_registry (SQLAlchemy) + TTL pruner
 │   ├── store.py              # ChromaDB client + collection management
-│   └── main.py               # Typer CLI
+│   └── main.py               # Typer CLI (domains, ingest-domains, seed, retag-domain, research --domain)
 ├── data/
-│   ├── papers/
-│   │   ├── agentic_ai/       # Phase 15: domain-scoped PDFs (auto-tagged)
-│   │   ├── quant_finance/
-│   │   └── time_series/
+│   ├── agentic_ai/           # Phase 15 (consolidated): one folder per domain
+│   │   ├── papers/           #   PDF ingest input
+│   │   ├── abstract_notes/   #   S2 abstract-only cards (formerly _abstracts/)
+│   │   └── research_data/    #   auto-saved research run notes (YYYY-MM-DD/)
+│   ├── quant_finance/
+│   ├── time_series/
 │   ├── storage/              # Phase 12: raw bytes by content_hash (gitignored)
 │   └── chroma_db/            # vector store (gitignored)
 ├── .env.example
