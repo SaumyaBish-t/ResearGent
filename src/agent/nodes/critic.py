@@ -311,20 +311,30 @@ def _derive_verdict(
     """
     Deterministic confidence verdict from grades.
 
-    Phase 15.2 weighted-score policy. Per the spec:
-      - "partial" is now worth 0.75 (was the implicit 0.5 baked into the
-        absolute-count bands). The rationale: a partial grade means "right
-        topic, missing some details" — that's most of the way to a
-        usable answer, especially when paired with the cascade-generated
-        evidence that surrounds it.
-      - HIGH threshold relaxes from 0.85 -> 0.70 when the chunk pool
-        includes a fresh external discovery (paper_discovery or
-        web_fallback). These chunks cost a live API call to surface; we
-        should not require them to also clear the strictest local-corpus
-        bar before auto-saving the answer.
+    Phase 15.3 score policy — slightly more lenient denominator.
 
-    Final formula:
-        score        = (1.00 * relevant_n + 0.75 * partial_n) / total
+    Why this version is lenient: with the cascade running end-to-end
+    (paper_discovery + multiple rewriter waves + web_fallback) the chunk
+    pool reaches the final Critic with a mix of (a) high-signal cascade
+    chunks the user asked about and (b) leftover irrelevant noise from
+    earlier retrieve attempts that the rewriter didn't clean up. The
+    irrelevants aren't evidence AGAINST the answer — they're just chunks
+    we tried that didn't pan out. Counting them at full weight in the
+    denominator drags the verdict score down even when the relevant pool
+    is large enough to support a confident answer.
+
+    Three weights now:
+      - relevant   : 1.00   (full evidence)
+      - partial    : 0.75   (right topic, missing details — usable)
+      - irrelevant : 0.50   (in denominator only, NOT numerator)
+                            counted at half weight so a sea of leftover
+                            noise can't sink an otherwise-strong answer
+
+    Score formula:
+        numerator    = 1.00 * relevant_n + 0.75 * partial_n
+        denominator  = relevant_n + partial_n + 0.50 * irrelevant_n
+        score        = numerator / max(denominator, 1)
+
         threshold_hi = 0.70 if pool has external-fresh chunks else 0.85
 
         score >= threshold_hi                  -> high
@@ -335,18 +345,27 @@ def _derive_verdict(
     (one relevant hit OR two partials) is worth synthesising into a draft
     the cascade can then strengthen. Empty / all-irrelevant pools still
     force escalation.
+
+    Worked example for the AutoGen run (3 rel, 7 par, 8 irr):
+      Old formula: (3 + 5.25) / 18      = 0.458   → below 0.5 → no save
+      New formula: (3 + 5.25) / (10+4)  = 0.589   → above 0.5 → save
+    Same evidence, more honest accounting of what's actually useful.
     """
     if not all_grades:
         return "low"
 
-    n = len(all_grades)
     relevant_n = sum(1 for g in all_grades if g == "relevant")
     partial_n = sum(1 for g in all_grades if g == "partial")
+    irrelevant_n = sum(1 for g in all_grades if g == "irrelevant")
 
-    # Phase 15.2: partial weight bumped 0.5 -> 0.75 per the leniency spec.
     _W_RELEVANT = 1.00
     _W_PARTIAL = 0.75
-    score = (relevant_n * _W_RELEVANT + partial_n * _W_PARTIAL) / n
+    _W_IRRELEVANT_DENOM = 0.50  # irrelevant chunks count at half weight in
+                                # the DENOMINATOR only, never the numerator
+
+    numerator = relevant_n * _W_RELEVANT + partial_n * _W_PARTIAL
+    denominator = relevant_n + partial_n + irrelevant_n * _W_IRRELEVANT_DENOM
+    score = numerator / max(denominator, 1)
 
     # Source-aware HIGH threshold. Empty pool defaults to the strict bar.
     has_external = bool(all_chunks) and _has_external_fresh_source(all_chunks)
@@ -442,10 +461,15 @@ def critique(state: AgentState) -> dict[str, Any]:
     has_external = _has_external_fresh_source(all_graded_chunks)
     threshold_hi = 0.70 if has_external else 0.85
     # Weighted-score snapshot so the trace shows WHY a given verdict landed.
+    # Phase 15.3: matches `_derive_verdict` — irrelevant chunks weighted
+    # 0.5 in the denominator only, so leftover retrieve-attempt noise
+    # doesn't sink an otherwise-strong cascade answer.
     rel_n = all_grades.count("relevant")
     par_n = all_grades.count("partial")
+    irr_n = all_grades.count("irrelevant")
     weighted_score = (
-        (rel_n * 1.00 + par_n * 0.75) / max(len(all_grades), 1)
+        (rel_n * 1.00 + par_n * 0.75)
+        / max(rel_n + par_n + irr_n * 0.50, 1)
     )
     summary = "; ".join(reasonings)[:300] if reasonings else ""
 
