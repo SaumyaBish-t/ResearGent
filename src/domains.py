@@ -70,6 +70,22 @@ class Domain:
         """Where PDFs for this domain live on disk."""
         return PAPERS_ROOT / self.id
 
+    @property
+    def notes_dir(self) -> Path:
+        """
+        Where ResearGent auto-saved research notes for this domain live.
+
+        Kept distinct from `ingest_dir` so PDFs (input) and generated
+        research notes (output) don't share a folder — a future ingest
+        pass over `data/papers/{domain}/` should not pick up the notes
+        we wrote about that same corpus.
+
+        Layout:   data/notes/{domain_id}/YYYY-MM-DD/<note>.md
+
+        Returned path may not yet exist; the vault writer creates it.
+        """
+        return Path("data") / "notes" / self.id
+
 
 DOMAINS: dict[str, Domain] = {
     # ---- Agentic & multi-agent systems --------------------------------------

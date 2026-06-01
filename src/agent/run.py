@@ -38,6 +38,8 @@ class AgentResult:
     rewrite_attempts: int = 0
     web_used: bool = False
     rewritten_queries: dict[str, str] | None = None
+    # Phase 15: domain scope used for retrieval (and now for save routing)
+    domain_scope: list[str] | None = None
     # Phase 5 additions
     reflection_attempts: int = 0
     reflection_gaps: list[str] | None = None
@@ -187,6 +189,7 @@ def run_agent(
         confidence=str(final.get("confidence") or ""),
         critic_score=float(final.get("critic_score") or 0.0),
         rewrite_attempts=int(final.get("rewrite_attempts") or 0),
+        domain_scope=list(final.get("domain_scope") or []) or None,
         web_used=bool(final.get("web_used")),
         rewritten_queries=final.get("rewritten_queries") or {},
         reflection_attempts=int(final.get("reflection_attempts") or 0),

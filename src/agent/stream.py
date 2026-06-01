@@ -215,6 +215,7 @@ def stream_agent(
         run_id=rid,
         error=final_state.get("error"),
         score=float(final_state.get("critic_score") or 0.0),
+        domain_scope=list(final_state.get("domain_scope") or []) or None,
     )
     if saved_path is not None:
         yield {

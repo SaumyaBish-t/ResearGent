@@ -991,6 +991,7 @@ def research(
                         run_id=result.run_id,
                         error=result.error,
                         score=result.critic_score,
+                        domain_scope=result.domain_scope,
                     )
                 if note_path is None:
                     # Auto-save was attempted but the gate rejected it.
