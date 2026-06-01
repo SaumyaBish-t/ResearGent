@@ -832,25 +832,35 @@ def _expand_with_semantic_chunks(
 
         top_n = scored[:_MAX_CHUNKS_PER_PAPER]
 
-        # Pin the FIRST slice (paper intro / abstract section).
+        # Pin the FIRST TWO slices (intro/abstract + first methods section).
         #
-        # Research papers almost always state their core taxonomy and
-        # key definitions in the intro — that's exactly the type of
-        # evidence the Critic needs to answer "what are the two classes
-        # of X" style questions. But the intro often ranks LOW on
-        # cosine-to-query because the query has specific tail terms
-        # ("control flow", "execution") that match deeper methodology
-        # sections better.
+        # Empirical reason for two, not one: in AutoGen (arxiv:2308.08155),
+        # the literal text defining the class taxonomy —
+        #     "ConversableAgent ... AssistantAgent and UserProxyAgent
+        #      are two example built-in agents"
+        # — lives in §2.1 "Conversable Agents", which the semantic
+        # chunker places at slice INDEX 1 or 2, not slice 0. Pinning
+        # only slice 0 (title + abstract framing) means questions like
+        # "what are the two broad classes of X" still get answered from
+        # web summaries because the definition-bearing slice loses the
+        # cosine race to deeper methodology sections.
         #
-        # If the intro isn't already in top_n, swap it in for the
-        # lowest-scoring kept slice. We never grow the budget — just
-        # rebalance which slices fill it.
-        intro = slices[0]
-        if not any(s == intro for _, s in top_n):
+        # Pinning the first 2 covers both the intro framing AND the
+        # first concrete-definitions section, which together handle
+        # ~all "what is X / how many X" style questions. The remaining
+        # 3 of 5 slots stay query-similarity ranked for tail questions
+        # like "how does X handle Y under condition Z".
+        #
+        # Budget stays constant: swap pinned slices in for the
+        # lowest-scored kept slices, never grow past _MAX_CHUNKS_PER_PAPER.
+        _PIN_EARLY_N = 2
+        for early in slices[:_PIN_EARLY_N]:
+            if any(s == early for _, s in top_n):
+                continue
             if len(top_n) >= _MAX_CHUNKS_PER_PAPER:
-                top_n[-1] = (top_n[-1][0], intro)  # replace lowest-scored
+                top_n[-1] = (top_n[-1][0], early)  # replace lowest-scored
             else:
-                top_n.append((0.0, intro))
+                top_n.append((0.0, early))
 
         # Emit one PaperChunk per kept slice. We shallow-copy the original
         # paper's metadata so each slice keeps the same citation / year /
