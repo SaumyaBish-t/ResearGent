@@ -28,6 +28,33 @@ app = typer.Typer(
 )
 console = Console()
 
+
+@app.callback()
+def _bootstrap() -> None:
+    """
+    Top-level callback that fires before every command.
+
+    Idempotently migrates any legacy split layout
+    (`data/papers/{id}/`, `data/notes/{id}/`) to the new consolidated
+    per-domain layout (`data/{id}/papers/`, `data/{id}/research_data/`,
+    `data/{id}/abstract_notes/`). Costs a few os.path.exists checks in
+    the steady state once everything is already migrated.
+    """
+    try:
+        from src.domains import migrate_legacy_layout
+
+        moves = migrate_legacy_layout()
+        if moves:
+            console.print(
+                f"[dim]layout migration:[/dim] moved [cyan]{len(moves)}[/cyan] "
+                "item(s) into the new per-domain folders. "
+                "[dim](Old data/papers/, data/notes/ removed.)[/dim]"
+            )
+    except Exception as e:
+        # Migration must never block a command. Worst case the user keeps
+        # the old layout and falls through to the legacy-path codepath.
+        console.print(f"[dim yellow]layout migration skipped:[/dim yellow] {e}")
+
 # `db` sub-app — schema setup, TTL pruning, connection health. Kept separate
 # from the top-level commands because they're admin operations, not
 # day-to-day usage. Try `researgent db --help`.
@@ -1001,6 +1028,14 @@ def research(
                             console.print(
                                 "\n[dim]auto-save skipped:[/dim] LLM-priors answer "
                                 "(no sources to cite — would risk poisoning the brain)"
+                            )
+                        elif not result.domain_scope or len(result.domain_scope) != 1:
+                            n = len(result.domain_scope or [])
+                            console.print(
+                                f"\n[dim]auto-save skipped:[/dim] run had "
+                                f"[yellow]{n if n else 'no'}[/yellow] resolved "
+                                f"domain(s). Per-domain layout requires exactly one. "
+                                f"Pass [cyan]--domain agentic_ai|quant_finance|time_series[/cyan]."
                             )
                         elif not should_auto_save(
                             confidence=result.confidence,

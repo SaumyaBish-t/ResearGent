@@ -231,6 +231,12 @@ def stream_agent(
             reason = "auto_save_disabled"
         elif final_state.get("error") == "no_sources_used_llm_priors":
             reason = "llm_priors_no_sources"
+        elif not (
+            (final_state.get("domain_scope") or [])
+            and len(final_state.get("domain_scope") or []) == 1
+        ):
+            n = len(final_state.get("domain_scope") or [])
+            reason = f"no_single_domain_{n}_resolved"
         elif not should_auto_save(
             confidence=final_state.get("confidence") or "",
             error=final_state.get("error"),

@@ -32,9 +32,15 @@ from pathlib import Path
 
 
 # All ingest roots sit under one parent so `researgent ingest-domains` can
-# walk the parent and dispatch by subfolder name. Keeping the parent name
-# stable means an op can grep `data/papers/` and see the whole brain.
-PAPERS_ROOT = Path("data") / "papers"
+# Each domain owns one folder under DATA_ROOT with three subfolders:
+#   data/{domain}/papers/          ← PDF ingest (input)
+#   data/{domain}/abstract_notes/  ← abstract-only paper cards from S2 seed
+#   data/{domain}/research_data/   ← auto-saved research run notes (output)
+#
+# This consolidation replaces the old split layout where PDFs lived under
+# `data/papers/{domain}/` and notes under `data/notes/{domain}/`. One root
+# per domain makes the brain easier to inspect, backup, and migrate.
+DATA_ROOT = Path("data")
 
 
 @dataclass(frozen=True)
@@ -65,26 +71,64 @@ class Domain:
     # didn't pass --domain explicitly. Case-insensitive substring match.
     routing_keywords: tuple[str, ...] = ()
 
+    # ---- New consolidated layout (data/{domain}/{papers,abstract_notes,research_data}) ----
+
+    @property
+    def root_dir(self) -> Path:
+        """The one folder this domain owns: data/{id}/"""
+        return DATA_ROOT / self.id
+
+    @property
+    def papers_dir(self) -> Path:
+        """PDF ingest input — data/{id}/papers/"""
+        return self.root_dir / "papers"
+
+    @property
+    def abstract_notes_dir(self) -> Path:
+        """
+        Abstract-only paper cards from the S2 seed pass —
+        data/{id}/abstract_notes/
+
+        Used when a paper has no open-access PDF: we store a markdown
+        card with title + abstract + citation count + URL so the
+        ingest pipeline can still chunk + embed it as evidence.
+        Previously known as `_abstracts` under `papers_dir`.
+        """
+        return self.root_dir / "abstract_notes"
+
+    @property
+    def research_data_dir(self) -> Path:
+        """
+        Auto-saved research run notes — data/{id}/research_data/YYYY-MM-DD/
+
+        Output side of the brain. Kept separate from `papers_dir` so a
+        future ingest pass over the PDFs doesn't pick up the notes we
+        wrote ABOUT that corpus and create a feedback loop.
+        """
+        return self.root_dir / "research_data"
+
+    # ---- Backwards-compat aliases ----
+    #
+    # Kept so callers that haven't migrated to the new property names
+    # still work. New code should use papers_dir / abstract_notes_dir /
+    # research_data_dir directly.
+
     @property
     def ingest_dir(self) -> Path:
-        """Where PDFs for this domain live on disk."""
-        return PAPERS_ROOT / self.id
+        """DEPRECATED alias for `papers_dir`."""
+        return self.papers_dir
 
     @property
     def notes_dir(self) -> Path:
-        """
-        Where ResearGent auto-saved research notes for this domain live.
+        """DEPRECATED alias for `research_data_dir`."""
+        return self.research_data_dir
 
-        Kept distinct from `ingest_dir` so PDFs (input) and generated
-        research notes (output) don't share a folder — a future ingest
-        pass over `data/papers/{domain}/` should not pick up the notes
-        we wrote about that same corpus.
 
-        Layout:   data/notes/{domain_id}/YYYY-MM-DD/<note>.md
-
-        Returned path may not yet exist; the vault writer creates it.
-        """
-        return Path("data") / "notes" / self.id
+# Legacy constant kept so older callers that imported PAPERS_ROOT still
+# resolve. Points at the OLD location used by the legacy-layout migrator.
+# New code MUST use Domain.papers_dir instead — there is no longer a single
+# "papers root" since papers now live under each domain's own folder.
+PAPERS_ROOT = DATA_ROOT / "papers"
 
 
 DOMAINS: dict[str, Domain] = {
@@ -181,6 +225,103 @@ def get_domain(domain_id: str) -> Domain:
             f"unknown domain {domain_id!r}; known: {', '.join(DOMAINS.keys())}"
         )
     return DOMAINS[domain_id]
+
+
+def migrate_legacy_layout(*, verbose: bool = False) -> list[str]:
+    """
+    Migrate the old split layout to the consolidated per-domain layout.
+
+    OLD:
+      data/papers/{domain}/*.pdf
+      data/papers/{domain}/_abstracts/*.md
+      data/notes/{domain}/YYYY-MM-DD/*.md
+
+    NEW:
+      data/{domain}/papers/*.pdf
+      data/{domain}/abstract_notes/*.md
+      data/{domain}/research_data/YYYY-MM-DD/*.md
+
+    Idempotent: no-op if nothing legacy exists. Returns a list of human-
+    readable lines describing what was moved, so the CLI can surface it.
+    Safe to call on every startup — costs a few `os.path.exists` checks
+    in the steady state.
+    """
+    import shutil
+
+    moves: list[str] = []
+
+    for dom in DOMAINS.values():
+        legacy_papers = PAPERS_ROOT / dom.id
+        legacy_abstracts = legacy_papers / "_abstracts"
+        legacy_notes = DATA_ROOT / "notes" / dom.id
+
+        # 1. PDFs:  data/papers/{id}/*.pdf  →  data/{id}/papers/
+        if legacy_papers.exists() and legacy_papers.is_dir():
+            pdfs = [p for p in legacy_papers.iterdir() if p.is_file() and p.suffix.lower() == ".pdf"]
+            if pdfs:
+                dom.papers_dir.mkdir(parents=True, exist_ok=True)
+                for pdf in pdfs:
+                    target = dom.papers_dir / pdf.name
+                    if not target.exists():
+                        shutil.move(str(pdf), str(target))
+                        moves.append(f"  {pdf}  →  {target}")
+
+        # 2. abstract cards:  data/papers/{id}/_abstracts/*  →  data/{id}/abstract_notes/
+        if legacy_abstracts.exists() and legacy_abstracts.is_dir():
+            cards = [p for p in legacy_abstracts.iterdir() if p.is_file()]
+            if cards:
+                dom.abstract_notes_dir.mkdir(parents=True, exist_ok=True)
+                for c in cards:
+                    target = dom.abstract_notes_dir / c.name
+                    if not target.exists():
+                        shutil.move(str(c), str(target))
+                        moves.append(f"  {c}  →  {target}")
+            # Remove the now-empty _abstracts folder so the old layout fully
+            # collapses. shutil.rmtree is safe here because we already moved
+            # every file out.
+            try:
+                if not any(legacy_abstracts.iterdir()):
+                    legacy_abstracts.rmdir()
+            except OSError:
+                pass
+
+        # 3. research notes:  data/notes/{id}/  →  data/{id}/research_data/
+        if legacy_notes.exists() and legacy_notes.is_dir():
+            for child in legacy_notes.iterdir():
+                target = dom.research_data_dir / child.name
+                if not target.exists():
+                    dom.research_data_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(child), str(target))
+                    moves.append(f"  {child}  →  {target}")
+            try:
+                if not any(legacy_notes.iterdir()):
+                    legacy_notes.rmdir()
+            except OSError:
+                pass
+
+        # 4. clean up an empty data/papers/{id}/ shell if everything moved.
+        try:
+            if legacy_papers.exists() and not any(legacy_papers.iterdir()):
+                legacy_papers.rmdir()
+        except OSError:
+            pass
+
+    # Try to remove the now-empty parent legacy roots so the layout fully
+    # collapses to the new shape. Skipped silently if other untracked stuff
+    # still lives there.
+    for legacy_root in (PAPERS_ROOT, DATA_ROOT / "notes"):
+        try:
+            if legacy_root.exists() and not any(legacy_root.iterdir()):
+                legacy_root.rmdir()
+        except OSError:
+            pass
+
+    if verbose and moves:
+        print(f"[migrate] moved {len(moves)} item(s) to new per-domain layout:")
+        for m in moves:
+            print(m)
+
+    return moves
 
 
 def infer_domains_from_query(query: str, *, min_hits: int = 1) -> list[str]:

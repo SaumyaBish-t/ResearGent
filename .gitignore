@@ -31,20 +31,49 @@ notes/*
 !notes/sources/.gitkeep
 
 # Data — never commit corpora, vector stores, or downloaded papers
-data/papers/*
-!data/papers/.gitkeep
-# Phase 15: preserve the three per-domain ingest roots in git so a fresh
-# clone has the topology ready for `researgent ingest-domains` / `seed`.
-# The directories are tracked; their PDF/MD contents are not.
-!data/papers/agentic_ai/
-!data/papers/quant_finance/
-!data/papers/time_series/
-data/papers/agentic_ai/*
-data/papers/quant_finance/*
-data/papers/time_series/*
-!data/papers/agentic_ai/.gitkeep
-!data/papers/quant_finance/.gitkeep
-!data/papers/time_series/.gitkeep
+# Phase 16: consolidated per-domain layout. Each domain owns one folder
+# under data/ with three subfolders (papers/, abstract_notes/,
+# research_data/). Track the directory shape so a fresh clone has the
+# topology ready for `researgent ingest-domains` / `seed`; ignore content.
+data/*
+!data/.gitkeep
+!data/agentic_ai/
+!data/quant_finance/
+!data/time_series/
+data/agentic_ai/*
+data/quant_finance/*
+data/time_series/*
+!data/agentic_ai/papers/
+!data/agentic_ai/abstract_notes/
+!data/agentic_ai/research_data/
+!data/quant_finance/papers/
+!data/quant_finance/abstract_notes/
+!data/quant_finance/research_data/
+!data/time_series/papers/
+!data/time_series/abstract_notes/
+!data/time_series/research_data/
+data/agentic_ai/papers/*
+data/agentic_ai/abstract_notes/*
+data/agentic_ai/research_data/*
+data/quant_finance/papers/*
+data/quant_finance/abstract_notes/*
+data/quant_finance/research_data/*
+data/time_series/papers/*
+data/time_series/abstract_notes/*
+data/time_series/research_data/*
+!data/agentic_ai/papers/.gitkeep
+!data/agentic_ai/abstract_notes/.gitkeep
+!data/agentic_ai/research_data/.gitkeep
+!data/quant_finance/papers/.gitkeep
+!data/quant_finance/abstract_notes/.gitkeep
+!data/quant_finance/research_data/.gitkeep
+!data/time_series/papers/.gitkeep
+!data/time_series/abstract_notes/.gitkeep
+!data/time_series/research_data/.gitkeep
+# Legacy paths kept ignored so any leftover stuff doesn't get committed
+# during migration.
+data/papers/
+data/notes/
 data/chroma_db/
 data/store/
 # Phase 12: raw bytes by content_hash, never committed

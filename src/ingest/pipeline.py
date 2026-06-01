@@ -236,25 +236,45 @@ def _rebuild_bm25_from_chroma() -> int:
 
 def _infer_domain_from_path(path: Path) -> str | None:
     """
-    Pull the domain id off a path that lives under `data/papers/<domain>/...`.
+    Pull the domain id off a PDF path. Recognizes both layouts:
+
+      NEW (consolidated):  data/{domain}/papers/foo.pdf
+      OLD (legacy split):  data/papers/{domain}/foo.pdf
 
     We do this passively so the user can drop a PDF into a domain folder
     and `researgent ingest` Just Works without an explicit --domain flag.
     Returns None when the path isn't inside a registered domain subdir —
     the caller then falls back to whatever it was passed explicitly.
     """
-    from src.domains import DOMAINS  # local import — avoids cycles + cold start cost
+    from src.domains import DOMAINS, DATA_ROOT
 
+    resolved = path.resolve()
+
+    # NEW layout:  data/{domain}/papers/...
     try:
-        rel = path.resolve().relative_to(PAPERS_ROOT.resolve())
+        rel = resolved.relative_to(DATA_ROOT.resolve())
+        parts = rel.parts
+        # parts == ("agentic_ai", "papers", "foo.pdf"). Match if [0] is a
+        # registered domain AND [1] is one of our known per-domain subfolders.
+        if (
+            len(parts) >= 2
+            and parts[0] in DOMAINS
+            and parts[1] in ("papers", "abstract_notes")
+        ):
+            return parts[0]
     except ValueError:
-        # Path isn't under data/papers/ at all (e.g. an ad-hoc PDF on the desktop).
-        return None
-    parts = rel.parts
-    if not parts:
-        return None
-    candidate = parts[0]
-    return candidate if candidate in DOMAINS else None
+        pass
+
+    # OLD layout fallback:  data/papers/{domain}/...
+    try:
+        rel = resolved.relative_to(PAPERS_ROOT.resolve())
+        parts = rel.parts
+        if parts and parts[0] in DOMAINS:
+            return parts[0]
+    except ValueError:
+        pass
+
+    return None
 
 
 # `PAPERS_ROOT` is owned by `src.domains` (the single source of truth for

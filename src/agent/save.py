@@ -120,40 +120,34 @@ def auto_save_run(
     if not answer or len(answer.strip()) < 40:
         return None
 
-    # DOMAIN-AWARE SAVE ROUTING.
+    # DOMAIN-SCOPED SAVE — no global vault fallback.
     #
-    # If the run had a single explicit domain (`--domain agentic_ai` etc.),
-    # save under that domain's local data folder so the brain organizes
-    # by topic:
-    #     data/notes/{domain_id}/YYYY-MM-DD/<note>.md
-    # instead of the flat:
-    #     <vault>/ResearGent/YYYY-MM-DD/<note>.md
+    # The brain now organizes EXCLUSIVELY by domain. Every saved run lives
+    # under exactly one domain's research_data folder:
+    #     data/{domain_id}/research_data/YYYY-MM-DD/<note>.md
     #
-    # Multi-domain runs (rare — only when the user passes a comma-separated
-    # --domain or the auto-router picks 2+) fall back to the global vault
-    # path so we don't have to duplicate the note across N domain folders.
-    # Zero-domain runs (no --domain, no auto-router match) also use the
-    # global vault — same as before.
-    notes_folder: str | None = None
-    output_subfolder = settings.obsidian_output_folder
-    if domain_scope and len(domain_scope) == 1:
-        try:
-            from src.domains import get_domain
-
-            dom = get_domain(domain_scope[0])
-            notes_folder = str(dom.notes_dir.resolve())
-            # Inside the domain folder we still want the daily-grouped
-            # subfolder behavior, but we drop the "ResearGent" prefix —
-            # the domain folder itself already says "this is a researgent
-            # corpus", so an extra layer just adds noise to the path.
-            output_subfolder = ""
-        except Exception:
-            notes_folder = None
-
-    if not notes_folder:
-        notes_folder = settings.resolve_notes_folder()
-    if not notes_folder:
+    # Runs without a single resolved domain (multi-domain or no-domain)
+    # are NOT auto-saved. Rationale: a note that fits two domains either
+    # belongs in both (and needs deduping infrastructure we don't have)
+    # or really belongs in neither (a question this corpus isn't shaped
+    # for). Better to skip than to write into a global bucket that
+    # nothing ever reads.
+    if not domain_scope:
         return None
+    if len(domain_scope) != 1:
+        return None
+
+    try:
+        from src.domains import get_domain
+
+        dom = get_domain(domain_scope[0])
+    except Exception:
+        return None
+
+    notes_folder = str(dom.research_data_dir.resolve())
+    # No subfolder prefix inside the domain root — `data/{id}/research_data/`
+    # is already an explicit-enough namespace.
+    output_subfolder = ""
 
     try:
         return write_run_to_vault(
