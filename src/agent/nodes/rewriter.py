@@ -148,11 +148,23 @@ def rewrite_and_retry(state: AgentState) -> dict[str, Any]:
         )
 
     # Persist all fresh retrievals as refs (local hybrid hits become free
-    # local refs via chroma_id). Then merge over the prior ref map.
+    # local refs via chroma_id). Then ACCUMULATE per key — do NOT overwrite.
+    #
+    # The previous `.update(new_refs)` clobber was silently evicting the
+    # cascade-fetched paper chunks: paper_discovery attaches PaperChunk refs
+    # to the ORIGINAL question key, and when this rewriter then re-retrieves
+    # the same key (because the post-paper Critic verdict was still medium),
+    # `dict.update` replaced the paper chunks with fresh local hybrid hits.
+    # The final generator never saw arxiv:2308.08155 even after we paid the
+    # full cost of fetching, parsing, embedding, and grading it.
+    #
+    # Accumulate per key (same pattern paper_discovery uses) so cascade
+    # discoveries persist across rewrite waves.
     merged_refs = dict(refs_by_subq)
     if new_chunks_for_persist:
         new_refs = persist_mixed(thread_id, new_chunks_for_persist)
-        merged_refs.update(new_refs)
+        for k, fresh in new_refs.items():
+            merged_refs[k] = list(merged_refs.get(k) or []) + list(fresh or [])
 
     return {
         "chunk_refs_by_subq": merged_refs,
