@@ -269,10 +269,21 @@ def _to_hydrated(c: Any) -> HydratedChunk:
             source_file=c.url, signal=c.signal, url=c.url,
         )
     if name == "PaperChunk":
+        # CRITICAL: pass `chunk_idx` through as `chunk_index`. Without it
+        # every slice of the same paper defaults to chunk_index = -1, and
+        # the generator's dedup key `(source_file, chunk_index)` collapses
+        # all 5 AutoGen slices into ONE citation tag — only the FIRST
+        # slice's text reaches the LLM, the rest are silently overwritten
+        # by the `chunk_to_tag` first-write-wins map in _assign_citations.
+        # That's why even when paper_discovery succeeded + critic kept
+        # them + generator received them, the answer cited web URLs
+        # (every web/local chunk has distinct chunk_index) instead of
+        # the actual PaperChunk slices.
         return HydratedChunk(
             text=c.text, citation=c.citation, doc_title=c.doc_title,
             source_file=c.url or c.title, signal=c.signal,
             url=c.url or c.pdf_url,
+            chunk_index=getattr(c, "chunk_idx", 0),
         )
     if name == "GraphChunk":
         return HydratedChunk(
