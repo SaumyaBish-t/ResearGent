@@ -56,12 +56,48 @@ YEAR / RECENCY DISCIPLINE — read carefully.
        "advancements published in 2026 include..." when only an older paper is
        cited for that bullet.
 - Do NOT repeat the same point under multiple section headers. If two sub-questions
-  produce overlapping answers, merge them into one section."""
+  produce overlapping answers, merge them into one section.
+
+PRIMARY SOURCE PREFERENCE — read carefully.
+- Sources are presented in priority order: PAPER PDFs first (low S<n>),
+  then WEB summaries, then LOCAL notes. Each source header tells you the
+  type: lines starting with `arxiv:` or a semanticscholar URL are
+  primary-source PDF excerpts the cascade fetched live for THIS query.
+- When the user names a specific paper, framework, author, or method
+  (e.g. "the AutoGen paper by Wu et al.", "ReAct's planning step",
+  "BERT's masking objective"), you MUST prefer citations to the
+  primary-source PDF chunks over web summaries that paraphrase the
+  same content. Cite [S1]-[S5] for main claims when those slots are
+  paper:* — the web summaries are corroboration, not the source of record.
+- If a web source and a paper source say the same thing, cite the paper.
+  Web sources are only the right citation when the claim is about the
+  framework's ECOSYSTEM (tutorials, blog reception, third-party use)
+  rather than the paper's content itself."""
 
 
 def _chunk_key(c: HydratedChunk) -> tuple[str, int]:
     """Stable dedup key. All hydrated chunks expose source_file + chunk_index."""
     return (c.source_file, c.chunk_index)
+
+
+def _citation_priority(c: HydratedChunk) -> int:
+    """
+    Order chunks get [S<n>] tags assigned in. Lower priority = lower tag
+    number = LLM cites first.
+
+    Why this matters: empirically the generator LLM cites in numerical
+    order. When paper:* chunks got high tags (S20+) because they were
+    inserted last into chunks_by_subq, the LLM cited the web chunks
+    (S1-S3) for the main claims even though it had the actual paper
+    text available at S20+. Promoting paper:* to S1-S5 makes the
+    generator cite primary sources first when both are present.
+    """
+    sig = (getattr(c, "signal", "") or "").lower()
+    if sig.startswith("paper:"):
+        return 0  # primary sources first — the paper the user named
+    if sig.startswith("web:"):
+        return 1  # web summaries second
+    return 2      # local Chroma/BM25 last (these are background context)
 
 
 def _assign_citations(
@@ -76,29 +112,57 @@ def _assign_citations(
       subq_to_tags: {"sub_q_1": ["S1","S3"], "sub_q_2": ["S2","S3"]}
 
     A chunk that appears under multiple sub-questions gets ONE tag, reused.
+
+    Tag numbering order: paper:* → web:* → local. The generator LLM cites
+    in numerical order, so putting primary sources at S1-S5 gives them
+    the citation slots the model uses for main claims.
     """
     citation_map: dict[str, HydratedChunk] = {}
     citation_ref_map: dict[str, dict[str, str]] = {}
     chunk_to_tag: dict[tuple[str, int], str] = {}
     subq_to_tags: dict[str, list[str]] = {}
 
+    # PRIORITY PASS: assign tags to all paper:* chunks across all sub-Qs
+    # FIRST, then web:*, then local. Within each priority bucket we
+    # preserve sub-Q grouping order so the doc structure the LLM sees
+    # is still per-sub-Q.
+    #
+    # We do this in two phases:
+    #   1. Walk every sub-Q's chunks once, ORDERED BY PRIORITY, and
+    #      assign tags. This determines what S1, S2, S3... map to.
+    #   2. Walk every sub-Q's chunks again in ORIGINAL order to build
+    #      subq_to_tags. The LLM sees per-sub-Q sections with the
+    #      paper:* chunks naturally bearing low tag numbers.
+
+    # Phase 1: tag assignment by priority bucket, preserving sub-Q +
+    # within-sub-Q order within each bucket.
     next_n = 1
-    for sq, chunks in chunks_by_subq.items():
-        tags_for_this_sq: list[str] = []
-        refs_for_sq = refs_by_subq.get(sq) or []
-        for i, c in enumerate(chunks):
-            key = _chunk_key(c)
-            if key not in chunk_to_tag:
+    for priority in (0, 1, 2):
+        for sq, chunks in chunks_by_subq.items():
+            refs_for_sq = refs_by_subq.get(sq) or []
+            for i, c in enumerate(chunks):
+                if _citation_priority(c) != priority:
+                    continue
+                key = _chunk_key(c)
+                if key in chunk_to_tag:
+                    continue
                 tag = f"S{next_n}"
                 chunk_to_tag[key] = tag
                 citation_map[tag] = c
-                # Pair the tag with the ORIGINAL ref so state can store the
-                # citation map as pointers (kept under `citation_refs`).
                 if i < len(refs_for_sq):
                     citation_ref_map[tag] = refs_for_sq[i]
                 next_n += 1
-            tags_for_this_sq.append(chunk_to_tag[key])
+
+    # Phase 2: build subq_to_tags in ORIGINAL chunk order so the
+    # per-sub-Q context blocks read naturally.
+    for sq, chunks in chunks_by_subq.items():
+        tags_for_this_sq: list[str] = []
+        for c in chunks:
+            key = _chunk_key(c)
+            if key in chunk_to_tag:
+                tags_for_this_sq.append(chunk_to_tag[key])
         subq_to_tags[sq] = tags_for_this_sq
+
     return citation_map, citation_ref_map, subq_to_tags
 
 
