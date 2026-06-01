@@ -400,6 +400,29 @@ def critique(state: AgentState) -> dict[str, Any]:
         grades, reasoning, ms, prompt_chars = _grade_one_subq(sq, chunks)
         total_ms += ms
         total_prompt_chars += prompt_chars
+
+        # CASCADE-FETCHED PAPER FLOOR: never drop a paper:* chunk to
+        # "irrelevant" — at worst demote to "partial" so it survives
+        # the filter on line 412.
+        #
+        # Why: by the time a paper:* chunk reaches the Critic, the
+        # cascade has paid S2 round-trip + PDF download + parse +
+        # semantic-chunk + embed for it. The paper itself was chosen
+        # because it ranked top against the user's named entity (e.g.
+        # "AutoGen paper by Wu et al." → arxiv:2308.08155). Empirically
+        # the 70B Critic on llama-3.3 still rejects ~half of cascade
+        # PDF slices when web summaries are present in the same prompt —
+        # it prefers cleaner prose. That's a model-judgment bias we
+        # don't want to trust to evict evidence the user explicitly
+        # asked for. Letting paper:* through as "partial" gives the
+        # generator a fair shot at citing it; the generator's own
+        # prompt-budget pressure will naturally down-weight slices
+        # that genuinely don't help.
+        for i, c in enumerate(chunks):
+            sig = (getattr(c, "signal", "") or "").lower()
+            if sig.startswith("paper:") and i < len(grades) and grades[i] == "irrelevant":
+                grades[i] = "partial"
+
         all_grades.extend(grades)
         all_graded_chunks.extend(chunks)
         if reasoning:
