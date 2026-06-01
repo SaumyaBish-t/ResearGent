@@ -89,6 +89,17 @@ def auto_save_run(
     if not should_auto_save(confidence=confidence, error=error):
         return None
 
+    # Refuse to write a blank/near-blank note to the vault. The AutoGen
+    # run that triggered this guard had verdict=high (threshold passed,
+    # auto-save fired) but the generator returned an empty draft after
+    # 139s — the resulting .md was empty. An empty note in Obsidian is
+    # worse than no note: it shows up in search results and crowds the
+    # daily folder. ~40 chars is the floor for "actually wrote something"
+    # (header + one short sentence). Below that, treat it as a failed
+    # generation and skip the save.
+    if not answer or len(answer.strip()) < 40:
+        return None
+
     notes_folder = settings.resolve_notes_folder()
     if not notes_folder:
         return None

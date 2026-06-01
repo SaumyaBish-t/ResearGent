@@ -189,10 +189,31 @@ def _assign_citations(
     return citation_map, citation_ref_map, subq_to_tags
 
 
+# Per-chunk char cap for the generator's context block.
+#
+# Why a cap: with the cascade running end-to-end and the
+# paper-floor + priority-tag changes landing more chunks at the
+# generator (last AutoGen run had 26 sources at full text), the
+# unbounded `c.text.strip()` dump pushed the reasoning prompt to
+# ~50K chars. The downstream Cerebras/Groq llama-3.3-70b call
+# took 139s and returned an empty draft — auto-save then wrote an
+# empty note to the vault, which is the bug the user just reported.
+#
+# 1500 chars per chunk × ~25 chunks ≈ 37K of context + 5K system
+# prompt + question = ~45K total → ~11K tokens, comfortably inside
+# the model's window and inside Groq's daily TPD budget. The
+# critic uses 800 chars/chunk because it grades; the generator
+# needs more because it must quote specific terms, so we settled
+# in between.
+_GEN_CHUNK_CHAR_CAP = 1500
+
+
 def _build_context_block(
     chunks_by_subq: dict[str, list[HydratedChunk]],
     citation_map: dict[str, HydratedChunk],
     subq_to_tags: dict[str, list[str]],
+    *,
+    chunk_char_cap: int = _GEN_CHUNK_CHAR_CAP,
 ) -> str:
     """
     Group context by sub-question so the model writes structured answers.
@@ -223,7 +244,10 @@ def _build_context_block(
             header = f"[{tag}] {c.citation}"
             if c.doc_title:
                 header += f" -- {c.doc_title}"
-            body_parts.append(f"{header}\n{c.text.strip()}")
+            body_text = c.text.strip()
+            if len(body_text) > chunk_char_cap:
+                body_text = body_text[:chunk_char_cap] + " […truncated]"
+            body_parts.append(f"{header}\n{body_text}")
             body_parts.append("---")
         if body_parts[-1] == "---":
             body_parts.pop()
@@ -249,15 +273,20 @@ def generate(state: AgentState) -> dict[str, Any]:
     # chunks) for state, so the post-generator checkpoint stays lean.
     chunks_by_subq = hydrate(refs_by_subq)
     citation_map, citation_refs, subq_to_tags = _assign_citations(chunks_by_subq, refs_by_subq)
-    context_block = _build_context_block(chunks_by_subq, citation_map, subq_to_tags)
 
-    user_msg = f"""Question: {question}
+    def _build_prompt(chunk_cap: int) -> tuple[str, int]:
+        ctx = _build_context_block(
+            chunks_by_subq, citation_map, subq_to_tags, chunk_char_cap=chunk_cap
+        )
+        msg = (
+            f"Question: {question}\n\n"
+            f"Evidence (sources are numbered [S<n>] and grouped by sub-question):\n\n"
+            f"{ctx}\n\n"
+            f"Write the answer now. Cite every claim with the [S<n>] tags above."
+        )
+        return msg, len(SYSTEM_PROMPT) + len(msg)
 
-Evidence (sources are numbered [S<n>] and grouped by sub-question):
-
-{context_block}
-
-Write the answer now. Cite every claim with the [S<n>] tags above."""
+    user_msg, prompt_chars = _build_prompt(_GEN_CHUNK_CHAR_CAP)
 
     t0 = time.perf_counter()
     answer = chat(
@@ -269,6 +298,42 @@ Write the answer now. Cite every claim with the [S<n>] tags above."""
         temperature=0.1,
         max_tokens=1200,
     )
+
+    # EMPTY-DRAFT GUARD + RETRY.
+    #
+    # Symptom we hit on the AutoGen run: generator returned "" after
+    # 139s with 26 sources at full text. The reasoning LLM (Cerebras
+    # llama-3.3-70b) silently produces empty output when the prompt
+    # exceeds its happy context band — and downstream auto_save then
+    # wrote an empty .md to the vault because verdict was high.
+    #
+    # On empty output, retry once with a tighter per-chunk cap (1500 →
+    # 600). 600 chars × 25 chunks ≈ 15K of context — well inside
+    # any reasoning model's working range. If THAT also comes back
+    # empty, we emit an explicit "couldn't synthesize" answer instead
+    # of saving blank.
+    if not answer.strip():
+        retry_msg, retry_chars = _build_prompt(chunk_cap=600)
+        answer = chat(
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": retry_msg},
+            ],
+            tier=ModelTier.REASONING,
+            temperature=0.1,
+            max_tokens=1200,
+        )
+        # Track for the trace so it's visible when the shrink happened.
+        prompt_chars = retry_chars
+
+    if not answer.strip():
+        # Both attempts came back empty. Refuse to save a blank note.
+        answer = (
+            "Generator returned an empty draft after retry. This usually means "
+            "the reasoning LLM choked on prompt size or hit a rate limit. "
+            "Try re-running, or lower the per-paper chunk count in the cascade."
+        )
+
     dur_ms = int((time.perf_counter() - t0) * 1000)
 
     return {
@@ -280,6 +345,11 @@ Write the answer now. Cite every claim with the [S<n>] tags above."""
                 "duration_ms": dur_ms,
                 "n_sources": len(citation_refs),
                 "answer_chars": len(answer),
+                # Surface prompt size so day-budget pressure + retries are
+                # observable. If `prompt_chars` is the shrink-retry value,
+                # we know the first attempt came back empty.
+                "prompt_chars": prompt_chars,
+                "est_tokens": prompt_chars // 4,
             }
         ],
     }
