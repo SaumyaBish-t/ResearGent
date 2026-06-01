@@ -204,6 +204,11 @@ def _grade_one_subq(
     # at positions 10-25 and never see the LLM — they get the silent
     # "partial" auto-fill on line "Extend with partial ..." below.
     #
+    # CRITICAL: the caller `critique()` slices `original_refs[i]` by
+    # grade index `i`. So whatever grades-list we RETURN must be aligned
+    # with the ORIGINAL chunk order, not the reordered one. We reorder
+    # only for the LLM call, then undo the permutation on the way out.
+    #
     # The reorder is stable within each bucket so the upstream RRF +
     # paper-rerank ordering is preserved.
     def _bucket(c: HydratedChunk) -> int:
@@ -214,10 +219,12 @@ def _grade_one_subq(
             return 1  # web fallbacks second
         return 2      # local Chroma/BM25 chunks last
 
-    chunks_ordered = sorted(enumerate(chunks), key=lambda iv: (_bucket(iv[1]), iv[0]))
-    chunks = [c for _, c in chunks_ordered]
+    # Build the LLM-call order with a permutation map back to the input.
+    # `perm[reordered_idx] = original_idx`
+    perm = sorted(range(len(chunks)), key=lambda i: (_bucket(chunks[i]), i))
+    reordered = [chunks[i] for i in perm]
 
-    chunks_to_grade = chunks[:MAX_CHUNKS_PER_CALL]
+    chunks_to_grade = reordered[:MAX_CHUNKS_PER_CALL]
     numbered = "\n\n".join(
         f"[Chunk {i+1}] {_hdr(c)}\n{c.text.strip()[:MAX_CHUNK_CHARS]}"
         for i, c in enumerate(chunks_to_grade)
@@ -251,11 +258,25 @@ def _grade_one_subq(
         # LLM returned wrong-length list — fill/truncate to the GRADED slice.
         grades = (grades + ["partial"] * len(chunks_to_grade))[: len(chunks_to_grade)]
         reasoning = f"(length mismatch; padded) {reasoning}"
-    if len(chunks) > len(chunks_to_grade):
+    if len(reordered) > len(chunks_to_grade):
         # Extend with "partial" for the chunks we deliberately skipped.
-        grades = grades + ["partial"] * (len(chunks) - len(chunks_to_grade))
+        grades = grades + ["partial"] * (len(reordered) - len(chunks_to_grade))
 
-    return grades, reasoning, dur_ms, prompt_chars
+    # Undo the permutation so `grades[i]` aligns with the ORIGINAL chunks[i]
+    # — that's the contract the caller `critique()` relies on when it slices
+    # `original_refs[i]` to build `kept_refs`. Without this, paper:* chunks
+    # the LLM graded "relevant" at the front of the reordered list would be
+    # attributed to (and kept as) whatever local chunk happened to sit at
+    # the same index in the input — a silent eviction.
+    #
+    # `perm[reordered_idx] = original_idx`, so:
+    #   grades_in_original_order[original_idx] = grades[reordered_idx]
+    grades_in_original_order: list[str] = ["partial"] * len(chunks)
+    for reordered_idx, original_idx in enumerate(perm):
+        if reordered_idx < len(grades):
+            grades_in_original_order[original_idx] = grades[reordered_idx]
+
+    return grades_in_original_order, reasoning, dur_ms, prompt_chars
 
 
 def _has_external_fresh_source(chunks: list[HydratedChunk]) -> bool:
