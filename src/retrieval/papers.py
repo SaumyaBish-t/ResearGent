@@ -219,9 +219,20 @@ def _arxiv_search(query: str, max_results: int = 5) -> list[PaperChunk]:
                     pdf_url=r.pdf_url or "",
                 )
             )
-    except Exception:
-        # Non-fatal — discovery is a fallback path; return whatever we got.
-        pass
+    except Exception as e:
+        # Previously a silent `pass` — but a flapping arXiv quietly returning
+        # 0 hits is exactly the regression we just hit on the AutoGen query
+        # (5 hits → 0 hits between runs with no other changes). Log the
+        # actual exception + traceback into paper_cascade.log so we can
+        # diagnose it instead of guessing.
+        _debug(f"⚠️ arXiv search failed q={query!r}: {type(e).__name__}: {e}")
+        traceback.print_exc(file=sys.stderr)
+    if not out:
+        # Empty result is by itself a signal — arXiv normally returns SOMETHING
+        # for any well-formed natural-language query. A 0-hit response usually
+        # means a 429 rate-limit, transient 5xx, or a malformed query the
+        # arxiv client swallowed without raising.
+        _debug(f"[arxiv] WARNING: 0 results for q={query!r} — check rate limits / connectivity")
     return out
 
 
