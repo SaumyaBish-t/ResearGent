@@ -230,16 +230,29 @@ class Settings(BaseSettings):
     # written back as a note in the notes folder — the brain grows
     # automatically without you clicking "save" each time.
     auto_save_to_notes: bool = True
-    # Minimum Critic verdict required to auto-save. Conservative default
-    # ("high") prevents low-confidence answers from polluting the brain
-    # and propagating errors into future queries.
+    # Minimum Critic verdict required to auto-save.
     #   high     — only save when Critic was satisfied with retrieval
-    #   medium   — save unless retrieval was clearly poor
+    #   medium   — save unless retrieval was clearly poor (NEW DEFAULT)
     #   low      — save anything that produced cited sources
     #   always   — save even thin/disagreement-flagged answers
     # Pure-LLM-priors answers (no sources at all) are NEVER auto-saved
     # regardless of this setting — they'd inject hallucinations.
-    auto_save_min_confidence: str = "high"
+    auto_save_min_confidence: str = "medium"
+
+    # When the verdict is exactly `medium`, ALSO require the Critic's
+    # weighted score to be at least this floor before auto-saving.
+    # The `medium` band covers everything from "barely any signal"
+    # (score ~0.15, two partials and lots of irrelevants) up to
+    # "almost high" (score ~0.69). Saving the bottom of that range
+    # injects half-grounded answers into the brain; saving the top
+    # captures genuinely useful runs that just barely missed the
+    # external-fresh HIGH threshold of 0.70.
+    #
+    # A `high` verdict bypasses this floor (it already cleared a
+    # stricter score gate upstream); a `low` verdict bypasses it the
+    # other way (already rejected). So this is purely a within-medium
+    # tightener.
+    auto_save_min_score: float = 0.50
 
     def resolve_notes_folder(self) -> str | None:
         """Pick the active notes folder per the resolution order above."""

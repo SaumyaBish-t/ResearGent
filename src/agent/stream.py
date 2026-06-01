@@ -214,6 +214,7 @@ def stream_agent(
         reflection_attempts=int(final_state.get("reflection_attempts") or 0),
         run_id=rid,
         error=final_state.get("error"),
+        score=float(final_state.get("critic_score") or 0.0),
     )
     if saved_path is not None:
         yield {
@@ -232,10 +233,13 @@ def stream_agent(
         elif not should_auto_save(
             confidence=final_state.get("confidence") or "",
             error=final_state.get("error"),
+            score=float(final_state.get("critic_score") or 0.0),
         ):
             reason = (
                 f"confidence_{final_state.get('confidence') or 'unknown'}_"
-                f"below_{_settings.auto_save_min_confidence}"
+                f"score_{final_state.get('critic_score') or 0.0:.3f}_"
+                f"below_{_settings.auto_save_min_confidence}/"
+                f"{_settings.auto_save_min_score}"
             )
         else:
             reason = "no_notes_folder_configured"

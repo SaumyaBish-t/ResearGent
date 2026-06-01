@@ -452,6 +452,13 @@ def critique(state: AgentState) -> dict[str, Any]:
     return {
         "chunk_refs_by_subq": new_refs_by_subq,
         "confidence": verdict,
+        # Surface the latest weighted score onto state so the auto-save
+        # gate downstream can require medium answers to score above some
+        # floor (e.g. 0.50) before writing to the vault. Without this, a
+        # medium verdict at score 0.21 (mostly partials) and a medium at
+        # score 0.69 (almost high) would be indistinguishable to the save
+        # policy.
+        "critic_score": round(weighted_score, 3),
         "critic_reasoning": summary,
         "trace": [
             {

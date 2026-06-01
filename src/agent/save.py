@@ -38,12 +38,19 @@ def should_auto_save(
     *,
     confidence: str,
     error: str | None,
+    score: float | None = None,
 ) -> bool:
     """
     Decide whether a finished agent run is eligible for auto-save.
 
     Pure function — takes the agent's final state fields, returns a bool.
     Settings are read from the module-level `settings` singleton.
+
+    `score` is the Critic's weighted score from the final wave (0.0–1.0).
+    It only matters when the verdict is exactly `medium` — that band
+    covers everything from "barely any signal" up to "almost high", so
+    we additionally require `score >= settings.auto_save_min_score`
+    before saving a medium-verdict answer.
     """
     if not settings.auto_save_to_notes:
         return False
@@ -59,7 +66,18 @@ def should_auto_save(
 
     got = _CONF_RANK.get((confidence or "").lower(), -1)
     want = _CONF_RANK.get(threshold, 2)  # default to "high" if misspelled
-    return got >= want
+    if got < want:
+        return False
+
+    # Within-medium score floor. `high` skips this (already above the
+    # critic's HIGH threshold of 0.70), `low` already failed the verdict
+    # rank check above. Only `medium` runs through here.
+    if (confidence or "").lower() == "medium":
+        min_score = float(settings.auto_save_min_score or 0.0)
+        if score is None or score < min_score:
+            return False
+
+    return True
 
 
 def auto_save_run(
@@ -76,6 +94,7 @@ def auto_save_run(
     reflection_attempts: int,
     run_id: str,
     error: str | None = None,
+    score: float | None = None,
 ) -> Path | None:
     """
     Apply gating + write the run to the notes folder.
@@ -86,7 +105,7 @@ def auto_save_run(
       - the write itself failed (logged but not raised — auto-save must
         never break the agent run's primary outcome)
     """
-    if not should_auto_save(confidence=confidence, error=error):
+    if not should_auto_save(confidence=confidence, error=error, score=score):
         return None
 
     # Refuse to write a blank/near-blank note to the vault. The AutoGen

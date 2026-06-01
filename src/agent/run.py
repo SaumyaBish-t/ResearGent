@@ -34,6 +34,7 @@ class AgentResult:
     run_id: str
     # Phase 4 additions
     confidence: str = ""
+    critic_score: float = 0.0   # latest weighted critic score (0.0–1.0)
     rewrite_attempts: int = 0
     web_used: bool = False
     rewritten_queries: dict[str, str] | None = None
@@ -184,6 +185,7 @@ def run_agent(
         trace=final.get("trace") or [],
         run_id=rid,
         confidence=str(final.get("confidence") or ""),
+        critic_score=float(final.get("critic_score") or 0.0),
         rewrite_attempts=int(final.get("rewrite_attempts") or 0),
         web_used=bool(final.get("web_used")),
         rewritten_queries=final.get("rewritten_queries") or {},

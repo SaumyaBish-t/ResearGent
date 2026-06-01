@@ -990,6 +990,7 @@ def research(
                         reflection_attempts=result.reflection_attempts,
                         run_id=result.run_id,
                         error=result.error,
+                        score=result.critic_score,
                     )
                 if note_path is None:
                     # Auto-save was attempted but the gate rejected it.
@@ -1001,14 +1002,19 @@ def research(
                                 "(no sources to cite — would risk poisoning the brain)"
                             )
                         elif not should_auto_save(
-                            confidence=result.confidence, error=result.error
+                            confidence=result.confidence,
+                            error=result.error,
+                            score=result.critic_score,
                         ):
                             console.print(
                                 f"\n[dim]auto-save skipped:[/dim] confidence "
                                 f"[yellow]{result.confidence or 'unknown'}[/yellow] "
-                                f"below threshold [cyan]{settings.auto_save_min_confidence}[/cyan]. "
+                                f"score [yellow]{result.critic_score:.3f}[/yellow] "
+                                f"below threshold "
+                                f"[cyan]{settings.auto_save_min_confidence}[/cyan]"
+                                f"/[cyan]{settings.auto_save_min_score}[/cyan]. "
                                 f"Use --save-to-vault to force, or lower "
-                                f"AUTO_SAVE_MIN_CONFIDENCE in .env."
+                                f"AUTO_SAVE_MIN_CONFIDENCE / AUTO_SAVE_MIN_SCORE in .env."
                             )
                 else:
                     label = "force-saved" if forced else "auto-saved"

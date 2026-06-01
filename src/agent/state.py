@@ -116,6 +116,7 @@ class AgentState(TypedDict, total=False):
     #   "medium" -> rewrite & retry if budget left, else proceed
     #   "low"    -> rewrite & retry if budget left, else web fallback
     confidence: str          # "high" | "medium" | "low"
+    critic_score: float      # weighted score from the last Critic wave (0.0–1.0)
     critic_reasoning: str    # one-line explanation for the trace
 
     # ---- Rewriter / loop control (Phase 4) ----
