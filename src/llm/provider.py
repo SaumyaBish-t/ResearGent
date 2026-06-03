@@ -139,37 +139,52 @@ def _provider_configs() -> dict[ProviderName, ProviderConfig]:
     }
 
 
-@lru_cache(maxsize=8)
+@lru_cache(maxsize=32)
+def _client(
+    base_url: str,
+    api_key: str,
+    referer: str | None = None,
+    title: str | None = None,
+) -> OpenAI:
+    """
+    Build (and cache) an OpenAI client for ANY OpenAI-compatible endpoint.
+
+    timeout=45s + max_retries=0: each attempt fails fast so OUR resolver
+    (not the SDK's hidden 2 in-client retries) owns fallback. Without
+    max_retries=0 a hung/rate-limited endpoint is retried 3× (~135s) before
+    the error surfaces — turning a multi-step chain into a multi-minute hang.
+    """
+    headers: dict[str, str] | None = None
+    if referer or title:
+        headers = {}
+        if referer:
+            headers["HTTP-Referer"] = referer
+        if title:
+            headers["X-Title"] = title
+    return OpenAI(
+        base_url=base_url,
+        api_key=api_key,
+        default_headers=headers,
+        timeout=45.0,
+        max_retries=0,
+    )
+
+
 def get_client(provider: ProviderName) -> OpenAI:
-    """Cached OpenAI client per provider. Cheap to call repeatedly."""
+    """
+    OpenAI client for a configured provider slot. Escape hatch used by the
+    naive retriever; tier resolution uses `_resolve_steps` instead.
+    """
     cfg = _provider_configs()[provider]
     if not cfg.api_key:
         raise RuntimeError(
             f"Provider '{provider}' is not configured. Set the API key in .env"
         )
-    default_headers = None
     if provider == "openrouter":
-        default_headers = {
-            "HTTP-Referer": settings.openrouter_app_url,
-            "X-Title": settings.openrouter_app_name,
-        }
-    # 45s timeout: long enough for slow embedders / 70B models on busy free
-    # tiers, short enough to fail fast instead of hanging indefinitely.
-    # Cascade fallback catches the resulting APITimeoutError and rolls to
-    # the next provider in the chain.
-    #
-    # max_retries=0 is critical: the OpenAI SDK defaults to 2 in-client retries,
-    # so a hung/rate-limited provider would be retried 3× (~135s) BEFORE the
-    # APITimeoutError surfaces to our cascade — turning a 5-provider chain into
-    # an ~11-minute hang. We want the cascade (not the per-provider client) to
-    # own retries, so each provider fails fast and we roll to the next.
-    return OpenAI(
-        base_url=cfg.base_url,
-        api_key=cfg.api_key,
-        default_headers=default_headers,
-        timeout=45.0,
-        max_retries=0,
-    )
+        return _client(
+            cfg.base_url, cfg.api_key, settings.openrouter_app_url, settings.openrouter_app_name
+        )
+    return _client(cfg.base_url, cfg.api_key)
 
 
 # ---------------------------------------------------------------------------
@@ -177,28 +192,61 @@ def get_client(provider: ProviderName) -> OpenAI:
 # ---------------------------------------------------------------------------
 
 
-def _cascade_for(tier: ModelTier) -> list[tuple[ProviderName, str]]:
-    """
-    Build the [(provider, model), ...] chain for a tier.
+@dataclass(frozen=True)
+class _Step:
+    """One attempt in a tier's resolution chain."""
+    label: str       # observability/status label (e.g. "fast(direct)" or "groq")
+    base_url: str
+    api_key: str
+    model: str
+    kind: str        # "openai" | "ollama" | "nvidia"  (embed-path specialisation)
 
-    Filters out providers that don't have a model defined for this tier
-    (e.g. Groq lacks an EMBED model) or aren't configured (no API key).
+
+def _kind_for(base_url: str, provider: ProviderName | None = None) -> str:
+    b = (base_url or "").lower()
+    if provider == "ollama" or "11434" in b or "ollama" in b:
+        return "ollama"
+    if provider == "nvidia" or "nvidia" in b:
+        return "nvidia"
+    return "openai"
+
+
+def _resolve_steps(tier: ModelTier) -> list[_Step]:
     """
+    Ordered attempts for a tier:
+      1) tier-direct BYOM endpoint  — if REASONING_/FAST_/TOOL_/EMBED_ *
+         (API_KEY + BASE_URL + MODEL) are set. Takes precedence.
+      2) configured provider slots  — cascade fallback, each contributing its
+         model for this tier (skipped if it has none / isn't configured).
+    """
+    steps: list[_Step] = []
+
+    direct = settings.tier_direct(tier)
+    if direct:
+        key, base, model = direct
+        steps.append(_Step(f"{tier.value}(direct)", base, key, model, _kind_for(base)))
+
     cfgs = _provider_configs()
     configured = set(settings.configured_providers())
-    out: list[tuple[ProviderName, str]] = []
     for provider in settings.resolve_cascade(tier):
         if provider not in configured:
             continue
         model = cfgs[provider].models.get(tier)
         if not model:
             continue
-        out.append((provider, model))
-    if not out:
-        raise RuntimeError(
-            f"No usable providers for tier '{tier.value}'. Check .env keys + model assignments."
+        cfg = cfgs[provider]
+        steps.append(
+            _Step(provider, cfg.base_url, cfg.api_key or "ollama", model, _kind_for(cfg.base_url, provider))
         )
-    return out
+
+    if not steps:
+        T = tier.value.upper()
+        raise RuntimeError(
+            f"No model configured for the '{tier.value}' tier. Set {T}_API_KEY, "
+            f"{T}_BASE_URL and {T}_MODEL in .env (or configure a provider slot "
+            f"with a {T} model)."
+        )
+    return steps
 
 
 # ---------------------------------------------------------------------------
@@ -220,15 +268,17 @@ def chat(
     Raises the LAST encountered exception only if every provider in the chain
     fails — partial failures are silently retried (and logged via observability).
     """
-    chain = _cascade_for(tier)
+    steps = _resolve_steps(tier)
     last_exc: Exception | None = None
 
-    for step, (provider, model) in enumerate(chain):
+    for i, step in enumerate(steps):
         try:
-            with obs.track("chat", tier, provider, model, cascade_step=step) as ctx:
-                client = get_client(provider)
+            with obs.track("chat", tier, step.label, step.model, cascade_step=i) as ctx:
+                referer = settings.openrouter_app_url if "openrouter" in step.base_url else None
+                title = settings.openrouter_app_name if "openrouter" in step.base_url else None
+                client = _client(step.base_url, step.api_key, referer, title)
                 resp = client.chat.completions.create(
-                    model=model,
+                    model=step.model,
                     messages=messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
@@ -238,7 +288,7 @@ def chat(
                 return resp.choices[0].message.content or ""
         except _TRANSIENT_ERRORS as e:
             last_exc = e
-            continue  # try next provider
+            continue  # try next step in the chain
         except Exception:
             # Non-transient (BadRequest, Auth, config error) — fail fast.
             raise
@@ -247,7 +297,7 @@ def chat(
     raise last_exc
 
 
-def _embed_ollama_native(model: str, texts: list[str]) -> list[list[float]]:
+def _embed_ollama_native(model: str, texts: list[str], base_url: str | None = None) -> list[list[float]]:
     """
     Embed via Ollama's NATIVE API.
 
@@ -263,7 +313,7 @@ def _embed_ollama_native(model: str, texts: list[str]) -> list[list[float]]:
     response body so the failure is debuggable.
     """
     import httpx
-    base = settings.ollama_base_url.rstrip("/v1").rstrip("/")
+    base = (base_url or settings.ollama_base_url).rstrip("/v1").rstrip("/")
 
     # ---- Try batched /api/embed first ----
     try:
@@ -316,27 +366,28 @@ def embed(
     *,
     tier: ModelTier = ModelTier.EMBED,
 ) -> list[list[float]]:
-    """Embed a batch with cascade fallback. NVIDIA needs `input_type` extra_body."""
-    chain = _cascade_for(tier)
+    """Embed a batch with fallback. Ollama uses its native endpoint; NVIDIA
+    needs the `input_type` extra_body."""
+    steps = _resolve_steps(tier)
     texts_list = list(texts)
     last_exc: Exception | None = None
 
-    for step, (provider, model) in enumerate(chain):
+    for i, step in enumerate(steps):
         try:
-            with obs.track("embed", tier, provider, model, cascade_step=step) as ctx:
-                if provider == "ollama":
+            with obs.track("embed", tier, step.label, step.model, cascade_step=i) as ctx:
+                if step.kind == "ollama":
                     # Native endpoint — more reliable than the OpenAI-compat shim.
                     # 120s timeout covers cold model loads on first request.
-                    return _embed_ollama_native(model, texts_list)
+                    return _embed_ollama_native(step.model, texts_list, step.base_url)
 
-                client = get_client(provider)
+                client = _client(step.base_url, step.api_key)
                 extra_body = (
                     {"input_type": "passage", "truncate": "END"}
-                    if provider == "nvidia"
+                    if step.kind == "nvidia"
                     else None
                 )
                 resp = client.embeddings.create(
-                    model=model, input=texts_list, extra_body=extra_body
+                    model=step.model, input=texts_list, extra_body=extra_body
                 )
                 ctx["usage"] = getattr(resp, "usage", None)
                 return [d.embedding for d in resp.data]
@@ -371,9 +422,9 @@ def list_status() -> dict[str, dict]:
 
     for tier in ModelTier:
         try:
-            chain = _cascade_for(tier)
-            out["routing"][tier.value] = {"provider": chain[0][0], "model": chain[0][1]}
-            out["cascade"][tier.value] = [f"{p}:{m}" for p, m in chain]
+            steps = _resolve_steps(tier)
+            out["routing"][tier.value] = {"provider": steps[0].label, "model": steps[0].model}
+            out["cascade"][tier.value] = [f"{s.label}:{s.model}" for s in steps]
         except Exception as e:
             out["routing"][tier.value] = {"error": str(e)}
             out["cascade"][tier.value] = []

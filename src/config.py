@@ -87,49 +87,46 @@ class Settings(BaseSettings):
     # ---- NVIDIA NIM ---------------------------------------------------------
     nvidia_api_key: str | None = None
     nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
-    nvidia_model_reasoning: str = "meta/llama-3.3-70b-instruct"
-    nvidia_model_fast: str = "meta/llama-3.1-8b-instruct"
-    nvidia_model_tool: str = "meta/llama-3.3-70b-instruct"
-    nvidia_model_embed: str = "nvidia/nv-embed-v1"
+    # Models come from .env — NVIDIA_MODEL_{REASONING,FAST,TOOL,EMBED}.
+    nvidia_model_reasoning: str | None = None
+    nvidia_model_fast: str | None = None
+    nvidia_model_tool: str | None = None
+    nvidia_model_embed: str | None = None
 
     # ---- Groq ---------------------------------------------------------------
-    # GPT-OSS-120B on Groq is the best free-tier tool-caller available right now.
     groq_api_key: str | None = None
     groq_base_url: str = "https://api.groq.com/openai/v1"
-    groq_model_reasoning: str = "llama-3.3-70b-versatile"
-    groq_model_fast: str = "llama-3.1-8b-instant"
-    groq_model_tool: str = "openai/gpt-oss-120b"
+    # Models come from .env — GROQ_MODEL_{REASONING,FAST,TOOL}.
+    groq_model_reasoning: str | None = None
+    groq_model_fast: str | None = None
+    groq_model_tool: str | None = None
 
     # ---- Cerebras -----------------------------------------------------------
     cerebras_api_key: str | None = None
     cerebras_base_url: str = "https://api.cerebras.ai/v1"
-    # Cerebras free-tier roster (May 2026): gpt-oss-120b + zai-glm-4.7.
-    # Both at 5 RPM — tight for inner-loop agents, fine for burst / fallback.
-    #   - zai-glm-4.7        ZhipuAI GLM-4.7, strong reasoning, different
-    #                        architecture family from rest of stack (useful
-    #                        for cascade diversity). Preview tier.
-    #   - gpt-oss-120b       OpenAI open weights MoE. Production tier.
-    #                        Excellent tool use. Also available on Groq.
-    cerebras_model_reasoning: str = "zai-glm-4.7"
-    cerebras_model_fast: str = "gpt-oss-120b"
-    cerebras_model_tool: str = "gpt-oss-120b"
+    # Models come from .env — CEREBRAS_MODEL_{REASONING,FAST,TOOL}.
+    cerebras_model_reasoning: str | None = None
+    cerebras_model_fast: str | None = None
+    cerebras_model_tool: str | None = None
 
     # ---- OpenRouter ---------------------------------------------------------
     openrouter_api_key: str | None = None
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
-    openrouter_model_reasoning: str = "deepseek/deepseek-r1:free"
-    openrouter_model_fast: str = "meta-llama/llama-3.1-8b-instruct:free"
-    openrouter_model_tool: str = "qwen/qwen3-235b-a22b:free"
-    openrouter_model_embed: str = "nvidia/nv-embed-v1"
+    # Models come from .env — OPENROUTER_MODEL_{REASONING,FAST,TOOL,EMBED}.
+    openrouter_model_reasoning: str | None = None
+    openrouter_model_fast: str | None = None
+    openrouter_model_tool: str | None = None
+    openrouter_model_embed: str | None = None
     openrouter_app_url: str = "https://github.com/SaumyaBish-t/ResearGent"
     openrouter_app_name: str = "ResearGent"
 
     # ---- Ollama (local) -----------------------------------------------------
     ollama_base_url: str = "http://localhost:11434/v1"
-    ollama_model_reasoning: str = "llama3.1:8b"
-    ollama_model_fast: str = "llama3.1:8b"
-    ollama_model_tool: str = "llama3.1:8b"
-    ollama_model_embed: str = "nomic-embed-text"
+    # Models come from .env — OLLAMA_MODEL_{REASONING,FAST,TOOL,EMBED}.
+    ollama_model_reasoning: str | None = None
+    ollama_model_fast: str | None = None
+    ollama_model_tool: str | None = None
+    ollama_model_embed: str | None = None
 
     # ---- Routing ------------------------------------------------------------
     primary_provider: ProviderName | None = Field(
@@ -157,6 +154,26 @@ class Settings(BaseSettings):
     tool_cascade: list[str] | None = None
     tool_provider: ProviderName | None = None
     embed_provider: ProviderName | None = None
+
+    # ---- Tier-direct "Bring Your Own Model" (simplest path) ----------------
+    # Point a capability tier straight at ANY OpenAI-compatible endpoint by
+    # giving it three things: an API key, a base URL, and a model. When all
+    # three are set for a tier, that tier uses them directly and takes
+    # precedence over the provider slots above (which remain available as an
+    # optional cascade fallback). This is the recommended BYOM setup:
+    # one endpoint + key + model per tier (reasoning / fast / tool / embed).
+    reasoning_api_key: str | None = None
+    reasoning_base_url: str | None = None
+    reasoning_model: str | None = None
+    fast_api_key: str | None = None
+    fast_base_url: str | None = None
+    fast_model: str | None = None
+    tool_api_key: str | None = None
+    tool_base_url: str | None = None
+    tool_model: str | None = None
+    embed_api_key: str | None = None
+    embed_base_url: str | None = None
+    embed_model: str | None = None
 
     # ---- Cascade fallback ---------------------------------------------------
     # When True, transient failures (429 / 5xx / timeout) on the primary
@@ -410,6 +427,25 @@ class Settings(BaseSettings):
         return v
 
     # ---- Helpers ------------------------------------------------------------
+    def tier_direct(self, tier: ModelTier) -> tuple[str, str, str] | None:
+        """
+        Tier-direct BYOM config as (api_key, base_url, model), or None.
+
+        Returns a value only when ALL THREE of the tier's *_API_KEY / *_BASE_URL
+        / *_MODEL are set. This takes precedence over the provider slots and is
+        the simplest way to bring your own model for a capability tier.
+        """
+        trio = {
+            ModelTier.REASONING: (self.reasoning_api_key, self.reasoning_base_url, self.reasoning_model),
+            ModelTier.FAST: (self.fast_api_key, self.fast_base_url, self.fast_model),
+            ModelTier.TOOL: (self.tool_api_key, self.tool_base_url, self.tool_model),
+            ModelTier.EMBED: (self.embed_api_key, self.embed_base_url, self.embed_model),
+        }[tier]
+        key, base, model = trio
+        if key and base and model:
+            return (key, base, model)
+        return None
+
     def configured_providers(self) -> list[ProviderName]:
         """Which providers have credentials? Ollama is 'always available'."""
         out: list[ProviderName] = []

@@ -119,18 +119,18 @@ ResearGent never hardcodes a model. Every LLM call is tagged with a **capability
 | **Tool** | Tool / function-calling paths | A model that's reliable at structured output. |
 | **Embed** | Ingestion & retrieval | An embedding model. Required for local retrieval. |
 
-**Supported provider slots** — all speak the OpenAI-compatible API, so anything that exposes one works:
+**Configuring a tier** takes three values — point it at any OpenAI-compatible endpoint:
 
-- **NVIDIA NIM**, **Groq**, **Cerebras** — fast hosted inference
-- **OpenRouter** — one key, many model families (a convenient universal gateway)
-- **Ollama** — fully local / offline (also covers vLLM, LM Studio, or any local OpenAI-compatible server via its base-URL override)
+```dotenv
+REASONING_API_KEY=...      REASONING_BASE_URL=https://.../v1      REASONING_MODEL=...
+FAST_API_KEY=...           FAST_BASE_URL=https://.../v1           FAST_MODEL=...
+TOOL_API_KEY=...           TOOL_BASE_URL=https://.../v1           TOOL_MODEL=...
+EMBED_API_KEY=...          EMBED_BASE_URL=http://localhost:11434/v1   EMBED_MODEL=...
+```
 
-Each provider slot exposes a **base URL** and **per-tier model** override, so you can point a slot at *any* OpenAI-compatible endpoint and choose exactly which model serves each tier.
+That works with **OpenAI, OpenRouter, Groq, NVIDIA NIM, Cerebras, Together, Ollama, vLLM, LM Studio** — anything exposing an OpenAI-style `/v1`. Use the same endpoint for every tier, or mix (a big model for reasoning, a cheap fast one for the Critic).
 
-**Routing & resilience:**
-- By default the system auto-detects which providers you've configured and routes each tier to the best available one.
-- You can pin a tier to a specific provider (e.g. `REASONING_PROVIDER=...`, `FAST_PROVIDER=...`).
-- **Cascade fallback** is built in: on a transient failure (rate limit / 5xx / timeout) a tier automatically rolls to the next configured provider, so one provider hiccup doesn't kill a run.
+**Rate-limit fallbacks (optional).** Free tiers hit 429s. Add one or more provider slots (`<PROVIDER>_API_KEY` + `<PROVIDER>_MODEL_<TIER>` for `cerebras`/`nvidia`/`groq`/`openrouter`/`ollama`) and they're automatically appended as fallbacks after your tier endpoint. On a transient failure (429 / 5xx / timeout) a tier rolls to the next option — and you can pin an exact order with `FAST_CASCADE=groq,cerebras,openrouter`, etc. See [`.env.example`](.env.example) for the full annotated template.
 
 Check exactly how your config resolves at any time:
 
@@ -167,36 +167,28 @@ uv sync
 
 ### 2. Configure your models (`.env`)
 
-Create a `.env` file in the project root. **You choose the provider and the model for each tier** — set the API key for at least one provider and (optionally) override the per-tier models. A copyable starting point:
+Create a `.env` file in the project root. **You bring your own model for each tier** — a key + endpoint + model. A copyable starting point (`cp .env.example .env` for the fully annotated version):
 
 ```dotenv
-# ── Pick at least one LLM provider and set its key ────────────────────────────
-# ResearGent auto-routes tiers across whatever you configure, with cascade
-# fallback on rate limits. Set the keys for whatever you want to use.
+# ── LLM tiers — point each at any OpenAI-compatible endpoint ──────────────────
+# Use the same provider for all of them, or mix per tier.
+REASONING_API_KEY=<your key>
+REASONING_BASE_URL=<https://your-provider/v1>
+REASONING_MODEL=<your strong reasoning model>
 
-# Hosted gateway (one key, many model families) — a convenient default:
-OPENROUTER_API_KEY=
-# Other built-in slots (each optional):
-# NVIDIA_API_KEY=
-# GROQ_API_KEY=
-# CEREBRAS_API_KEY=
+FAST_API_KEY=<your key>
+FAST_BASE_URL=<https://your-provider/v1>
+FAST_MODEL=<your fast, low-latency model>
 
-# ── Choose which model serves each capability tier ───────────────────────────
-# Use whatever model strings your provider offers. Put a strong model on
-# REASONING and a fast/cheap one on FAST.  (Vars are <PROVIDER>_MODEL_<TIER>.)
-OPENROUTER_MODEL_REASONING=<your strong reasoning model>
-OPENROUTER_MODEL_FAST=<your fast, low-latency model>
-OPENROUTER_MODEL_TOOL=<your tool / function-calling model>
-
-# Optionally pin which provider handles a tier (otherwise auto-detected):
-# REASONING_PROVIDER=openrouter
-# FAST_PROVIDER=groq
+TOOL_API_KEY=<your key>
+TOOL_BASE_URL=<https://your-provider/v1>
+TOOL_MODEL=<your tool / function-calling model>
 
 # ── Embeddings (required for local retrieval) ────────────────────────────────
-# Use an embed-capable provider: ollama (local), nvidia, or openrouter.
-EMBED_PROVIDER=ollama
-# OLLAMA_BASE_URL=http://localhost:11434/v1
-# OLLAMA_MODEL_EMBED=<your embedding model>
+# Local example with Ollama (free): `ollama pull nomic-embed-text`
+EMBED_API_KEY=ollama
+EMBED_BASE_URL=http://localhost:11434/v1
+EMBED_MODEL=nomic-embed-text
 
 # ── Optional: external fallbacks ─────────────────────────────────────────────
 TAVILY_API_KEY=               # live web search (optional; falls back to DuckDuckGo)
@@ -205,13 +197,10 @@ SEMANTIC_SCHOLAR_API_KEY=     # optional — higher Semantic Scholar rate limits
 # ── Knowledge base + behavior ────────────────────────────────────────────────
 NOTES_FOLDER_PATH=./notes         # where cited answers are auto-saved (any Markdown folder)
 AUTO_SAVE_MIN_CONFIDENCE=medium   # high | medium | low | always
-
-# ── Frontend ─────────────────────────────────────────────────────────────────
-# The default already allows the Next.js dev server; override if you change ports.
-# CORS_ALLOW_ORIGINS=http://localhost:3000
 ```
 
-> **Want a fully local, no-API-key setup?** Configure only the Ollama slot (reasoning / fast / tool / embed models) and set `PRIMARY_PROVIDER=ollama`. Everything runs offline.
+> **Rate-limit fallbacks:** add provider slots (`<PROVIDER>_API_KEY` + `<PROVIDER>_MODEL_<TIER>`) and they become automatic fallbacks for the matching tier — see [`.env.example`](.env.example).
+> **Fully local / offline:** point every tier at `http://localhost:11434/v1` (Ollama) with any API-key value.
 
 Verify your wiring before ingesting anything:
 
@@ -269,12 +258,13 @@ Open **http://localhost:3000**, type a question, and watch the agent network lig
 
 | Variable | Purpose |
 |----------|---------|
-| `OPENROUTER_API_KEY` / `NVIDIA_API_KEY` / `GROQ_API_KEY` / `CEREBRAS_API_KEY` | Enable a provider by setting its key. |
-| `<PROVIDER>_MODEL_REASONING` / `_FAST` / `_TOOL` / `_EMBED` | The model that provider uses for each tier. |
-| `<PROVIDER>_BASE_URL` | Point a provider slot at any OpenAI-compatible endpoint. |
-| `PRIMARY_PROVIDER` | Force one provider for **all** tiers. |
-| `REASONING_PROVIDER` / `FAST_PROVIDER` / `TOOL_PROVIDER` / `EMBED_PROVIDER` | Pin a single tier to a provider. |
-| `FAST_CASCADE` / `REASONING_CASCADE` / `TOOL_CASCADE` | Comma-separated custom fallback order for a tier. |
+| `REASONING_API_KEY` / `_BASE_URL` / `_MODEL` | The model for the **reasoning** tier (Planner, Generator, Reflector). |
+| `FAST_API_KEY` / `_BASE_URL` / `_MODEL` | The model for the **fast** tier (Critic, Rewriter). |
+| `TOOL_API_KEY` / `_BASE_URL` / `_MODEL` | The model for the **tool** tier. |
+| `EMBED_API_KEY` / `_BASE_URL` / `_MODEL` | The **embedding** model (required for local retrieval). |
+| `<PROVIDER>_API_KEY` + `<PROVIDER>_MODEL_<TIER>` | *(Optional)* Provider slots (`cerebras`/`nvidia`/`groq`/`openrouter`/`ollama`) used as rate-limit fallbacks. |
+| `FAST_CASCADE` / `REASONING_CASCADE` / `TOOL_CASCADE` | *(Optional)* Comma-separated explicit fallback order across provider slots. |
+| `CASCADE_FALLBACK_ENABLED` | Toggle automatic fallback on transient errors (default `true`). |
 | `TAVILY_API_KEY` / `SERPER_API_KEY` | Web-search providers (DuckDuckGo is the keyless final fallback). |
 | `SEMANTIC_SCHOLAR_API_KEY` | Optional — higher rate limits for paper discovery. |
 | `NOTES_FOLDER_PATH` | Folder where cited answers are auto-saved (plain `.md`). |
