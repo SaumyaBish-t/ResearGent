@@ -24,10 +24,12 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
 from src.agent.stream import stream_agent
+from src.config import settings
 from src.llm import list_status
 from src.llm.observability import load_records, summarize
 
@@ -40,6 +42,22 @@ def create_app() -> FastAPI:
         title="ResearGent",
         description="Agentic research engine — Corrective RAG + Self-Reflection",
         version="0.10.0",
+    )
+
+    # ---- CORS ----
+    # The bundled single-file UI is same-origin so it never needed CORS. The
+    # new Next.js / React-Three-Fiber frontend runs on a DIFFERENT origin in
+    # dev (:3000 → :8000), so the browser pre-flights and blocks the SSE
+    # connection without these headers. Origins are configurable via
+    # CORS_ALLOW_ORIGINS in .env; defaults cover the Next dev server.
+    _origins = settings.cors_origins_list
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_origins,
+        # When allowing all origins, credentials must be off per the CORS spec.
+        allow_credentials=_origins != ["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
 
     # ---- UI ----

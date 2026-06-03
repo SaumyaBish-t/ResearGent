@@ -803,8 +803,15 @@ def _expand_with_semantic_chunks(
         try:
             slices = semantic_chunk_text(p.full_text)
         except Exception as e:
-            _debug(f"⚠️ semantic_chunk_text failed for {p.citation}: {type(e).__name__}: {e}")
-            traceback.print_exc(file=sys.stderr)
+            # Non-fatal: this is an expected degradation path (e.g. the MiniLM
+            # encoder can't load under low system memory / a small Windows
+            # paging file → OSError 1455). We log a concise one-line warning and
+            # fall back to non-semantic chunking — no full traceback, since it
+            # adds no actionable detail and just clutters the serve console.
+            _debug(
+                f"⚠️ semantic_chunk_text failed for {p.citation} — falling back "
+                f"to non-semantic chunking: {type(e).__name__}: {e}"
+            )
             slices = []
 
         if not slices:

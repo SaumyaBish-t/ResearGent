@@ -157,11 +157,18 @@ def get_client(provider: ProviderName) -> OpenAI:
     # tiers, short enough to fail fast instead of hanging indefinitely.
     # Cascade fallback catches the resulting APITimeoutError and rolls to
     # the next provider in the chain.
+    #
+    # max_retries=0 is critical: the OpenAI SDK defaults to 2 in-client retries,
+    # so a hung/rate-limited provider would be retried 3× (~135s) BEFORE the
+    # APITimeoutError surfaces to our cascade — turning a 5-provider chain into
+    # an ~11-minute hang. We want the cascade (not the per-provider client) to
+    # own retries, so each provider fails fast and we roll to the next.
     return OpenAI(
         base_url=cfg.base_url,
         api_key=cfg.api_key,
         default_headers=default_headers,
         timeout=45.0,
+        max_retries=0,
     )
 
 

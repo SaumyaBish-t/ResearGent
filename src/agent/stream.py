@@ -58,6 +58,9 @@ def _summarize_node_update(node_name: str, update: dict[str, Any]) -> dict[str, 
 
     elif node_name == "critic":
         summary["confidence"] = update.get("confidence")
+        # Numeric grade (0..1) so the frontend can render a real score, not
+        # just the high/medium/low label. Additive — older UIs ignore it.
+        summary["score"] = update.get("critic_score")
         summary["reasoning"] = (update.get("critic_reasoning") or "")[:200]
         # Pull the latest critic trace entry for grade counts
         trace = update.get("trace") or []
@@ -187,6 +190,7 @@ def stream_agent(
         "sub_questions": final_state.get("sub_questions") or [question],
         "is_complex": bool(final_state.get("is_complex")),
         "confidence": final_state.get("confidence") or "",
+        "score": float(final_state.get("critic_score") or 0.0),
         "rewrite_attempts": int(final_state.get("rewrite_attempts") or 0),
         "web_used": bool(final_state.get("web_used")),
         "reflection_attempts": int(final_state.get("reflection_attempts") or 0),

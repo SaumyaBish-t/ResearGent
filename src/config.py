@@ -69,6 +69,21 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    # ---- Web frontend (Next.js / R3F) --------------------------------------
+    # Comma-separated list of origins allowed to hit the API from a browser.
+    # The Next.js dev server runs on :3000; production builds typically serve
+    # from a single origin. Kept as a string and split at use-site so it round-
+    # trips cleanly through a flat .env value (CORS_ALLOW_ORIGINS=...).
+    cors_allow_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        """Parsed, de-whitespaced origins. `*` short-circuits to allow-all."""
+        raw = (self.cors_allow_origins or "").strip()
+        if raw == "*":
+            return ["*"]
+        return [o.strip() for o in raw.split(",") if o.strip()]
+
     # ---- NVIDIA NIM ---------------------------------------------------------
     nvidia_api_key: str | None = None
     nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"

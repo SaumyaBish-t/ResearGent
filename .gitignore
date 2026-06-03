@@ -98,3 +98,6 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+# Claude Code harness state (worktrees, local settings)
+.claude/
