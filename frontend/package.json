@@ -1,0 +1,37 @@
+{
+  "name": "researgent-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Live 3D agentic-network UI for ResearGent (Next.js + React Three Fiber).",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@react-three/drei": "9.114.3",
+    "@react-three/fiber": "8.17.10",
+    "@react-three/postprocessing": "^2.16.3",
+    "framer-motion": "11.11.9",
+    "next": "14.2.15",
+    "postprocessing": "^6.36.4",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-markdown": "9.0.1",
+    "remark-gfm": "4.0.0",
+    "three": "0.169.0",
+    "zustand": "5.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "20.16.11",
+    "@types/react": "18.3.11",
+    "@types/react-dom": "18.3.0",
+    "@types/three": "0.169.0",
+    "autoprefixer": "10.4.20",
+    "postcss": "8.4.47",
+    "tailwindcss": "3.4.14",
+    "typescript": "5.6.3"
+  }
+}
