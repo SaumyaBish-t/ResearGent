@@ -7,8 +7,15 @@ import Overlay from "@/components/Overlay";
 const Scene = dynamic(() => import("@/components/Scene"), {
   ssr: false,
   loading: () => (
-    <div className="flex h-full w-full items-center justify-center text-accent/70">
-      initializing agentic network…
+    <div className="flex h-full w-full items-center justify-center">
+      <div className="flex flex-col items-center gap-4">
+        <div className="relative h-1 w-40 overflow-hidden rounded-full bg-white/[0.04]">
+          <span className="shimmer absolute inset-y-0 left-0 w-1/3" />
+        </div>
+        <div className="font-mono text-[10px] uppercase tracking-[0.32em] text-ink-mute">
+          initializing agentic network
+        </div>
+      </div>
     </div>
   ),
 });

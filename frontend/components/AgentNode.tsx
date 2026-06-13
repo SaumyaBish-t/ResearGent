@@ -163,12 +163,15 @@ export default function AgentNode({
         >
           <div className="flex select-none flex-col items-center whitespace-nowrap">
             <span
-              className="rounded-md bg-black/55 px-2 py-0.5 font-mono text-[13px] font-semibold tracking-wide"
-              style={{ color: status === "idle" ? "#dbe4f0" : color }}
+              className="rounded-md border border-white/10 bg-black/60 px-2.5 py-[3px] font-mono text-[12.5px] font-semibold tracking-wide backdrop-blur-sm"
+              style={{
+                color: status === "idle" ? "#dbe4f0" : color,
+                boxShadow: `0 0 14px ${status === "idle" ? "transparent" : color + "55"}`,
+              }}
             >
               {label}
             </span>
-            <span className="mt-1 font-mono text-[9px] uppercase tracking-widest text-slate-400">
+            <span className="mt-1 font-mono text-[9px] uppercase tracking-[0.28em] text-slate-500">
               {sublabel}
             </span>
           </div>
@@ -189,18 +192,32 @@ export default function AgentNode({
           style={{ pointerEvents: "none", userSelect: "none" }}
         >
           <div
-            className="w-72 -translate-y-1/2 select-none rounded-xl border border-white/10 bg-black/75 p-4 shadow-2xl backdrop-blur-md"
-            style={{ borderLeftWidth: 2, borderLeftColor: color }}
+            className="w-[300px] -translate-y-1/2 select-none overflow-hidden rounded-xl border border-white/10 bg-[rgba(8,10,18,0.85)] shadow-[0_24px_70px_-20px_rgba(0,0,0,0.85)] backdrop-blur-xl"
           >
-            <h3
-              className="mb-1.5 font-mono text-base font-bold uppercase tracking-wider"
-              style={{ color }}
-            >
-              {label}
-            </h3>
-            <p className="font-sans text-sm leading-relaxed text-slate-300">
-              {tooltip}
-            </p>
+            {/* top accent rail */}
+            <div
+              className="h-px w-full"
+              style={{
+                background: `linear-gradient(90deg, transparent, ${color}, transparent)`,
+              }}
+            />
+            <div className="p-4">
+              <div className="mb-2 flex items-center gap-2">
+                <span
+                  className="h-1.5 w-1.5 rounded-full"
+                  style={{ background: color, boxShadow: `0 0 10px ${color}` }}
+                />
+                <h3
+                  className="font-mono text-[13px] font-semibold uppercase tracking-[0.22em]"
+                  style={{ color }}
+                >
+                  {label}
+                </h3>
+              </div>
+              <p className="font-sans text-[13px] leading-relaxed text-slate-300">
+                {tooltip}
+              </p>
+            </div>
           </div>
         </Html>
       )}

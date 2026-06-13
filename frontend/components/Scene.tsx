@@ -3,7 +3,9 @@
 import { useEffect, useState } from "react";
 import { Canvas } from "@react-three/fiber";
 import { ScrollControls, Stars } from "@react-three/drei";
-import { EffectComposer, Bloom } from "@react-three/postprocessing";
+import { EffectComposer, Bloom, Vignette, ChromaticAberration } from "@react-three/postprocessing";
+import { BlendFunction } from "postprocessing";
+import * as THREE from "three";
 import {
   NODES,
   SCROLL_PAGES,
@@ -111,13 +113,25 @@ export default function Scene() {
         )}
 
         {/* Razor-sharp glow on emissive nodes + additive particles. */}
-        <EffectComposer>
+        <EffectComposer multisampling={0}>
           <Bloom
-            intensity={0.85}
-            luminanceThreshold={0.18}
-            luminanceSmoothing={0.32}
+            intensity={1.0}
+            luminanceThreshold={0.16}
+            luminanceSmoothing={0.34}
             mipmapBlur
-            radius={0.7}
+            radius={0.78}
+          />
+          <ChromaticAberration
+            blendFunction={BlendFunction.NORMAL}
+            offset={new THREE.Vector2(0.0006, 0.0006)}
+            radialModulation={false}
+            modulationOffset={0}
+          />
+          <Vignette
+            offset={0.32}
+            darkness={0.78}
+            eskil={false}
+            blendFunction={BlendFunction.NORMAL}
           />
         </EffectComposer>
       </Canvas>

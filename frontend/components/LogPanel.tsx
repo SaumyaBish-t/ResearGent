@@ -5,10 +5,17 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useAgentStore } from "@/lib/store";
 
 const LEVEL_COLOR: Record<string, string> = {
-  info: "text-slate-300",
+  info: "text-slate-200",
   success: "text-good",
   warn: "text-warn",
   error: "text-bad",
+};
+
+const LEVEL_GLYPH: Record<string, string> = {
+  info: "·",
+  success: "✓",
+  warn: "!",
+  error: "✕",
 };
 
 export default function LogPanel() {
@@ -21,10 +28,16 @@ export default function LogPanel() {
 
   const scrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [logs.length]);
 
   const open = running || finished;
+  const confColor =
+    confidenceLabel === "high"
+      ? "text-good"
+      : confidenceLabel === "medium"
+        ? "text-warn"
+        : "text-bad";
 
   return (
     <AnimatePresence>
@@ -34,59 +47,95 @@ export default function LogPanel() {
           animate={{ x: 0, opacity: 1 }}
           exit={{ x: -380, opacity: 0 }}
           transition={{ type: "spring", stiffness: 200, damping: 26 }}
-          className="glass pointer-events-auto absolute left-4 top-4 flex h-[calc(100%-2rem)] w-[340px] flex-col rounded-2xl"
+          className="glass pointer-events-auto absolute left-4 top-16 flex h-[calc(100%-5.5rem)] w-[360px] flex-col overflow-hidden rounded-2xl"
         >
-          <header className="flex items-center justify-between border-b border-edge/60 px-4 py-3">
-            <div className="text-xs font-semibold uppercase tracking-widest text-accent">
-              execution trace
+          {/* Header — title + live run id */}
+          <header className="flex items-center justify-between px-5 pt-4 pb-3">
+            <div className="flex items-center gap-2">
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${running ? "bg-accent dot-glow" : "bg-good"}`}
+                style={{ color: running ? "#22d3ee" : "#34d399" }}
+              />
+              <div className="font-mono text-[10px] uppercase tracking-[0.28em] text-ink-dim">
+                execution trace
+              </div>
             </div>
             {runId && (
-              <span className="text-[10px] text-slate-500">run {runId}</span>
+              <span className="font-mono text-[10px] tabular-nums text-ink-mute">
+                {runId}
+              </span>
             )}
           </header>
 
+          {/* Confidence row — only when known */}
           {confidenceLabel && (
-            <div className="flex items-center gap-3 border-b border-edge/60 px-4 py-2 text-xs">
-              <span className="text-slate-400">confidence</span>
-              <span
-                className={
-                  confidenceLabel === "high"
-                    ? "text-good"
-                    : confidenceLabel === "medium"
-                      ? "text-warn"
-                      : "text-bad"
-                }
-              >
+            <div className="mx-5 mb-2 flex items-center justify-between rounded-lg border border-line bg-white/[0.02] px-3 py-2">
+              <span className="font-mono text-[10px] uppercase tracking-widest text-ink-mute">
+                confidence
+              </span>
+              <span className={`font-mono text-xs tracking-wide ${confColor}`}>
                 {confidenceLabel}
-                {typeof confidenceScore === "number" &&
-                  ` · ${confidenceScore.toFixed(2)}`}
+                {typeof confidenceScore === "number" && (
+                  <span className="ml-2 text-ink-mute">·</span>
+                )}
+                {typeof confidenceScore === "number" && (
+                  <span className="ml-2 tabular-nums">
+                    {confidenceScore.toFixed(2)}
+                  </span>
+                )}
               </span>
             </div>
           )}
 
+          <div className="hairline mx-5" />
+
+          {/* Log stream */}
           <div
             ref={scrollRef}
-            className="flex-1 space-y-1 overflow-y-auto px-4 py-3 text-[12px] leading-relaxed"
+            className="flex-1 space-y-1 overflow-y-auto px-5 py-3 font-mono text-[11.5px] leading-relaxed"
           >
             {logs.length === 0 && (
-              <div className="text-slate-500">waiting for events…</div>
+              <div className="py-4 text-center text-ink-mute">
+                waiting for events
+                <span className="caret" />
+              </div>
             )}
             {logs.map((l) => (
-              <div key={l.id} className="flex gap-2">
-                <span className="shrink-0 text-slate-600">
+              <div
+                key={l.id}
+                className="group grid grid-cols-[auto_auto_1fr] items-baseline gap-2 rounded px-1 py-[2px] transition hover:bg-white/[0.02]"
+              >
+                <span className="shrink-0 tabular-nums text-ink-mute/70">
                   {new Date(l.ts).toLocaleTimeString([], {
                     hour12: false,
+                    hour: "2-digit",
                     minute: "2-digit",
                     second: "2-digit",
                   })}
                 </span>
-                <span className="shrink-0 text-accent/70">[{l.node}]</span>
-                <span className={LEVEL_COLOR[l.level] ?? "text-slate-300"}>
+                <span className="shrink-0 text-accent/80">
+                  <span className="text-ink-mute">[</span>
+                  {l.node}
+                  <span className="text-ink-mute">]</span>
+                </span>
+                <span className={`break-words ${LEVEL_COLOR[l.level] ?? "text-slate-200"}`}>
+                  <span className="mr-1 opacity-60">
+                    {LEVEL_GLYPH[l.level] ?? "·"}
+                  </span>
                   {l.message}
                 </span>
               </div>
             ))}
           </div>
+
+          {/* Footer — small status strip */}
+          <footer className="border-t border-line px-5 py-2.5 font-mono text-[10px] uppercase tracking-[0.22em] text-ink-mute">
+            <span>{logs.length}</span>
+            <span className="ml-1">events</span>
+            <span className="float-right">
+              {running ? "live" : finished ? "complete" : "—"}
+            </span>
+          </footer>
         </motion.aside>
       )}
     </AnimatePresence>

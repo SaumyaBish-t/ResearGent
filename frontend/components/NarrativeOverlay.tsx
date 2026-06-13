@@ -6,8 +6,8 @@ import { useAgentStore } from "@/lib/store";
 
 /**
  * Intro chrome that lives on the HTML layer: the hero title, a scroll hint, and
- * the 01–07 progress rail. The per-node DESCRIPTIONS are no longer here — they
- * are spatially anchored to the 3D nodes via drei <Html> (see AgentNode).
+ * the 01–07 progress rail. The per-node DESCRIPTIONS are spatially anchored to
+ * the 3D nodes via drei <Html> (see AgentNode).
  */
 export default function NarrativeOverlay() {
   const scrollProgress = useAgentStore((s) => s.scrollProgress);
@@ -20,21 +20,36 @@ export default function NarrativeOverlay() {
   return (
     <>
       {/* Progress rail (right edge) — 01..07 */}
-      <div className="pointer-events-none absolute right-6 top-1/2 hidden -translate-y-1/2 flex-col gap-3 md:flex">
+      <div className="pointer-events-none absolute right-6 top-1/2 hidden -translate-y-1/2 flex-col gap-4 md:flex">
+        <div className="mb-1 font-mono text-[9px] uppercase tracking-[0.32em] text-ink-mute">
+          phase
+        </div>
         {storyStops.map((s, i) => {
           const active = i === activeStepIdx;
+          const passed = i < activeStepIdx;
           return (
-            <div key={s.step} className="flex items-center justify-end gap-2">
+            <div
+              key={s.step}
+              className="flex items-center justify-end gap-2.5"
+            >
               <span
-                className={`font-mono text-[10px] tabular-nums tracking-widest transition-colors ${
-                  active ? "text-accent" : "text-slate-600"
+                className={`font-mono text-[10px] tabular-nums tracking-widest transition-all duration-300 ${
+                  active
+                    ? "text-accent"
+                    : passed
+                      ? "text-ink-dim"
+                      : "text-ink-mute/50"
                 }`}
               >
                 {s.step}
               </span>
               <span
-                className={`h-px transition-all ${
-                  active ? "w-8 bg-accent" : "w-4 bg-slate-700"
+                className={`h-px transition-all duration-500 ease-out ${
+                  active
+                    ? "w-9 bg-accent shadow-[0_0_8px_rgba(34,211,238,0.6)]"
+                    : passed
+                      ? "w-5 bg-ink-dim/60"
+                      : "w-3 bg-ink-mute/40"
                 }`}
               />
             </div>
@@ -47,16 +62,26 @@ export default function NarrativeOverlay() {
         {scrollProgress < 0.1 && (
           <motion.div
             key="hero"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0, transition: { duration: 0.18 } }}
-            className="pointer-events-none absolute left-1/2 top-[16%] -translate-x-1/2 text-center"
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, transition: { duration: 0.22 } }}
+            transition={{ duration: 0.6, ease: [0.22, 1, 0.36, 1] }}
+            className="pointer-events-none absolute left-1/2 top-[15%] -translate-x-1/2 text-center"
           >
-            <h1 className="text-3xl font-semibold tracking-tight text-white sm:text-4xl">
+            {/* eyebrow */}
+            <div className="mb-3 flex items-center justify-center gap-2 font-mono text-[10px] uppercase tracking-[0.42em] text-ink-mute">
+              <span className="h-px w-6 bg-line" />
+              corrective-rag · multi-agent
+              <span className="h-px w-6 bg-line" />
+            </div>
+
+            <h1 className="bg-gradient-to-b from-white via-white to-slate-400 bg-clip-text text-[44px] font-semibold tracking-tight text-transparent sm:text-[56px]">
               ResearGent
             </h1>
-            <p className="mt-2 font-mono text-xs uppercase tracking-[0.35em] text-accent/70">
-              multi-agent corrective-rag core
+
+            <p className="mx-auto mt-3 max-w-md text-[13.5px] leading-relaxed text-ink-dim">
+              A living map of agents that retrieve, critique, and rewrite their
+              way to a grounded answer.
             </p>
           </motion.div>
         )}
@@ -69,16 +94,21 @@ export default function NarrativeOverlay() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
+            transition={{ duration: 0.4 }}
             className="pointer-events-none absolute bottom-28 left-1/2 -translate-x-1/2 text-center"
           >
-            <div className="font-mono text-[11px] uppercase tracking-[0.3em] text-slate-500">
+            <div className="font-mono text-[10px] uppercase tracking-[0.32em] text-ink-mute">
               scroll to detonate the core
             </div>
             {!reduced && (
               <motion.div
-                animate={{ y: [0, 7, 0] }}
-                transition={{ repeat: Infinity, duration: 1.6, ease: "easeInOut" }}
-                className="mx-auto mt-2 h-3 w-px bg-accent/60"
+                animate={{ y: [0, 8, 0], opacity: [0.4, 1, 0.4] }}
+                transition={{
+                  repeat: Infinity,
+                  duration: 1.8,
+                  ease: "easeInOut",
+                }}
+                className="mx-auto mt-3 h-4 w-px bg-gradient-to-b from-accent to-transparent"
               />
             )}
           </motion.div>
