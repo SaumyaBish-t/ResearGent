@@ -47,21 +47,21 @@ export default function LogPanel() {
           animate={{ x: 0, opacity: 1 }}
           exit={{ x: -380, opacity: 0 }}
           transition={{ type: "spring", stiffness: 200, damping: 26 }}
-          className="glass pointer-events-auto absolute left-4 top-16 flex h-[calc(100%-5.5rem)] w-[360px] flex-col overflow-hidden rounded-2xl"
+          className="glass pointer-events-auto absolute left-4 top-16 flex h-[calc(100%-5.5rem)] w-[440px] flex-col overflow-hidden rounded-2xl"
         >
           {/* Header — title + live run id */}
-          <header className="flex items-center justify-between px-5 pt-4 pb-3">
-            <div className="flex items-center gap-2">
+          <header className="flex items-center justify-between px-6 pt-5 pb-4">
+            <div className="flex items-center gap-2.5">
               <span
-                className={`h-1.5 w-1.5 rounded-full ${running ? "bg-accent dot-glow" : "bg-good"}`}
+                className={`h-2 w-2 rounded-full ${running ? "bg-accent dot-glow" : "bg-good"}`}
                 style={{ color: running ? "#22d3ee" : "#34d399" }}
               />
-              <div className="font-mono text-[10px] uppercase tracking-[0.28em] text-ink-dim">
+              <div className="font-mono text-[12px] uppercase tracking-[0.28em] text-ink-dim">
                 execution trace
               </div>
             </div>
             {runId && (
-              <span className="font-mono text-[10px] tabular-nums text-ink-mute">
+              <span className="font-mono text-[11px] tabular-nums text-ink-mute">
                 {runId}
               </span>
             )}
@@ -69,11 +69,11 @@ export default function LogPanel() {
 
           {/* Confidence row — only when known */}
           {confidenceLabel && (
-            <div className="mx-5 mb-2 flex items-center justify-between rounded-lg border border-line bg-white/[0.02] px-3 py-2">
-              <span className="font-mono text-[10px] uppercase tracking-widest text-ink-mute">
+            <div className="mx-6 mb-3 flex items-center justify-between rounded-lg border border-line bg-white/[0.02] px-4 py-2.5">
+              <span className="font-mono text-[11px] uppercase tracking-widest text-ink-mute">
                 confidence
               </span>
-              <span className={`font-mono text-xs tracking-wide ${confColor}`}>
+              <span className={`font-mono text-[13px] tracking-wide ${confColor}`}>
                 {confidenceLabel}
                 {typeof confidenceScore === "number" && (
                   <span className="ml-2 text-ink-mute">·</span>
@@ -87,12 +87,12 @@ export default function LogPanel() {
             </div>
           )}
 
-          <div className="hairline mx-5" />
+          <div className="hairline mx-6" />
 
           {/* Log stream */}
           <div
             ref={scrollRef}
-            className="flex-1 space-y-1 overflow-y-auto px-5 py-3 font-mono text-[11.5px] leading-relaxed"
+            className="flex-1 space-y-1.5 overflow-y-auto px-6 py-4 font-mono text-[13px] leading-relaxed"
           >
             {logs.length === 0 && (
               <div className="py-4 text-center text-ink-mute">
@@ -129,9 +129,9 @@ export default function LogPanel() {
           </div>
 
           {/* Footer — small status strip */}
-          <footer className="border-t border-line px-5 py-2.5 font-mono text-[10px] uppercase tracking-[0.22em] text-ink-mute">
-            <span>{logs.length}</span>
-            <span className="ml-1">events</span>
+          <footer className="border-t border-line px-6 py-3 font-mono text-[11px] uppercase tracking-[0.22em] text-ink-mute">
+            <span className="tabular-nums text-ink-dim">{logs.length}</span>
+            <span className="ml-1.5">events</span>
             <span className="float-right">
               {running ? "live" : finished ? "complete" : "—"}
             </span>

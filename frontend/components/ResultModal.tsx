@@ -58,7 +58,7 @@ export default function ResultModal() {
             transition={{ type: "spring", stiffness: 220, damping: 24 }}
             // Near-opaque card — keeps answer text crisp over the 3D scene.
             style={{ background: "rgba(10, 13, 20, 0.96)" }}
-            className="glass relative flex max-h-[84vh] w-[min(840px,94vw)] flex-col overflow-hidden rounded-2xl"
+            className="glass relative flex max-h-[88vh] w-[min(1100px,96vw)] flex-col overflow-hidden rounded-2xl"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Accent rail (top edge) — gives the card a clear identity. */}
@@ -70,12 +70,12 @@ export default function ResultModal() {
                   <span
                     className={`h-1.5 w-1.5 rounded-full ${error ? "bg-bad" : "bg-good"}`}
                   />
-                  <span className="font-mono text-[10px] uppercase tracking-[0.32em] text-ink-dim">
+                  <span className="font-mono text-[11.5px] uppercase tracking-[0.32em] text-ink-dim">
                     {error ? "run failed" : "research result"}
                   </span>
                 </div>
                 {finalOutput && (
-                  <div className="mt-2.5 flex flex-wrap items-center gap-2 font-mono text-[10.5px] uppercase tracking-widest text-ink-mute">
+                  <div className="mt-3 flex flex-wrap items-center gap-2 font-mono text-[11.5px] uppercase tracking-widest text-ink-mute">
                     <Pill>
                       conf{" "}
                       <span className={confTone}>
@@ -133,7 +133,7 @@ export default function ResultModal() {
                   <p className="text-sm leading-relaxed text-bad">{error}</p>
                 </div>
               ) : (
-                <article className="prose-invert max-w-none text-[14.5px] leading-[1.7] text-slate-200 [&_a]:text-accent [&_a]:underline [&_a]:decoration-accent/40 [&_a]:underline-offset-2 hover:[&_a]:decoration-accent [&_code]:rounded-md [&_code]:border [&_code]:border-line [&_code]:bg-white/[0.04] [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[12.5px] [&_code]:text-accent [&_h1]:mb-3 [&_h1]:mt-1 [&_h1]:text-xl [&_h1]:font-semibold [&_h1]:tracking-tight [&_h1]:text-ink [&_h2]:mb-2 [&_h2]:mt-5 [&_h2]:text-base [&_h2]:font-semibold [&_h2]:tracking-tight [&_h2]:text-ink [&_h3]:mb-2 [&_h3]:mt-4 [&_h3]:text-sm [&_h3]:font-semibold [&_h3]:text-ink [&_li]:my-1 [&_p]:my-3 [&_strong]:text-ink [&_ul]:my-3 [&_ul]:list-disc [&_ul]:space-y-1 [&_ul]:pl-5">
+                <article className="prose-invert max-w-none text-[16px] leading-[1.75] text-slate-200 [&_a]:text-accent [&_a]:underline [&_a]:decoration-accent/40 [&_a]:underline-offset-2 hover:[&_a]:decoration-accent [&_code]:rounded-md [&_code]:border [&_code]:border-line [&_code]:bg-white/[0.04] [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[13.5px] [&_code]:text-accent [&_h1]:mb-3 [&_h1]:mt-1 [&_h1]:text-[22px] [&_h1]:font-semibold [&_h1]:tracking-tight [&_h1]:text-ink [&_h2]:mb-2 [&_h2]:mt-6 [&_h2]:text-[18px] [&_h2]:font-semibold [&_h2]:tracking-tight [&_h2]:text-ink [&_h3]:mb-2 [&_h3]:mt-5 [&_h3]:text-[15px] [&_h3]:font-semibold [&_h3]:text-ink [&_li]:my-1.5 [&_p]:my-3.5 [&_strong]:text-ink [&_ul]:my-3.5 [&_ul]:list-disc [&_ul]:space-y-1.5 [&_ul]:pl-5">
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>
                     {finalOutput?.answer || "_(empty answer)_"}
                   </ReactMarkdown>
@@ -149,19 +149,19 @@ export default function ResultModal() {
                     </span>
                     <span className="h-px flex-1 bg-line" />
                   </div>
-                  <ul className="grid gap-2">
+                  <ul className="grid gap-2.5">
                     {sources.map((s) => (
                       <li
                         key={s.tag}
-                        className="grid grid-cols-[auto_auto_1fr] items-baseline gap-3 rounded-lg border border-line bg-white/[0.015] px-3 py-2 transition hover:border-accent/30 hover:bg-white/[0.03]"
+                        className="grid grid-cols-[auto_auto_1fr] items-baseline gap-3 rounded-lg border border-line bg-white/[0.015] px-3.5 py-2.5 transition hover:border-accent/30 hover:bg-white/[0.03]"
                       >
-                        <span className="font-mono text-[11px] font-semibold tracking-wide text-accent">
+                        <span className="font-mono text-[12.5px] font-semibold tracking-wide text-accent">
                           {s.tag}
                         </span>
-                        <span className="rounded-md border border-line bg-white/[0.04] px-1.5 py-[1px] font-mono text-[9.5px] uppercase tracking-widest text-ink-dim">
+                        <span className="rounded-md border border-line bg-white/[0.04] px-1.5 py-[1px] font-mono text-[10.5px] uppercase tracking-widest text-ink-dim">
                           {s.signal}
                         </span>
-                        <span className="break-words text-[12.5px] leading-snug text-slate-300">
+                        <span className="break-words text-[13.5px] leading-relaxed text-slate-300">
                           {s.citation}
                         </span>
                       </li>

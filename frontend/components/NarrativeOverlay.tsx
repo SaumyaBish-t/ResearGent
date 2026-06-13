@@ -62,11 +62,15 @@ export default function NarrativeOverlay() {
         {scrollProgress < 0.1 && (
           <motion.div
             key="hero"
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, transition: { duration: 0.22 } }}
+            // x: "-50%" must live in animate (not just className) — framer
+            // composes a fresh `transform` for the y-tween that would otherwise
+            // wipe out Tailwind's `-translate-x-1/2`, leaving the hero
+            // anchored at its left edge.
+            initial={{ opacity: 0, y: 8, x: "-50%" }}
+            animate={{ opacity: 1, y: 0, x: "-50%" }}
+            exit={{ opacity: 0, x: "-50%", transition: { duration: 0.22 } }}
             transition={{ duration: 0.6, ease: [0.22, 1, 0.36, 1] }}
-            className="pointer-events-none absolute left-1/2 top-[15%] -translate-x-1/2 text-center"
+            className="pointer-events-none absolute left-1/2 top-[15%] text-center"
           >
             {/* eyebrow */}
             <div className="mb-3 flex items-center justify-center gap-2 font-mono text-[10px] uppercase tracking-[0.42em] text-ink-mute">
