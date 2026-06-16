@@ -1,0 +1,35 @@
+# Render service blueprint. Render reads this on push to provision the
+# web service. Env vars are NOT declared here — they live in the Render
+# dashboard so secrets stay out of git.
+#
+# To deploy: push this file, then in Render dashboard click
+# "New + → Blueprint" and point at the repo. Render finds render.yaml
+# and offers to create the service.
+
+services:
+  - type: web
+    name: researgent-api
+    runtime: python
+    plan: free
+    # Free tier sleeps after 15 min idle (~30s cold start on first hit).
+    # Bump to `starter` ($7/mo) for always-on once traffic justifies it.
+
+    buildCommand: pip install -r requirements.txt && pip install -e .
+    startCommand: uvicorn src.api.app:create_app --factory --host 0.0.0.0 --port $PORT
+
+    healthCheckPath: /api/status
+
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.9
+      # Prod kill-switches for features that need a shared filesystem
+      # (no shared FS on Render free tier).
+      - key: ENABLE_LOCAL_RETRIEVAL
+        value: "false"
+      - key: AUTO_SAVE_TO_NOTES
+        value: "false"
+      - key: COOKIE_SECURE
+        value: "true"
+      # All other env vars (API keys, DATABASE_URL, GOOGLE_*, RAZORPAY_*,
+      # CORS_ALLOW_ORIGINS, SESSION_SECRET, BILLING_*_URL, LLM tier keys)
+      # MUST be set manually in the Render dashboard. Do not commit them.
