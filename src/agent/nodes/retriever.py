@@ -48,6 +48,22 @@ def retrieve(state: AgentState) -> dict[str, Any]:
     re-do the 4 already-answered ones.
     """
     sub_qs = state.get("sub_questions") or [state["question"]]
+
+    # Production kill-switch: when there's no shared local vault to query,
+    # return empty refs for every sub-q. The Critic will mark confidence
+    # `low`, the graph will skip to web_fallback + paper_discovery, and the
+    # Generator will compose from those + LLM priors. Saves ~1-2s vs running
+    # the local hybrid search against an empty/irrelevant corpus.
+    if not settings.enable_local_retrieval:
+        return {
+            "chunk_refs_by_subq": {sq: [] for sq in sub_qs},
+            "trace": [{
+                "node": "retriever",
+                "skipped_local_retrieval": True,
+                "reason": "ENABLE_LOCAL_RETRIEVAL=false",
+            }],
+        }
+
     total_k = int(state.get("k") or DEFAULT_TOTAL_K)  # type: ignore[arg-type]
     per_subq_k = max(2, math.ceil(total_k / max(1, len(sub_qs))))
     thread_id = state.get("run_id") or ""

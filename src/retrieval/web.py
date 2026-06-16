@@ -232,6 +232,8 @@ def web_search(query: str, *, max_results: int = 5) -> list[WebChunk]:
     Returns empty list ONLY if every provider failed or returned nothing —
     a graceful degradation that lets the agent's no_answer node take over.
     """
+    import sys
+
     cascade = settings.web_search_cascade or list(_PROVIDERS.keys())
     last_error: str | None = None
 
@@ -241,6 +243,9 @@ def web_search(query: str, *, max_results: int = 5) -> list[WebChunk]:
             continue
         fn, is_configured = entry
         if not is_configured():
+            # Visible reason: env var missing. Helps debug "why did DDG fire
+            # instead of Tavily" when the user expected Tavily.
+            print(f"[web_search] skip {name}: not configured", file=sys.stderr)
             continue
 
         # Observability uses the EMBED tier label as a stand-in for "non-LLM
@@ -260,15 +265,17 @@ def web_search(query: str, *, max_results: int = 5) -> list[WebChunk]:
                 }
             if results:
                 return results
-            # Empty but no exception — try next.
+            # Empty but no exception — try next, but log the silent fall-through.
             last_error = f"{name} returned 0 results"
+            print(f"[web_search] {last_error}", file=sys.stderr)
         except Exception as e:
-            last_error = f"{name}: {type(e).__name__}: {str(e)[:120]}"
+            last_error = f"{name}: {type(e).__name__}: {str(e)[:200]}"
+            print(f"[web_search] FAIL {last_error}", file=sys.stderr)
             continue
 
     # Surface the last failure reason in a structured way the caller can log.
     # We don't raise — web_fallback should always be graceful. Returning
     # empty lets the agent's downstream nodes handle the no-evidence case.
     if last_error:
-        _ = last_error  # available for future hook; intentionally not raised
+        print(f"[web_search] cascade exhausted — last: {last_error}", file=sys.stderr)
     return []

@@ -2,32 +2,56 @@
 
 import { useEffect, useState } from "react";
 import { useAgentStore } from "@/lib/store";
-import SearchBar from "./SearchBar";
+import HistorySidebar from "./HistorySidebar";
 import LogPanel from "./LogPanel";
-import ResultModal from "./ResultModal";
 import NarrativeOverlay from "./NarrativeOverlay";
+import PaywallModal from "./PaywallModal";
+import ResultModal from "./ResultModal";
+import SearchBar from "./SearchBar";
+import SignInLanding from "./SignInLanding";
+import UserMenu from "./UserMenu";
 
 /**
  * The 2D HTML overlay above the WebGL canvas. Wrapper is `pointer-events-none`
  * so the scene stays interactive; widgets re-enable pointer events themselves.
  *
- * Two phases, switched by `hasQueried`:
- *   - intro  → scrollytelling narrative cards
- *   - active → live execution trace + result modal
- * The SearchBar is rendered in BOTH phases (it morphs between them via its
- * shared `layoutId`), so it lives outside the conditional.
+ * Three phases:
+ *   - auth gate → SignInLanding (no session)
+ *   - intro     → scrollytelling narrative cards
+ *   - active    → live execution trace + result modal
+ * SearchBar + UserMenu + HistorySidebar + PaywallModal render in every signed-in
+ * phase (each component decides its own visibility).
  */
 export default function Overlay() {
   const hasQueried = useAgentStore((s) => s.hasQueried);
   const running = useAgentStore((s) => s.running);
   const finished = useAgentStore((s) => s.finished);
 
-  // The overlay uses framer-motion (animated inline transforms) whose
-  // server/client markup differs, which trips React hydration. Gate to
-  // client-only render after mount — eliminates the mismatch.
+  const authReady = useAgentStore((s) => s.authReady);
+  const user = useAgentStore((s) => s.user);
+  const bootstrap = useAgentStore((s) => s.bootstrap);
+
+  // Gate to client-only render after mount — framer-motion's transforms differ
+  // server vs client, which trips React hydration.
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
+  useEffect(() => {
+    if (mounted) void bootstrap();
+  }, [mounted, bootstrap]);
+
   if (!mounted) return null;
+
+  // ---- Auth gate ----
+  if (!authReady) {
+    return <div className="pointer-events-none absolute inset-0 z-10" />;
+  }
+  if (!user) {
+    return (
+      <div className="absolute inset-0 z-10">
+        <SignInLanding />
+      </div>
+    );
+  }
 
   const statusLabel = running ? "running" : finished ? "ready" : "idle";
   const statusColor = running
@@ -38,7 +62,7 @@ export default function Overlay() {
 
   return (
     <div className="pointer-events-none absolute inset-0 z-10">
-      {/* Top-left wordmark — quiet, monospace, tabular. */}
+      {/* Top-left wordmark */}
       <header className="absolute left-5 top-4 flex items-center gap-3">
         <div className="relative h-2 w-2">
           <span
@@ -58,8 +82,8 @@ export default function Overlay() {
         </div>
       </header>
 
-      {/* Top-right meta — status + agentic-network subtitle. */}
-      <header className="absolute right-5 top-4 flex items-center gap-3 text-right">
+      {/* Top-right: status + user menu */}
+      <header className="absolute right-5 top-4 flex items-center gap-3">
         <div className="font-mono text-[9px] uppercase tracking-[0.3em] text-ink-mute">
           agentic network
         </div>
@@ -67,6 +91,8 @@ export default function Overlay() {
         <div className={`font-mono text-[10px] tracking-widest ${statusColor}`}>
           {statusLabel}
         </div>
+        <span className="h-3 w-px bg-line" />
+        <UserMenu />
       </header>
 
       {hasQueried ? (
@@ -78,8 +104,14 @@ export default function Overlay() {
         <NarrativeOverlay />
       )}
 
+      {/* History sidebar — auto-hides during a live run. */}
+      <HistorySidebar />
+
       {/* Persistent, morphing search bar (centered → docked). */}
       <SearchBar />
+
+      {/* Paywall — only renders when paywall.open is true. */}
+      <PaywallModal />
     </div>
   );
 }

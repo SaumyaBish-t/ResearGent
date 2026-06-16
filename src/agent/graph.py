@@ -147,6 +147,26 @@ def _route_after_critic(state: AgentState) -> str:
     return "web_fallback"
 
 
+def _route_after_papers(state: AgentState) -> str:
+    """
+    After paper_discovery completes.
+
+    Policy: when a web-search key is configured AND web hasn't run yet,
+    ALWAYS fold web results into the same chunk pool before grading. The
+    Generator then synthesises a curated answer citing BOTH paper abstracts
+    and recent web snippets — paper-only pools were over-confidently graded
+    HIGH on tangentially-related papers, and the Critic's relaxed external
+    threshold sometimes shipped refusal-style answers as "high" verdicts.
+
+    Falls back to direct critic when web is unavailable / already tried.
+    """
+    web_already_tried = bool(state.get("web_used"))
+    have_web_key = bool(settings.tavily_api_key)
+    if not web_already_tried and have_web_key:
+        return "web_fallback"
+    return "critic"
+
+
 def _route_after_web(state: AgentState) -> str:
     """
     After web fallback. Three outcomes:
@@ -256,9 +276,16 @@ def build_graph(use_checkpointer: bool = True):
     )
     # Rewriter loops back to critic so the new chunks get graded.
     g.add_edge("rewriter", "critic")
-    # Paper discovery feeds back to critic so the freshly-added abstracts
-    # get graded for relevance. If critic now says "high", we ship to generator.
-    g.add_edge("paper_discovery", "critic")
+    # Paper discovery: when a web key is configured, ALWAYS chain into
+    # web_fallback first so the Critic sees a merged paper+web pool. This
+    # produces a curated answer that cites both sources and prevents the
+    # earlier failure mode of confidently shipping a refusal from a
+    # tangentially-related paper set.
+    g.add_conditional_edges(
+        "paper_discovery",
+        _route_after_papers,
+        {"critic": "critic", "web_fallback": "web_fallback"},
+    )
     g.add_conditional_edges(
         "web_fallback",
         _route_after_web,

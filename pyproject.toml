@@ -58,6 +58,11 @@ dependencies = [
     # bytes, clear password-prompt detection) maps cleanly to the try/except
     # fallback flow the spec calls for.
     "pypdf>=5.0",
+    "authlib>=1.7.2",
+    "pyjwt[crypto]>=2.13.0",
+    "itsdangerous>=2.2.0",
+    "httpx-oauth>=0.17.0",
+    "razorpay>=2.0.1",
 ]
 
 [project.optional-dependencies]

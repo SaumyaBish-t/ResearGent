@@ -115,6 +115,36 @@ def db_init() -> None:
     )
 
 
+@db_app.command("migrate")
+def db_migrate() -> None:
+    """
+    Apply application schema (users / subscriptions / research_threads /
+    research_turns). Distinct from `db init`, which only creates the LangGraph
+    checkpoint tables. Idempotent — safe to re-run.
+    """
+    from src.config import settings
+    from src.db_schema import run_migrations
+
+    url = settings.resolve_database_url()
+    if not url:
+        console.print(
+            "[red]No Postgres configured.[/red]\n"
+            "  Set [cyan]DATABASE_URL[/cyan] in .env (preferred), or "
+            "POSTGRES_HOST + POSTGRES_DB + POSTGRES_USER + POSTGRES_PASSWORD."
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        applied = run_migrations()
+    except Exception as e:
+        console.print(f"[red]migration failed:[/red] {type(e).__name__}: {e}")
+        raise typer.Exit(code=1)
+
+    console.print(f"[bold green]OK[/bold green] — applied {len(applied)} statements:")
+    for stmt in applied:
+        console.print(f"  [dim]·[/dim] {stmt}")
+
+
 @db_app.command("status")
 def db_status() -> None:
     """Confirm we can reach Postgres and report checkpoint row counts."""

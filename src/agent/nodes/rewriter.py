@@ -35,7 +35,7 @@ from typing import Any
 
 from src.agent.artifacts import persist_mixed
 from src.agent.state import AgentState
-from src.config import ModelTier
+from src.config import ModelTier, settings
 from src.llm import chat
 from src.retrieval import hybrid_retrieve
 
@@ -128,7 +128,10 @@ def rewrite_and_retry(state: AgentState) -> dict[str, Any]:
 
         t0 = time.perf_counter()
         per_q_k = 4  # slightly larger than the planner's per-subq-k to give the rewrite room
-        hits = hybrid_retrieve(rewritten, k=per_q_k)
+        # Honor the same kill-switch the retriever node uses — in prod we
+        # don't want the rewriter pulling old auto-ingested local chunks
+        # behind the retriever flag's back.
+        hits = [] if not settings.enable_local_retrieval else hybrid_retrieve(rewritten, k=per_q_k)
         ret_ms = int((time.perf_counter() - t0) * 1000)
 
         # Capture in memory for the batch persist call below.

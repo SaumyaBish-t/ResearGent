@@ -84,6 +84,42 @@ class Settings(BaseSettings):
             return ["*"]
         return [o.strip() for o in raw.split(",") if o.strip()]
 
+    # ---- Auth + billing (Phase 16) ----------------------------------------
+    # Google OAuth — used to identify users for quotas + billing.
+    google_client_id: str | None = None
+    google_client_secret: str | None = None
+    google_redirect_uri: str = "http://localhost:8000/auth/callback"
+
+    # Session JWT signing key. Generate via: python -c "import secrets;print(secrets.token_urlsafe(48))"
+    session_secret: str = "CHANGE_ME_BEFORE_PRODUCTION_USE_A_REAL_SECRET"
+    session_cookie_name: str = "researgent_session"
+    session_ttl_hours: int = 24 * 14  # 2 weeks
+    cookie_secure: bool = False        # true in prod (HTTPS)
+
+    # Comma-separated list of emails granted unlimited quota.
+    # Each admin email is matched case-insensitively against Google's verified
+    # email. Set via .env: ADMIN_EMAILS=you@example.com,coworker@example.com
+    admin_emails: str = "sambisht123k@gmail.com"
+
+    @property
+    def admin_email_set(self) -> set[str]:
+        return {e.strip().lower() for e in (self.admin_emails or "").split(",") if e.strip()}
+
+    # Free-tier quota knobs (subscribers + admins bypass).
+    free_threads_per_month: int = 3
+    free_turns_per_thread: int = 3     # original Q + up to 2 follow-ups
+
+    # Razorpay subscription billing.
+    razorpay_key_id: str | None = None
+    razorpay_key_secret: str | None = None
+    razorpay_webhook_secret: str | None = None
+    razorpay_plan_id: str | None = None
+    razorpay_price_inr: int = 499      # display only; canonical price is on the plan
+
+    # Where the user lands after a successful Razorpay checkout.
+    billing_success_url: str = "http://localhost:3000/?billing=success"
+    billing_cancel_url: str = "http://localhost:3000/?billing=cancelled"
+
     # ---- NVIDIA NIM ---------------------------------------------------------
     nvidia_api_key: str | None = None
     nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
@@ -236,6 +272,13 @@ class Settings(BaseSettings):
     # Bounded to keep prompts manageable — too high and the generator
     # drowns in tangentially-related context.
     graph_expansion_max_extra_chunks: int = 6
+
+    # Master kill-switch for the local vault retriever. False = the retrieve
+    # node returns zero local chunks (per sub-question), the Critic falls to
+    # low confidence, and the graph routes through web/papers + LLM priors
+    # only. Set ENABLE_LOCAL_RETRIEVAL=false in production where there's no
+    # shared filesystem of notes to query.
+    enable_local_retrieval: bool = True
 
     # ---- Markdown knowledge-base integration (Phase 8 + 11) ----------------
     # Path to a FOLDER OF MARKDOWN NOTES that serves as your knowledge base.
