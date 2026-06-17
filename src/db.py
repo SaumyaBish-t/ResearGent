@@ -42,11 +42,23 @@ def _build_pool():
 
     # `kwargs` are applied to every connection the pool hands out. This is
     # the documented way to set autocommit + row_factory for PostgresSaver.
+    #
+    # `check` runs a cheap SELECT 1 before returning a pooled connection so
+    # we recycle anything Neon (or any managed PG) silently dropped during
+    # an idle-suspend. Without this, the first query after a scale-to-zero
+    # crashes with `psycopg.errors.AdminShutdown` and the user sees a 500
+    # on what should have been a successful sign-in.
+    #
+    # `max_idle=240` closes idle conns at 4 min — under Neon free tier's
+    # 5-min idle suspend — so the pool sheds connections proactively
+    # instead of waiting for the server to slam them.
     return ConnectionPool(
         conninfo=url,
         min_size=settings.postgres_pool_min_size,
         max_size=settings.postgres_pool_max_size,
         kwargs={"autocommit": True, "row_factory": dict_row, "prepare_threshold": 0},
+        check=ConnectionPool.check_connection,
+        max_idle=240,
         open=True,
     )
 
