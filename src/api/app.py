@@ -87,6 +87,11 @@ def create_app() -> FastAPI:
     # ---- Billing + history routes (/api/usage, /api/threads, /billing/*) ----
     app.include_router(billing_router)
 
+    # ---- Health check (Render hits /health by default) ----
+    @app.get("/health", include_in_schema=False)
+    async def health() -> dict:
+        return {"ok": True}
+
     # ---- UI ----
     @app.get("/", include_in_schema=False)
     async def index() -> FileResponse:
