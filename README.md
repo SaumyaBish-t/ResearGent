@@ -2,17 +2,25 @@
 
 **A hallucination-resistant, multi-agent research engine with a live 3D dashboard.**
 
+[![Live](https://img.shields.io/badge/Live-resear--gent.vercel.app-22d3ee)](https://resear-gent.vercel.app)
+[![API](https://img.shields.io/badge/API-researgent.onrender.com-34d399)](https://researgent.onrender.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Backend: LangGraph](https://img.shields.io/badge/Backend-LangGraph-orange)](https://langchain-ai.github.io/langgraph/)
 [![Frontend: Next.js + R3F](https://img.shields.io/badge/Frontend-Next.js%20%2B%20R3F-black)](https://docs.pmnd.rs/react-three-fiber)
 [![Bring Your Own Model](https://img.shields.io/badge/LLM-Bring%20Your%20Own-success)](#-bring-your-own-model-byom)
+
+> 🌐 **Live demo:** **<https://resear-gent.vercel.app>**
+> Sign in with Google → 3 free researches / month + 3 follow-ups per thread.
+> Lifetime unlock for ₹499 (one-time) via Razorpay. Best in Chrome / Firefox
+> (Brave users: disable Shields for the site so the cross-site session cookie
+> can travel between Vercel ↔ Render).
 
 ResearGent answers research questions by **grounding every claim in evidence it can cite** — and refusing to bluff when it can't. Instead of trusting a single vector-search pass, it runs an adversarial **Corrective-RAG + self-reflection** loop: a Critic grades the retrieved context, a Rewriter retries weak queries, and when local knowledge runs out the agent **cascades to academic APIs (arXiv / Semantic Scholar) and live web search** before writing a cited answer. High-confidence results are auto-saved to a local Markdown knowledge base that grows over time.
 
 The whole agent graph streams to a **Next.js + React Three Fiber dashboard** that visualizes the pipeline in real time over Server-Sent Events.
 
 > <!-- Add a screenshot or GIF of the 3D dashboard here, e.g. docs/demo.gif -->
-> *(Run `researgent serve` + the frontend to see the live 3D agent network.)*
+> *(Run `researgent serve` + the frontend to see the live 3D agent network — or skip setup and try it at the live link above.)*
 
 ---
 
@@ -311,6 +319,31 @@ researgent research "<query>"  # full agentic run in the terminal
 researgent serve               # launch the API + SSE stream
 researgent store info          # inspect the vector store
 ```
+
+---
+
+## 🚀 Live Deployment
+
+The hosted app at **<https://resear-gent.vercel.app>** runs on this stack:
+
+| Layer | Provider | Notes |
+|---|---|---|
+| Frontend | **Vercel** (Hobby) | Next.js + R3F, env var `NEXT_PUBLIC_API_BASE` points at the Render API |
+| Backend  | **Render** (Free) | FastAPI + Uvicorn; spins down after 15 min idle (~30s cold start) |
+| Postgres | **Neon** (Free) | Users, threads, turns, subscriptions, LangGraph checkpoints |
+| LLMs     | **Ollama Cloud** | `qwen3-coder:480b` across all tiers; Cerebras + NVIDIA + Groq + OpenRouter as cascade fallbacks |
+| Auth     | **Google OAuth** | HttpOnly JWT session cookie (`SameSite=None; Secure` for cross-site Vercel↔Render) |
+| Billing  | **Razorpay** | One-time ₹499 lifetime unlock (no webhook needed — HMAC-verified on `/billing/verify`) |
+
+Production-only kill-switches in env (`ENABLE_LOCAL_RETRIEVAL=false`,
+`AUTO_SAVE_TO_NOTES=false`, `COOKIE_SECURE=true`) skip the local-vault
+retriever and notes auto-save since there's no shared filesystem in
+serverless deployment — the graph runs web + papers + LLM priors only.
+
+To deploy your own: `render.yaml` provisions the API service on Render
+(Python runtime, `pip install -r requirements.txt`, `uvicorn` factory
+start). Push the frontend folder to Vercel with `NEXT_PUBLIC_API_BASE`
+set to your backend URL.
 
 ---
 
