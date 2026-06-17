@@ -101,3 +101,4 @@ logs/
 
 # Claude Code harness state (worktrees, local settings)
 .claude/
+CLAUDE.md
