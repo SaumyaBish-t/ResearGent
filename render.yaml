@@ -14,7 +14,7 @@ services:
     # Free tier sleeps after 15 min idle (~30s cold start on first hit).
     # Bump to `starter` ($7/mo) for always-on once traffic justifies it.
 
-    buildCommand: pip install -r requirements.txt && pip install -e .
+    buildCommand: pip install -r requirements.txt
     startCommand: uvicorn src.api.app:create_app --factory --host 0.0.0.0 --port $PORT
 
     healthCheckPath: /api/status
