@@ -55,6 +55,18 @@ def decode_token(token: str) -> Optional[str]:
         return None
 
 
+def _samesite() -> str:
+    """
+    "none" when cookies must travel cross-site (e.g. Vercel frontend +
+    Render backend on different registrable domains). Requires Secure=True.
+    "lax" for local dev where both ends share `localhost` / `127.0.0.1`.
+
+    Picked from settings.cookie_secure: prod has Secure=true → can use None.
+    Dev (http://) cannot set Secure cookies, so must stay on Lax.
+    """
+    return "none" if settings.cookie_secure else "lax"
+
+
 def set_session_cookie(response: Response, user_id: str) -> None:
     """Attach the session cookie to `response`."""
     response.set_cookie(
@@ -63,7 +75,7 @@ def set_session_cookie(response: Response, user_id: str) -> None:
         max_age=settings.session_ttl_hours * 3600,
         httponly=True,
         secure=settings.cookie_secure,
-        samesite="lax",
+        samesite=_samesite(),  # type: ignore[arg-type]
         path="/",
     )
 
@@ -75,7 +87,7 @@ def clear_session_cookie(response: Response) -> None:
         path="/",
         httponly=True,
         secure=settings.cookie_secure,
-        samesite="lax",
+        samesite=_samesite(),  # type: ignore[arg-type]
     )
 
 
