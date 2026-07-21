@@ -32,9 +32,13 @@ import type {
   SavedEvent,
   SaveSkippedEvent,
   Source,
+  ReviewEvent,
+  ReviewPlannedEvent,
+  ReviewSectionDoneEvent,
+  ReviewCompleteEvent,
 } from "./types";
 
-const API_BASE =
+export const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE?.replace(/\/$/, "") || "http://127.0.0.1:8000";
 
 export interface LogEntry {
@@ -59,11 +63,20 @@ export interface UsageSnapshot {
   threads_used_this_month: number;
   threads_limit: number;        // -1 = unlimited
   turns_limit_per_thread: number; // -1 = unlimited
+  reviews_used: number;
+  reviews_limit: number;
 }
 
 export interface ThreadSummary {
   id: string;
   title: string;
+  created_at: string;
+}
+
+export interface ReviewSummary {
+  id: string;
+  title: string;
+  query: string;
   created_at: string;
 }
 
@@ -80,7 +93,7 @@ export interface ThreadTurn {
 
 export interface PaywallState {
   open: boolean;
-  reason: "thread_cap" | "turn_cap" | null;
+  reason: "thread_cap" | "turn_cap" | "review_cap" | null;
   used?: number;
   limit?: number;
 }
@@ -98,14 +111,19 @@ interface AgentState {
   // The latest in-flight run appears here ONLY after its final event fires.
   threadTurns: ThreadTurn[];
 
+  // ---- review history ----
+  reviews: ReviewSummary[];
+  currentReviewId: string | null;
+
   // ---- paywall ----
   paywall: PaywallState;
 
   // ---- input / lifecycle ----
-  query: string;
-  running: boolean;
-  finished: boolean;
-  runId: string | null;
+    query: string;
+    selectedDomain: string;    // "" = all, "agentic_ai" | "quant_finance" | "time_series"
+    running: boolean;
+    finished: boolean;
+    runId: string | null;
 
   // ---- structural UI state (scrollytelling ↔ dashboard) ----
   hasQueried: boolean;
@@ -118,14 +136,21 @@ interface AgentState {
   nodeStatuses: Record<NodeId, NodeStatus>;
 
   // ---- scores + results ----
-  confidenceScore: number | null;
-  confidenceLabel: string;
-  logs: LogEntry[];
-  sources: Source[];
-  finalOutput: FinalEvent | null;
-  savedPath: string | null;
-  saveSkippedReason: string | null;
-  error: string | null;
+    mode: "research" | "review";  // global app mode
+    confidenceScore: number | null;
+    confidenceLabel: string;
+    logs: LogEntry[];
+    sources: Source[];
+    finalOutput: FinalEvent | null;
+    savedPath: string | null;
+    saveSkippedReason: string | null;
+    error: string | null;
+
+    // ---- review state ----
+    reviewRunning: boolean;
+    reviewMarkdown: string | null;
+    reviewTitle: string | null;
+    reviewSections: string[];
 
   // ---- actions ----
   bootstrap: () => Promise<void>;
@@ -134,12 +159,19 @@ interface AgentState {
   refreshUsage: () => Promise<void>;
   refreshThreads: () => Promise<void>;
   openThread: (id: string) => Promise<void>;
+  refreshReviews: () => Promise<void>;
+  openReview: (id: string) => Promise<void>;
 
   setQuery: (q: string) => void;
+  setDomain: (d: string) => void;
   setScrollProgress: (p: number) => void;
-  startRun: (q?: string) => Promise<void>;
-  stopRun: () => void;
-  reset: () => void;
+    setMode: (m: "research" | "review") => void;
+    startRun: (q?: string) => Promise<void>;
+    stopRun: () => void;
+    reset: () => void;
+
+    startReview: (topic: string) => Promise<void>;
+    stopReview: () => void;
 
   closePaywall: () => void;
   subscribe: () => Promise<void>;
@@ -372,20 +404,54 @@ export const useAgentStore = create<AgentState>((set, get) => {
     }
   };
 
-  return {
-    // ---- initial state ----
+    const handleReviewEvent = (evt: ReviewEvent) => {
+      switch (evt.type) {
+        case "review_planned": {
+          const e = evt as ReviewPlannedEvent;
+          set({ reviewTitle: e.title, reviewSections: e.sections });
+          log("review", `planned: ${e.title} · ${e.sections.length} sections`, "info");
+          break;
+        }
+        case "review_section_done": {
+          const e = evt as ReviewSectionDoneEvent;
+          log("review", `section ${e.section_index + 1}: ${e.heading} (${e.n_sources} sources)`, "info");
+          break;
+        }
+        case "review_complete": {
+          const e = evt as ReviewCompleteEvent;
+          set({ reviewMarkdown: e.markdown, reviewRunning: false });
+          log("review", `complete: ${e.n_sources} sources · ${e.duration_ms}ms`, "success");
+          closeStream();
+          void get().refreshReviews();
+          void get().refreshUsage();
+          break;
+        }
+        case "review_error": {
+          set({ reviewRunning: false, reviewMarkdown: null });
+          log("review", evt.error, "error");
+          closeStream();
+          break;
+        }
+      }
+    };
+
+    return {
+      // ---- initial state ----
     authReady: false,
     user: null,
     usage: null,
     threads: [],
     currentThreadId: null,
     threadTurns: [],
+    reviews: [],
+    currentReviewId: null,
     paywall: { open: false, reason: null },
 
     query: "",
-    running: false,
-    finished: false,
-    runId: null,
+        selectedDomain: "",
+        running: false,
+        finished: false,
+        runId: null,
     hasQueried: false,
     scrollProgress: 0,
     currentActiveNode: null,
@@ -398,19 +464,26 @@ export const useAgentStore = create<AgentState>((set, get) => {
     sources: [],
     finalOutput: null,
     savedPath: null,
-    saveSkippedReason: null,
-    error: null,
+        saveSkippedReason: null,
+        error: null,
 
-    // ---- auth ----
+        mode: "research" as const,
+        reviewRunning: false,
+        reviewMarkdown: null,
+        reviewTitle: null,
+        reviewSections: [],
+
+        // ---- auth ----
     bootstrap: async () => {
       try {
         const res = await fetch(`${API_BASE}/auth/me`, fetchOpts);
         if (res.ok) {
           const user: CurrentUser = await res.json();
           set({ user });
-          // Once authed, hydrate usage + threads in parallel.
+          // Once authed, hydrate usage + threads + reviews in parallel.
           void get().refreshUsage();
           void get().refreshThreads();
+          void get().refreshReviews();
         } else {
           set({ user: null });
         }
@@ -438,6 +511,8 @@ export const useAgentStore = create<AgentState>((set, get) => {
         threads: [],
         currentThreadId: null,
         threadTurns: [],
+        reviews: [],
+        currentReviewId: null,
         ...freshRunState(),
         running: false,
         finished: false,
@@ -530,9 +605,42 @@ export const useAgentStore = create<AgentState>((set, get) => {
       }
     },
 
-    setQuery: (q) => set({ query: q }),
+    refreshReviews: async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/reviews`, fetchOpts);
+        if (res.ok) {
+          const data = await res.json();
+          set({ reviews: data.reviews || [] });
+        }
+      } catch {
+        /* non-fatal */
+      }
+    },
 
-    setScrollProgress: (p) => {
+    openReview: async (id) => {
+      closeStream();
+      set({ currentReviewId: null, reviewMarkdown: null });
+      try {
+        const res = await fetch(`${API_BASE}/api/reviews/${id}`, fetchOpts);
+        if (!res.ok) return;
+        const data = await res.json();
+        set({
+          currentReviewId: id,
+          reviewTitle: data.title,
+          reviewMarkdown: data.markdown,
+          reviewRunning: false,
+          query: data.query || "",
+        });
+      } catch {
+        /* non-fatal */
+      }
+    },
+
+    setQuery: (q) => set({ query: q }),
+      setDomain: (d: string) => set({ selectedDomain: d }),
+      setMode: (m) => set({ mode: m }),
+
+      setScrollProgress: (p) => {
       const q = Math.round(Math.min(1, Math.max(0, p)) * 100) / 100;
       if (q !== get().scrollProgress) set({ scrollProgress: q });
     },
@@ -571,9 +679,13 @@ export const useAgentStore = create<AgentState>((set, get) => {
       }));
 
       const params = new URLSearchParams({ q: question });
-      if (onFollowUp && get().currentThreadId) {
-        params.set("thread_id", get().currentThreadId as string);
-      }
+            if (onFollowUp && get().currentThreadId) {
+              params.set("thread_id", get().currentThreadId as string);
+            }
+            const domain = get().selectedDomain;
+            if (domain) {
+              params.set("domain", domain);
+            }
       const url = `${API_BASE}/api/research?${params.toString()}`;
       es = new EventSource(url, { withCredentials: true });
 
@@ -643,9 +755,79 @@ export const useAgentStore = create<AgentState>((set, get) => {
     },
 
     stopRun: () => {
-      closeStream();
-      set({ running: false, finished: true });
-    },
+        closeStream();
+        set({ running: false, finished: true });
+      },
+
+      startReview: async (topic) => {
+        const queryStr = topic.trim();
+        if (!queryStr || get().reviewRunning) return;
+
+        // Pre-flight quota check
+        const u = get().usage;
+        if (u && !u.is_admin && !u.is_subscribed) {
+          if (u.reviews_limit !== -1 && u.reviews_used >= u.reviews_limit) {
+            set({
+              paywall: {
+                open: true,
+                reason: "review_cap",
+                used: u.reviews_used,
+                limit: u.reviews_limit,
+              },
+            });
+            return;
+          }
+        }
+
+        closeStream();
+        set({ reviewRunning: true, reviewMarkdown: null, reviewTitle: null, reviewSections: [] });
+
+        const url = `${API_BASE}/api/review?q=${encodeURIComponent(queryStr)}`;
+        es = new EventSource(url, { withCredentials: true });
+
+        const reviewEvents: ReviewEvent["type"][] = [
+          "review_planned", "review_section_done", "review_complete", "review_error",
+        ];
+        for (const name of reviewEvents) {
+          es.addEventListener(name, (ev) => {
+            try {
+              const data = JSON.parse((ev as MessageEvent).data);
+              handleReviewEvent({ ...data, type: name } as ReviewEvent);
+            } catch {
+              log("system", `bad review payload: ${name}`, "error");
+            }
+          });
+        }
+        es.onerror = async () => {
+          closeStream();
+          set({ reviewRunning: false });
+          try {
+            await get().refreshUsage();
+            const usage = get().usage;
+            if (usage && !usage.is_admin && !usage.is_subscribed) {
+              if (usage.reviews_limit !== -1 && usage.reviews_used >= usage.reviews_limit) {
+                set({
+                  paywall: {
+                    open: true,
+                    reason: "review_cap",
+                    used: usage.reviews_used,
+                    limit: usage.reviews_limit,
+                  },
+                });
+                return;
+              }
+            }
+          } catch {
+            /* ignore */
+          }
+          log("system", "review stream connection lost", "error");
+        };
+      },
+
+      stopReview: () => {
+        closeStream();
+        set({ reviewRunning: false });
+      },
 
     reset: () => {
       closeStream();
@@ -658,6 +840,10 @@ export const useAgentStore = create<AgentState>((set, get) => {
         currentThreadId: null,
         threadTurns: [],
         query: get().query,
+        currentReviewId: null,
+        reviewMarkdown: null,
+        reviewTitle: null,
+        reviewSections: [],
       });
     },
 

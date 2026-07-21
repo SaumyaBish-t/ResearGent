@@ -14,15 +14,30 @@ import { useAgentStore, type ThreadSummary } from "@/lib/store";
  * Hidden during a run so it can't fight the LogPanel for the same space.
  */
 export default function HistorySidebar() {
+  const mode = useAgentStore((s) => s.mode);
   const threads = useAgentStore((s) => s.threads);
+  const reviews = useAgentStore((s) => s.reviews);
   const currentThreadId = useAgentStore((s) => s.currentThreadId);
+  const currentReviewId = useAgentStore((s) => s.currentReviewId);
   const openThread = useAgentStore((s) => s.openThread);
+  const openReview = useAgentStore((s) => s.openReview);
   const reset = useAgentStore((s) => s.reset);
   const running = useAgentStore((s) => s.running);
+  const reviewRunning = useAgentStore((s) => s.reviewRunning);
   const [open, setOpen] = useState(false);
 
+  const busy = running || reviewRunning;
+
   // Don't compete with the LogPanel during an active run.
-  if (running) return null;
+  if (busy) return null;
+
+  const isReview = mode === "review";
+  const items = isReview ? reviews : threads;
+  const currentId = isReview ? currentReviewId : currentThreadId;
+  const title = isReview ? "review history" : "research history";
+  const emptyMessage = isReview ? "No previous reviews yet." : "No previous research yet.";
+  const newButtonLabel = isReview ? "+ new review" : "+ new research";
+  const ariaLabel = isReview ? "Open review history" : "Open research history";
 
   return (
     <>
@@ -31,7 +46,7 @@ export default function HistorySidebar() {
         <button
           onClick={() => setOpen(true)}
           className="pointer-events-auto absolute left-0 top-1/2 z-20 flex h-24 w-6 -translate-y-1/2 items-center justify-center rounded-r-lg border border-l-0 border-line bg-[rgba(11,14,22,0.85)] backdrop-blur transition hover:border-accent/40 hover:bg-[rgba(14,18,28,0.95)]"
-          aria-label="Open research history"
+          aria-label={ariaLabel}
         >
           <div className="flex flex-col items-center gap-1.5">
             <span className="h-1 w-1 rounded-full bg-accent" />
@@ -52,7 +67,7 @@ export default function HistorySidebar() {
           >
             <header className="flex items-center justify-between px-5 pt-4 pb-3">
               <div className="font-mono text-[10px] uppercase tracking-[0.28em] text-ink-dim">
-                research history
+                {title}
               </div>
               <button
                 onClick={() => setOpen(false)}
@@ -66,20 +81,25 @@ export default function HistorySidebar() {
             <div className="hairline mx-5" />
 
             <div className="flex-1 overflow-y-auto px-3 py-3">
-              {threads.length === 0 ? (
+              {items.length === 0 ? (
                 <div className="px-2 py-6 text-center text-[12px] text-ink-mute">
-                  No previous research yet.
+                  {emptyMessage}
                 </div>
               ) : (
                 <ul className="space-y-1">
-                  {threads.map((t) => (
+                  {items.map((t) => (
                     <ThreadRow
                       key={t.id}
-                      t={t}
-                      active={t.id === currentThreadId}
+                      title={t.title}
+                      created_at={t.created_at}
+                      active={t.id === currentId}
                       onClick={() => {
                         setOpen(false);
-                        void openThread(t.id);
+                        if (isReview) {
+                          void openReview(t.id);
+                        } else {
+                          void openThread(t.id);
+                        }
                       }}
                     />
                   ))}
@@ -95,7 +115,7 @@ export default function HistorySidebar() {
                 }}
                 className="w-full rounded-lg border border-line bg-white/[0.02] px-3 py-2 text-center font-mono text-[11px] uppercase tracking-[0.22em] text-ink-dim transition hover:border-accent/40 hover:text-accent"
               >
-                + new research
+                {newButtonLabel}
               </button>
             </footer>
           </motion.aside>
@@ -106,11 +126,13 @@ export default function HistorySidebar() {
 }
 
 function ThreadRow({
-  t,
+  title,
+  created_at,
   active,
   onClick,
 }: {
-  t: ThreadSummary;
+  title: string;
+  created_at: string;
   active: boolean;
   onClick: () => void;
 }) {
@@ -124,9 +146,9 @@ function ThreadRow({
             : "text-ink-dim hover:bg-white/[0.03] hover:text-ink"
         }`}
       >
-        <div className="line-clamp-2 text-[12.5px] leading-snug">{t.title}</div>
+        <div className="line-clamp-2 text-[12.5px] leading-snug">{title}</div>
         <div className="font-mono text-[9.5px] uppercase tracking-widest text-ink-mute">
-          {formatStamp(t.created_at)}
+          {formatStamp(created_at)}
         </div>
       </button>
     </li>

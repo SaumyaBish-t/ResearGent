@@ -18,6 +18,8 @@ export type NodeId =
   | "web_fallback"
   | "reflector"
   | "generator"
+  | "verifier"
+  | "memory_keeper"
   | "llm_reasoning"
   | "no_answer"
   | "vault";
@@ -76,12 +78,22 @@ export interface NodeSummary {
 }
 
 export interface Source {
-  tag: string; // "[S1]" etc.
+  tag: string; // "S1" etc.
   citation: string;
   signal: string; // "paper:*" | "web:*" | "local"
   preview: string;
   rrf_score?: number | null;
   score?: number | null;
+  // Paper metadata (optional, from HydratedChunk)
+  doc_title?: string;
+  url?: string;
+  source_file?: string;
+  authors?: string[];
+  year?: number | null;
+  venue?: string;
+  arxiv_id?: string;
+  // Claim verification verdict (set by Verifier node)
+  verdict?: "supports" | "contradicts" | "unclear";
 }
 
 export interface FinalEvent {
@@ -125,6 +137,45 @@ export type AgentEvent =
   | SavedEvent
   | SaveSkippedEvent
   | ErrorEvent;
+
+// ── Review pipeline events ──────────────────────────────────────────────
+export interface ReviewPlannedEvent {
+  type: "review_planned";
+  run_id: string;
+  title: string;
+  sections: string[];
+  ts: number;
+}
+export interface ReviewSectionDoneEvent {
+  type: "review_section_done";
+  run_id: string;
+  section_index: number;
+  heading: string;
+  n_sources: number;
+  body_len: number;
+  ts: number;
+}
+export interface ReviewCompleteEvent {
+  type: "review_complete";
+  run_id: string;
+  title: string;
+  markdown: string;
+  sections: string[];
+  n_sources: number;
+  duration_ms: number;
+  ts: number;
+}
+export interface ReviewErrorEvent {
+  type: "review_error";
+  run_id?: string;
+  error: string;
+  ts: number;
+}
+export type ReviewEvent =
+  | ReviewPlannedEvent
+  | ReviewSectionDoneEvent
+  | ReviewCompleteEvent
+  | ReviewErrorEvent;
 
 // The terminal events that mean "the stream is genuinely done" — used to
 // proactively close the EventSource so it doesn't auto-reconnect and re-run

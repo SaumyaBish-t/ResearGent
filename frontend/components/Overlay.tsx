@@ -4,9 +4,11 @@ import { useEffect, useState } from "react";
 import { useAgentStore } from "@/lib/store";
 import HistorySidebar from "./HistorySidebar";
 import LogPanel from "./LogPanel";
+import ModeSwitcher from "./ModeSwitcher";
 import NarrativeOverlay from "./NarrativeOverlay";
 import PaywallModal from "./PaywallModal";
 import ResultModal from "./ResultModal";
+import ReviewModal from "./ReviewModal";
 import SearchBar from "./SearchBar";
 import SignInLanding from "./SignInLanding";
 import UserMenu from "./UserMenu";
@@ -84,25 +86,30 @@ export default function Overlay() {
 
       {/* Top-right: status + user menu */}
       <header className="absolute right-5 top-4 flex items-center gap-3">
-        <div className="font-mono text-[9px] uppercase tracking-[0.3em] text-ink-mute">
-          agentic network
-        </div>
-        <span className="h-3 w-px bg-line" />
-        <div className={`font-mono text-[10px] tracking-widest ${statusColor}`}>
-          {statusLabel}
-        </div>
-        <span className="h-3 w-px bg-line" />
-        <UserMenu />
-      </header>
+              <ModeSwitcher />
+              <span className="h-3 w-px bg-line" />
+              <div className="font-mono text-[9px] uppercase tracking-[0.3em] text-ink-mute">
+                agentic network
+              </div>
+              <span className="h-3 w-px bg-line" />
+              <div className={`font-mono text-[10px] tracking-widest ${statusColor}`}>
+                {statusLabel}
+              </div>
+              <span className="h-3 w-px bg-line" />
+              <UserMenu />
+            </header>
 
       {hasQueried ? (
-        <>
-          <LogPanel />
-          <ResultModal />
-        </>
-      ) : (
-        <NarrativeOverlay />
-      )}
+              <>
+                <LogPanel />
+                <ResultModal />
+              </>
+            ) : (
+              <NarrativeOverlay />
+            )}
+
+            {/* Review — renders when mode=review */}
+            <ReviewModal />
 
       {/* History sidebar — auto-hides during a live run. */}
       <HistorySidebar />

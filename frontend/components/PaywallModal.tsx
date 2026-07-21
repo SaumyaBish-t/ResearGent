@@ -17,12 +17,16 @@ export default function PaywallModal() {
   const title =
     paywall.reason === "turn_cap"
       ? "Follow-up limit reached"
-      : "Monthly research limit reached";
+      : paywall.reason === "review_cap"
+        ? "Literature review limit reached"
+        : "Monthly research limit reached";
 
   const body =
     paywall.reason === "turn_cap"
       ? "Free threads cap at 3 questions each. Unlock lifetime access for unlimited follow-ups across every thread."
-      : "Free accounts get 3 researches per month. Unlock lifetime access — pay once, unlimited researches forever.";
+      : paywall.reason === "review_cap"
+        ? "Free accounts get 1 literature review. Unlock lifetime access — pay once, unlimited reviews forever."
+        : "Free accounts get 3 researches per month. Unlock lifetime access — pay once, unlimited researches forever.";
 
   return (
     <AnimatePresence>

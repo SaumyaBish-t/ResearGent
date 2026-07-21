@@ -7,6 +7,9 @@ import remarkGfm from "remark-gfm";
 import { useAgentStore, type ThreadTurn } from "@/lib/store";
 import type { Source } from "@/lib/types";
 
+const API_BASE =
+  process.env.NEXT_PUBLIC_API_BASE?.replace(/\/$/, "") || "http://127.0.0.1:8000";
+
 /**
  * Chat-style conversation view of the current thread.
  *
@@ -107,7 +110,7 @@ export default function ResultModal() {
             {/* Conversation */}
             <div
               ref={scrollRef}
-              className="flex-1 overflow-y-auto px-7 py-6"
+              className="flex-1 overflow-y-auto px-7 pt-6 pb-20"
             >
               {error && threadTurns.length === 0 ? (
                 <ErrorBlock error={error} />
@@ -240,13 +243,23 @@ function SourcesList({ sources }: { sources: Source[] }) {
         <span className="font-mono text-[9.5px] uppercase tracking-[0.32em] text-ink-mute">
           sources · {sources.length}
         </span>
+        {sources.some((s) => s.arxiv_id) && (
+          <a
+            href={`${API_BASE}/api/threads/${getThreadId()}/turns/${getTurnIndex()}/export.bib`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="rounded-md border border-line bg-white/[0.03] px-2 py-[2px] font-mono text-[9.5px] uppercase tracking-widest text-ink-dim transition hover:border-accent/40 hover:text-accent"
+          >
+            .bib
+          </a>
+        )}
         <span className="h-px flex-1 bg-line" />
       </div>
       <ul className="grid gap-2">
         {sources.map((s) => (
           <li
             key={s.tag}
-            className="grid grid-cols-[auto_auto_1fr] items-baseline gap-3 rounded-lg border border-line bg-white/[0.015] px-3 py-2 transition hover:border-accent/30 hover:bg-white/[0.03]"
+            className="grid grid-cols-[auto_auto_auto_1fr] items-baseline gap-3 rounded-lg border border-line bg-white/[0.015] px-3 py-2 transition hover:border-accent/30 hover:bg-white/[0.03]"
           >
             <span className="font-mono text-[12px] font-semibold tracking-wide text-accent">
               {s.tag}
@@ -254,14 +267,51 @@ function SourcesList({ sources }: { sources: Source[] }) {
             <span className="rounded-md border border-line bg-white/[0.04] px-1.5 py-[1px] font-mono text-[10px] uppercase tracking-widest text-ink-dim">
               {s.signal}
             </span>
+            {s.verdict && (
+              <span
+                className={`rounded-md border px-1.5 py-[1px] font-mono text-[10px] uppercase tracking-widest ${
+                  s.verdict === "supports"
+                    ? "border-good/40 bg-good/[0.08] text-good"
+                    : s.verdict === "contradicts"
+                      ? "border-bad/40 bg-bad/[0.08] text-bad"
+                      : "border-warn/40 bg-warn/[0.08] text-warn"
+                }`}
+              >
+                {s.verdict === "supports" ? "✓" : s.verdict === "contradicts" ? "✗" : "?"}
+              </span>
+            )}
             <span className="break-words text-[13px] leading-relaxed text-slate-300">
-              {s.citation}
+              {s.doc_title ? (
+                <>
+                  <span className="text-ink">{s.doc_title}</span>
+                  {s.arxiv_id && (
+                    <span className="ml-1.5 font-mono text-[10px] text-ink-mute">
+                      arxiv:{s.arxiv_id}
+                    </span>
+                  )}
+                  <br />
+                  <span className="text-[11px] text-slate-500">{s.citation}</span>
+                </>
+              ) : (
+                s.citation
+              )}
             </span>
           </li>
         ))}
       </ul>
     </div>
   );
+}
+
+// Small helpers to get thread/turn IDs for the export URL
+// (API_BASE and useAgentStore imported at top of file)
+
+function getThreadId(): string {
+  return useAgentStore.getState().currentThreadId || "";
+}
+function getTurnIndex(): number {
+  const turns = useAgentStore.getState().threadTurns;
+  return turns.length > 0 ? turns[turns.length - 1].turn_index : 0;
 }
 
 function LiveTurn({ question }: { question: string }) {
