@@ -76,31 +76,110 @@ _DDL: list[str] = [
     """,
 
     # ---- research_turns ----------------------------------------------------
-    # turn_index is 0-based and unique per thread — enforces "3 turns max" at
-    # the DB level too (the app should reject before insert anyway).
-    """
-    CREATE TABLE IF NOT EXISTS research_turns (
-        id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        thread_id     UUID NOT NULL REFERENCES research_threads(id) ON DELETE CASCADE,
-        turn_index    INT  NOT NULL,
-        question      TEXT NOT NULL,
-        answer        TEXT,
-        confidence    TEXT,
-        score         REAL,
-        sources_json  JSONB,
-        run_id        TEXT,
-        created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
-    );
-    """,
-    """
-    CREATE UNIQUE INDEX IF NOT EXISTS research_turns_thread_idx_uniq
-        ON research_turns(thread_id, turn_index);
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS research_turns_thread_created_idx
-        ON research_turns(thread_id, created_at);
-    """,
-]
+        # turn_index is 0-based and unique per thread — enforces "3 turns max" at
+        # the DB level too (the app should reject before insert anyway).
+        """
+        CREATE TABLE IF NOT EXISTS research_turns (
+            id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            thread_id     UUID NOT NULL REFERENCES research_threads(id) ON DELETE CASCADE,
+            turn_index    INT  NOT NULL,
+            question      TEXT NOT NULL,
+            answer        TEXT,
+            confidence    TEXT,
+            score         REAL,
+            sources_json  JSONB,
+            run_id        TEXT,
+            created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        """,
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS research_turns_thread_idx_uniq
+            ON research_turns(thread_id, turn_index);
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS research_turns_thread_created_idx
+            ON research_turns(thread_id, created_at);
+        """,
+
+        # ---- research_memory (Persistent Knowledge Graph — Phase 18) ------------
+        # Tracks topics, entities, and knowledge gaps per user across all research.
+        # Built automatically after each run; queried on planner startup.
+        """
+        CREATE TABLE IF NOT EXISTS research_memory_topics (
+            id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            label         TEXT NOT NULL,
+            domain        TEXT,
+            count         INT  NOT NULL DEFAULT 1,
+            last_seen     TIMESTAMPTZ NOT NULL DEFAULT now(),
+            created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE(user_id, label)
+        );
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS memory_topics_user_idx
+            ON research_memory_topics(user_id, last_seen DESC);
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS research_memory_entities (
+            id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            topic_id      UUID REFERENCES research_memory_topics(id) ON DELETE CASCADE,
+            entity_name   TEXT NOT NULL,
+            entity_type   TEXT DEFAULT 'concept',
+            count         INT  NOT NULL DEFAULT 1,
+            last_seen     TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS memory_entities_topic_idx
+            ON research_memory_entities(topic_id);
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS research_memory_relationships (
+            id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id           UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            source_topic_id   UUID NOT NULL REFERENCES research_memory_topics(id) ON DELETE CASCADE,
+            target_topic_id   UUID NOT NULL REFERENCES research_memory_topics(id) ON DELETE CASCADE,
+            relationship_type TEXT NOT NULL DEFAULT 'related',
+            strength          REAL NOT NULL DEFAULT 0.5,
+            last_seen         TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE(user_id, source_topic_id, target_topic_id, relationship_type)
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS research_memory_gaps (
+            id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            topic_id        UUID REFERENCES research_memory_topics(id) ON DELETE CASCADE,
+            gap_description TEXT NOT NULL,
+            status          TEXT NOT NULL DEFAULT 'open',
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+            resolved_at     TIMESTAMPTZ
+        );
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS memory_gaps_open_idx
+            ON research_memory_gaps(user_id, status)
+            WHERE status = 'open';
+        """,
+        # ---- literature_reviews --------------------------------------------
+        """
+        CREATE TABLE IF NOT EXISTS literature_reviews (
+            id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            query       TEXT NOT NULL,
+            title       TEXT NOT NULL,
+            markdown    TEXT,
+            duration_ms INT,
+            created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS literature_reviews_user_created_idx
+            ON literature_reviews(user_id, created_at DESC);
+        """,
+    ]
 
 
 def run_migrations() -> list[str]:

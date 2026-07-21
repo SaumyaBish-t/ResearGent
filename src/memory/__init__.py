@@ -1,0 +1,1 @@
+"""Memory package — Persistent Knowledge Graph for ResearGent."""
