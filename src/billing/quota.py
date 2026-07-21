@@ -19,14 +19,14 @@ from dataclasses import dataclass
 from typing import Optional
 
 from src.auth.users import User
-from src.billing import subscription, threads
+from src.billing import reviews, subscription, threads
 from src.config import settings
 
 
 @dataclass
 class QuotaDecision:
     allowed: bool
-    reason: Optional[str]   # "thread_cap" | "turn_cap" | None
+    reason: Optional[str]   # "thread_cap" | "turn_cap" | "review_cap" | None
     used: int
     limit: int
     is_subscribed: bool
@@ -73,6 +73,31 @@ def check_can_create_thread(user: User) -> QuotaDecision:
     )
 
 
+def check_can_create_review(user: User) -> QuotaDecision:
+    """Can `user` generate a new literature review RIGHT NOW?"""
+    if _entitled(user):
+        return QuotaDecision(
+            allowed=True,
+            reason=None,
+            used=0,
+            limit=0,
+            is_subscribed=not user.is_admin,
+            is_admin=user.is_admin,
+        )
+
+    used = reviews.count_reviews_by_user(user_id=user.id)
+    limit = 1
+    allowed = used < limit
+    return QuotaDecision(
+        allowed=allowed,
+        reason=None if allowed else "review_cap",
+        used=used,
+        limit=limit,
+        is_subscribed=False,
+        is_admin=False,
+    )
+
+
 def check_can_add_turn(*, user: User, thread_id: str) -> QuotaDecision:
     """Can `user` add ANOTHER turn (follow-up) to `thread_id` RIGHT NOW?"""
     if _entitled(user):
@@ -110,6 +135,8 @@ def usage_snapshot(user: User) -> dict:
             "threads_used_this_month": 0,
             "threads_limit": -1,
             "turns_limit_per_thread": -1,
+            "reviews_used": 0,
+            "reviews_limit": -1,
         }
     return {
         "is_subscribed": False,
@@ -117,4 +144,6 @@ def usage_snapshot(user: User) -> dict:
         "threads_used_this_month": threads.count_threads_this_month(user_id=user.id),
         "threads_limit": settings.free_threads_per_month,
         "turns_limit_per_thread": settings.free_turns_per_thread,
+        "reviews_used": reviews.count_reviews_by_user(user_id=user.id),
+        "reviews_limit": 1,
     }

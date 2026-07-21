@@ -132,6 +132,22 @@ def list_turns(*, thread_id: str) -> list[Turn]:
     return [_row_to_turn(r) for r in rows]
 
 
+def get_turn(*, thread_id: str, turn_index: int) -> Turn | None:
+    """Fetch a single turn by thread_id and turn_index."""
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, thread_id, turn_index, question, answer, confidence,
+                   score, sources_json, run_id, created_at
+            FROM research_turns
+            WHERE thread_id = %s AND turn_index = %s
+            """,
+            (thread_id, turn_index),
+        )
+        row = cur.fetchone()
+    return _row_to_turn(row) if row else None
+
+
 def count_threads_this_month(*, user_id: str) -> int:
     """How many threads `user_id` created since the start of the current calendar month."""
     with connection() as conn, conn.cursor() as cur:
