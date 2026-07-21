@@ -645,6 +645,7 @@ def _parse_pdf_bytes(data: bytes) -> str:
         # the per-page swallow couldn't.
         try:
             t = page.extract_text() or ""
+            t = t.replace("\x00", "").replace("\u0000", "")
         except Exception:
             t = ""
         if t.strip():
@@ -980,6 +981,75 @@ def discover_papers(
         ranked = _expand_with_semantic_chunks(query, ranked)
         _debug(f"[enrich] DONE after_expand={len(ranked)} chunks")
 
+    # Auto-promote discovered papers into the permanent central vector store
+    if ranked:
+        _auto_ingest_discovered_chunks(query, ranked)
+
     dur = time.perf_counter() - t0
     _debug(f"=== discover_papers END total={len(ranked)} chunks in {dur:.1f}s ===")
     return ranked
+
+
+def _auto_ingest_discovered_chunks(query: str, chunks: list[PaperChunk]) -> None:
+    """
+    Auto-promote top discovered paper chunks into the permanent vector store (data/store/*.pkl).
+    This ensures papers discovered by one user are indexed permanently and
+    available for all future queries across all users without re-downloading.
+    """
+    if not chunks:
+        return
+
+    try:
+        from datetime import datetime, timezone
+        from src.llm.provider import embed
+        from src.store import get_or_create_papers_collection
+
+        col = get_or_create_papers_collection()
+
+        new_ids: list[str] = []
+        new_texts: list[str] = []
+        new_metadatas: list[dict] = []
+
+        for c in chunks:
+            raw_key = c.arxiv_id or re.sub(r"[^a-zA-Z0-9]+", "_", c.title.lower())[:50]
+            chunk_id = f"discovery::{raw_key}::{c.chunk_index}"
+
+            # Skip if chunk is already present in store
+            existing = col.get_by_ids([chunk_id])
+            if existing and existing.get("ids"):
+                continue
+
+            # Truncate to a safe token budget (~500 tokens / 2000 chars) for local embedders (Ollama/NVIDIA)
+            body = c.chunk_text or c.abstract or c.title
+            text_to_store = f"{c.title}\n\n{body}"[:2000]
+
+            if not text_to_store.strip():
+                continue
+
+            meta = {
+                "source_file": c.source_file,
+                "page_number": c.page_number,
+                "chunk_index": c.chunk_index,
+                "citation": c.source_file,
+                "title": c.title,
+                "url": c.url or "",
+                "authors": ", ".join(c.authors) if c.authors else "",
+                "year": c.year or 0,
+                "venue": c.venue or "arXiv",
+                "arxiv_id": c.arxiv_id or "",
+                "pdf_url": c.pdf_url or "",
+                "discovered_via_query": query[:100],
+                "ingested_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+            new_ids.append(chunk_id)
+            new_texts.append(text_to_store)
+            new_metadatas.append(meta)
+
+        if new_ids:
+            vectors = embed(new_texts)
+            col.add(ids=new_ids, embeddings=vectors, documents=new_texts, metadatas=new_metadatas)
+            _debug(f"[auto-ingest] Persisted {len(new_ids)} new paper chunk(s) to permanent vector store.")
+    except Exception as e:
+        _debug(f"[auto-ingest warning] Failed to persist discovered papers: {type(e).__name__}: {e}")
+
