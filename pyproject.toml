@@ -63,6 +63,7 @@ dependencies = [
     "itsdangerous>=2.2.0",
     "httpx-oauth>=0.17.0",
     "razorpay>=2.0.1",
+    "reportlab>=5.0.0",
 ]
 
 [project.optional-dependencies]
