@@ -56,6 +56,7 @@ def _build_pool():
         conninfo=url,
         min_size=settings.postgres_pool_min_size,
         max_size=settings.postgres_pool_max_size,
+        timeout=15.0,
         kwargs={"autocommit": True, "row_factory": dict_row, "prepare_threshold": 0},
         check=ConnectionPool.check_connection,
         max_idle=240,

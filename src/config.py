@@ -88,7 +88,7 @@ class Settings(BaseSettings):
     # Google OAuth — used to identify users for quotas + billing.
     google_client_id: str | None = None
     google_client_secret: str | None = None
-    google_redirect_uri: str = "http://localhost:8000/auth/callback"
+    google_redirect_uri: str = "http://127.0.0.1:8000/auth/callback"
 
     # Session JWT signing key. Generate via: python -c "import secrets;print(secrets.token_urlsafe(48))"
     session_secret: str = "CHANGE_ME_BEFORE_PRODUCTION_USE_A_REAL_SECRET"
@@ -401,8 +401,8 @@ class Settings(BaseSettings):
 
     # Connection pool sizing. Free-tier Postgres usually caps at ~20-60 conns,
     # and the agent is sync + single-process — small pool is correct.
-    postgres_pool_min_size: int = 1
-    postgres_pool_max_size: int = 8
+    postgres_pool_min_size: int = 2
+    postgres_pool_max_size: int = 25
 
     # Checkpoint TTL in days. The pruner (see `researgent db prune`) deletes
     # checkpoints + checkpoint_writes older than this. 7 days is enough to

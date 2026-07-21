@@ -85,10 +85,15 @@ class HydratedChunk:
     source_file: str = ""
     page_number: int = 0
     chunk_index: int = -1
-    signal: str = ""              # "local" | "web:tavily" | "paper:arxiv" | ...
+    signal: str = ""
     wikilinks: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
-    url: str = ""                 # set for web/paper, empty for local
+    url: str = ""
+    # Paper metadata — populated for PaperChunk, empty for web/local
+    authors: list[str] = field(default_factory=list)
+    year: int | None = None
+    venue: str = ""
+    arxiv_id: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -102,11 +107,9 @@ class AgentArtifact(Base):
     __tablename__ = "agent_artifacts"
 
     artifact_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    # Mirrors LangGraph's checkpoint thread_id so the TTL pruner can drop
-    # artifacts in lockstep with checkpoints. Indexed for the prune scan.
     thread_id = Column(String(128), nullable=False, index=True)
-    kind = Column(String(16), nullable=False)     # "web" | "paper" | "graph"
-    payload = Column(JSONB, nullable=False)       # serialized HydratedChunk
+    kind = Column(String(16), nullable=False)
+    payload = Column(JSONB, nullable=False)
     created_at = Column(
         DateTime(timezone=True),
         nullable=False,
@@ -114,8 +117,6 @@ class AgentArtifact(Base):
         index=True,
     )
 
-    # Composite index — the prune query is "DELETE WHERE thread_id IN (...)";
-    # this lets it skip the heap entirely.
     __table_args__ = (
         Index("agent_artifacts_thread_created_idx", "thread_id", "created_at"),
     )
@@ -124,8 +125,6 @@ class AgentArtifact(Base):
 # ---------------------------------------------------------------------------
 # Local-chunk hydration (Chroma)
 # ---------------------------------------------------------------------------
-# Pulled out so the dependency on `src.store` stays lazy — keeps the
-# import graph cheap when only the table model is wanted (e.g. db init).
 
 
 def _hydrate_local(ids: list[str]) -> dict[str, HydratedChunk]:
@@ -219,7 +218,7 @@ def hydrate(refs_by_subq: dict[str, list[Any]]) -> dict[str, list[HydratedChunk]
 def hydrate_one(refs: Iterable[Any]) -> list[HydratedChunk]:
     """Convenience: hydrate a flat list of refs (e.g. citation_refs)."""
     bucket = list(refs or [])
-    return hydrate({"_": bucket}).get("_", [])
+    return hydrate({"__": bucket}).get("__", [])
 
 
 # ---------------------------------------------------------------------------
@@ -244,8 +243,6 @@ def _classify_chunk(c: Any) -> str:
     if name == "GraphChunk":
         return "graph"
     if name == "HydratedChunk":
-        # Allow already-hydrated input (e.g. critic dropping irrelevants).
-        # The hydrated chunk's `signal` tells us where it came from.
         sig = (c.signal or "").split(":", 1)[0]
         return sig if sig in {"local", "web", "paper", "graph"} else "local"
     raise TypeError(f"Don't know how to persist chunk of type {name}")
@@ -269,21 +266,16 @@ def _to_hydrated(c: Any) -> HydratedChunk:
             source_file=c.url, signal=c.signal, url=c.url,
         )
     if name == "PaperChunk":
-        # CRITICAL: pass `chunk_idx` through as `chunk_index`. Without it
-        # every slice of the same paper defaults to chunk_index = -1, and
-        # the generator's dedup key `(source_file, chunk_index)` collapses
-        # all 5 AutoGen slices into ONE citation tag — only the FIRST
-        # slice's text reaches the LLM, the rest are silently overwritten
-        # by the `chunk_to_tag` first-write-wins map in _assign_citations.
-        # That's why even when paper_discovery succeeded + critic kept
-        # them + generator received them, the answer cited web URLs
-        # (every web/local chunk has distinct chunk_index) instead of
-        # the actual PaperChunk slices.
         return HydratedChunk(
             text=c.text, citation=c.citation, doc_title=c.doc_title,
             source_file=c.url or c.title, signal=c.signal,
             url=c.url or c.pdf_url,
             chunk_index=getattr(c, "chunk_idx", 0),
+            # Preserve paper metadata for BibTeX export
+            authors=list(getattr(c, "authors", [])),
+            year=getattr(c, "year", None),
+            venue=getattr(c, "venue", ""),
+            arxiv_id=getattr(c, "arxiv_id", ""),
         )
     if name == "GraphChunk":
         return HydratedChunk(
@@ -293,6 +285,20 @@ def _to_hydrated(c: Any) -> HydratedChunk:
             wikilinks=list(c.wikilinks), tags=list(c.tags),
         )
     raise TypeError(f"Don't know how to flatten chunk of type {name}")
+
+
+def _sanitize_for_jsonb(obj: Any) -> Any:
+    """
+    Recursively remove null bytes (\x00 / \u0000) from strings/dicts/lists.
+    PostgreSQL JSONB rejects \u0000 characters as untranslatable.
+    """
+    if isinstance(obj, str):
+        return obj.replace("\x00", "").replace("\u0000", "")
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_jsonb(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_for_jsonb(x) for x in obj]
+    return obj
 
 
 def persist_mixed(
@@ -312,9 +318,6 @@ def persist_mixed(
     if not chunks_by_subq:
         return {}
 
-    # Pass 1: route each chunk + collect ephemeral payloads.
-    # `placements` records (sub_q, position_in_bucket) so we can stitch
-    # newly-minted ephemeral ids back into the right slot post-insert.
     refs_out: dict[str, list[dict[str, str] | None]] = {
         sq: [None] * len(chunks or []) for sq, chunks in chunks_by_subq.items()
     }
@@ -326,16 +329,12 @@ def persist_mixed(
             if kind == "local":
                 cid = getattr(c, "chroma_id", "") or ""
                 if not cid:
-                    # Defensive: HybridChunk without chroma_id (shouldn't
-                    # happen post-Phase-13) — fall back to ephemeral so
-                    # the chunk doesn't silently disappear.
                     ephemeral_jobs.append((sq, i, "local", _to_hydrated(c)))
                 else:
                     refs_out[sq][i] = ChunkRef(kind="local", id=cid).to_dict()
             else:
                 ephemeral_jobs.append((sq, i, kind, _to_hydrated(c)))
 
-    # Pass 2: batch-insert ephemeral chunks if any. One transaction.
     if ephemeral_jobs:
         if not settings.resolve_database_url():
             raise RuntimeError(
@@ -347,15 +346,12 @@ def persist_mixed(
                 row = AgentArtifact(
                     thread_id=thread_id,
                     kind=kind,
-                    payload=asdict(hc),
+                    payload=_sanitize_for_jsonb(asdict(hc)),
                 )
                 s.add(row)
                 s.flush()
                 refs_out[sq][idx] = ChunkRef(kind=kind, id=str(row.artifact_id)).to_dict()
 
-    # `None` slots can only remain if a chunk failed classification AND
-    # ephemeral persistence both — by contract that doesn't happen. Filter
-    # defensively so consumers see a clean list.
     return {sq: [r for r in bucket if r is not None] for sq, bucket in refs_out.items()}
 
 
@@ -367,19 +363,10 @@ def persist_ephemeral(
 ) -> list[ChunkRef]:
     """
     Write web/paper/graph chunks to `agent_artifacts`, return refs.
-
-    Idempotency: we always insert fresh rows. Same chunk seen twice
-    becomes two artifacts — costly, but agent nodes don't re-persist
-    the same chunk twice in practice (web_fallback runs once, paper
-    discovery runs once). If this ever loops, add a (thread_id,
-    content_hash) UNIQUE constraint.
     """
     if not chunks:
         return []
     if not settings.resolve_database_url():
-        # No PG configured — fall back to in-memory refs. This makes
-        # MemorySaver runs still work; the chunks live in the state
-        # blob like before. Acceptable for local dev.
         raise RuntimeError(
             "persist_ephemeral requires Postgres; called without DATABASE_URL"
         )
@@ -387,7 +374,7 @@ def persist_ephemeral(
     refs: list[ChunkRef] = []
     with session_scope() as s:
         for c in chunks:
-            payload = asdict(c)
+            payload = _sanitize_for_jsonb(asdict(c))
             row = AgentArtifact(
                 thread_id=thread_id,
                 kind=kind,
