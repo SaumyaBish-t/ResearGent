@@ -1409,5 +1409,51 @@ def store(
         raise typer.Exit(code=1)
 
 
+@app.command()
+def review(
+    topic: str = typer.Argument(..., help="Literature review topic / request"),
+) -> None:
+    """
+    Generate a structured literature review (SSE stream mapped to stdout).
+    """
+    from src.agent.review_stream import stream_review
+
+    console.print(f"[bold cyan]>> Starting literature review: {topic}[/bold cyan]")
+    
+    markdown_out = ""
+    try:
+        for event in stream_review(topic):
+            etype = event.get("type")
+            if etype == "review_started":
+                console.print(f"[dim]run_id:[/dim] {event.get('run_id')}")
+            elif etype == "review_planned":
+                console.print(f"\n[bold green]Planned Outline:[/bold green] {event.get('title')}")
+                for idx, heading in enumerate(event.get("sections", []), start=1):
+                    console.print(f"  {idx}. {heading}")
+                console.print()
+            elif etype == "review_section_done":
+                console.print(
+                    f"✓ Section {event.get('section_index') + 1}: "
+                    f"[cyan]{event.get('heading')}[/cyan] "
+                    f"(gathered {event.get('n_sources')} sources, {event.get('body_len')} chars)"
+                )
+            elif etype == "review_complete":
+                markdown_out = event.get("markdown", "")
+                console.print(
+                    f"\n[bold green]Done![/bold green] "
+                    f"Gathered {event.get('n_sources')} sources total in {event.get('duration_ms')}ms."
+                )
+            elif etype == "review_error":
+                console.print(f"\n[bold red]Error:[/bold red] {event.get('error')}")
+                raise typer.Exit(code=1)
+    except Exception as e:
+        console.print(f"\n[bold red]Failed:[/bold red] {e}")
+        raise typer.Exit(code=1)
+
+    if markdown_out:
+        console.print("\n--- GENERATED LITERATURE REVIEW ---")
+        console.print(markdown_out)
+
+
 if __name__ == "__main__":
     app()
