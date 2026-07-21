@@ -26,12 +26,16 @@ The whole agent graph streams to a **Next.js + React Three Fiber dashboard** tha
 
 ## ⚡ Why ResearGent
 
-- **It proves before it answers.** A strict Critic node grades retrieved chunks (relevant / partial / irrelevant) and assigns a confidence score. Weak evidence triggers correction, not confident-sounding fabrication.
-- **It cascades instead of giving up.** Local retrieval → query rewriting → academic paper discovery (arXiv + Semantic Scholar, full-text PDF parsing) → live web fallback → last-resort priors. Each stage only fires when the previous one falls short.
-- **It self-reflects.** After drafting, a Reflector node looks for gaps and can loop back for another targeted retrieval pass within a bounded budget.
-- **It only saves what it trusts.** Answers that clear a configurable confidence gate are written back to your notes folder as cited Markdown. Pure-guess answers (no sources) are never saved.
-- **It's model-agnostic.** Every LLM call is routed by *capability tier*, so you bring your own provider and decide which model does the heavy thinking vs. the fast inner-loop work. See [BYOM](#-bring-your-own-model-byom).
-- **It's observable.** A cinematic 3D dashboard shows each node activating, data flowing along edges, and the final cited answer — all live.
+- **Domain specialization.** Users can now restrict the agent to a specific knowledge domain (e.g. *agentic AI*, *quant finance*, *time‑series*) via the `domain` query parameter.
+- **Persistent Research Memory.** Every research run is analyzed by a *Memory Keeper* node that extracts topics, entities, and knowledge gaps into a personal knowledge graph. Past context is injected into new queries — *"Last time you studied X, but Y was unresolved — here's an update"*.
+- **Literature Review Generation.** The new `/api/review` endpoint generates structured multi‑paper literature reviews with sections, inline citations, and a BibTeX bibliography — students and researchers can go from question to draft in minutes.
+- **BibTeX export.** Download a fully‑cited BibTeX bibliography via `/api/threads/{id}/turns/{n}/export.bib` or verify individual claims with the Verifier node.
+- **It proves before it answers.** A strict Critic node grades retrieved chunks (relevant / partial / irrelevant) and assigns a confidence score. Weak evidence triggers correction, not confident‑sounding fabrication.
+- **It cascades instead of giving up.** Local retrieval → query rewriting → academic paper discovery (arXiv + Semantic Scholar, full‑text PDF parsing) → live web fallback → last‑resort priors. Each stage only fires when the previous one falls short.
+- **It self‑reflects.** After drafting, a Reflector node looks for gaps and can loop back for another targeted retrieval pass within a bounded budget.
+- **It only saves what it trusts.** Answers that clear a configurable confidence gate are written back to your notes folder as cited Markdown. Pure‑guess answers (no sources) are never saved.
+- **It's model‑agnostic.** Every LLM call is routed by *capability tier*, so you bring your own provider and decide which model does the heavy thinking vs. the fast inner‑loop work. See [BYOM](#-bring-your-own-model-byom).
+- **It's observable.** A cinematic 3D dashboard shows each node activating, data flowing along its edges, and the final cited answer — all live.
 
 ---
 
@@ -88,29 +92,33 @@ flowchart TD
     P --> R["Local Retriever<br/>dense + BM25 + RRF"]
     R --> C{"Critic<br/>grade + confidence"}
     C -->|high| G["Generator<br/>cited answer"]
-    C -->|"low / medium · retries left"| RW["Rewriter"]
+    C -->|"low / medium - retries left"| RW["Rewriter"]
     RW --> C
     C -->|"budget exhausted"| PD["Paper Discovery<br/>arXiv + Semantic Scholar"]
     PD --> C
-    PD -.->|"still weak"| WF["Web Fallback<br/>Tavily → Serper → DDG"]
+    PD -.->|"still weak"| WF["Web Fallback<br/>Tavily -> Serper -> DDG"]
     WF --> C
-    G --> RF{"Reflector<br/>gap audit"}
-    RF -->|"gaps found · budget left"| R
-    RF -->|accept| V[("Vault Gate<br/>auto-save if confident")]
+    G --> VF["Verifier<br/>claim grading"]
+    VF --> RF{"Reflector<br/>gap audit"}
+    RF -->|"gaps found - budget left"| R
+    RF -->|accept| MK["Memory Keeper<br/>topic extraction"]
+    MK --> V[("Vault Gate<br/>auto-save if confident")]
     V --> A(["Cited Answer"])
 ```
 
 **The nodes:**
 
-1. **Planner** — decomposes complex queries into structured, atomic sub-questions.
+1. **Planner** — decomposes complex queries into structured, atomic sub-questions. Also receives *Research Memory* context: past topics, gaps, and connections.
 2. **Local Retriever** — hybrid retrieval (dense vectors + BM25, fused with Reciprocal Rank Fusion) over your ingested corpus, with optional knowledge-graph expansion along note links.
 3. **The Critic** — grades retrieved context and assigns a confidence verdict (`high` / `medium` / `low`). The gatekeeper that decides whether to ship or correct.
 4. **Rewriter** — re-engineers the query to bridge semantic gaps, then re-retrieves (bounded retry budget).
 5. **Paper Discovery** — when local evidence is insufficient, searches arXiv + Semantic Scholar and parses open-access PDFs on the fly.
 6. **Web Fallback** — live web search (Tavily → Serper → DuckDuckGo cascade) as a resilient last external resort.
 7. **Generator** — synthesizes a single answer with inline `[S#]` citations tied to the evidence.
-8. **Reflector** — audits the draft for gaps and can trigger one more retrieval loop.
-9. **Vault Gate** — writes high-confidence, cited answers to your local Markdown knowledge base.
+8. **Verifier** — grades each `[S#]` claim as *supports*, *contradicts*, or *unclear* (post-generation claim verification).
+9. **Reflector** — audits the draft for gaps and can trigger one more retrieval loop.
+10. **Memory Keeper** — extracts topics, entities, relationships, and knowledge gaps from the answer and persists them to the user's Personal Knowledge Graph.
+11. **Vault Gate** — writes high-confidence, cited answers to your local Markdown knowledge base.
 
 > The retrieval cascade is **corrective**: each fallback stage only runs when the Critic isn't satisfied, so cheap local answers stay cheap and only hard questions pay for paper/web lookups.
 
@@ -290,10 +298,15 @@ Run `researgent status` for a live view of how these resolve.
 ResearGent/
 ├── src/                     # Python backend
 │   ├── agent/               # LangGraph state machine (nodes, graph, streaming)
-│   ├── api/                 # FastAPI app + SSE endpoint
+│   │   ├── nodes/           # Agent node implementations
+│   │   │   └── memory_keeper.py, review_planner.py, review_writer.py, ...
+│   │   └── review_stream.py # Literature review SSE wrapper
+│   ├── api/                 # FastAPI app + SSE endpoints
+│   ├── memory/              # Persistent Knowledge Graph (models, store, router)
 │   ├── llm/                 # Provider-agnostic LLM routing + cascade
 │   ├── retrieval/           # Hybrid retrieval, paper discovery, web fallback
 │   ├── ingest/              # PDF / Markdown chunking + embedding pipeline
+│   ├── export/              # BibTeX and other format export
 │   └── main.py              # `researgent` CLI
 ├── frontend/                # Next.js + React Three Fiber 3D dashboard
 │   ├── app/                 # routes + global styles
@@ -316,9 +329,16 @@ researgent doctor              # embedding / Ollama health check
 researgent ingest <path>       # ingest PDF(s)
 researgent vault-ingest <dir>  # ingest a Markdown notes folder
 researgent research "<query>"  # full agentic run in the terminal
+researgent review "<topic>"    # generate a literature review (SSE to stdout)
 researgent serve               # launch the API + SSE stream
 researgent store info          # inspect the vector store
+researgent db migrate          # run schema migrations (incl. memory tables)
 ```
+
+And via the web UI:
+- **`/api/memory/topics`** — your personal knowledge graph topics
+- **`/api/memory/gaps`** — unresolved knowledge gaps
+- **`/api/review?q=...`** — SSE stream for literature review generation
 
 ---
 
@@ -330,9 +350,12 @@ The hosted app at **<https://resear-gent.vercel.app>** runs on this stack:
 |---|---|---|
 | Frontend | **Vercel** (Hobby) | Next.js + R3F, env var `NEXT_PUBLIC_API_BASE` points at the Render API |
 | Backend  | **Render** (Free) | FastAPI + Uvicorn; spins down after 15 min idle (~30s cold start) |
-| Postgres | **Neon** (Free) | Users, threads, turns, subscriptions, LangGraph checkpoints |
+| Postgres | **Neon** (Free) | Users, threads, turns, subscriptions, LangGraph checkpoints, research memory |
 | LLMs     | **Ollama Cloud** | `qwen3-coder:480b` across all tiers; Cerebras + NVIDIA + Groq + OpenRouter as cascade fallbacks |
 | Auth     | **Google OAuth** | HttpOnly JWT session cookie (`SameSite=None; Secure` for cross-site Vercel↔Render) |
+
+> **Note:** The Google OAuth `redirect_uri` must match the backend host exactly. Use `http://127.0.0.1:8000/auth/callback` when running locally (the backend defaults to 127.0.0.1, not localhost). Set `GOOGLE_REDIRECT_URI` in `.env` to override.
+
 | Billing  | **Razorpay** | One-time ₹499 lifetime unlock (no webhook needed — HMAC-verified on `/billing/verify`) |
 
 Production-only kill-switches in env (`ENABLE_LOCAL_RETRIEVAL=false`,
