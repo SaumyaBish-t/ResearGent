@@ -1,20 +1,7 @@
-"""
-Streaming wrapper around the agent graph.
+"""Streaming wrapper around the agent graph.
 
 Wraps `graph.stream(input, stream_mode="updates")` and translates each
 LangGraph node-update into a clean StreamEvent the UI can render.
-
-Stream event types
-------------------
-  run_started        — at the very beginning, includes question + run_id
-  node_start         — when a node begins (currently inferred from updates)
-  node_complete      — when a node returns its state update
-  final              — terminal event with the materialized AgentResult dict
-  error              — if the graph throws
-
-We DON'T expose raw state on the wire because state contains chunk objects
-that are heavy + serialization-fiddly. Instead we surface compact summaries
-the UI actually needs (chunk counts, citation map, confidence, etc.).
 """
 
 from __future__ import annotations
@@ -28,13 +15,6 @@ from src.agent.state import AgentState
 
 
 def _summarize_node_update(node_name: str, update: dict[str, Any]) -> dict[str, Any]:
-    """
-    Take the raw state delta a node returned and surface only UI-friendly fields.
-
-    The full state can contain dozens of HybridChunk objects which are
-    expensive to serialize and not useful in the streaming view (the UI
-    shows them at the end). Per-node summary keeps SSE messages small.
-    """
     summary: dict[str, Any] = {}
 
     if node_name == "planner":
@@ -46,7 +26,6 @@ def _summarize_node_update(node_name: str, update: dict[str, Any]) -> dict[str, 
         cbs = update.get("chunk_refs_by_subq") or {}
         summary["total_chunks"] = sum(len(v) for v in cbs.values())
         summary["per_subq_counts"] = {k[:60]: len(v) for k, v in cbs.items()}
-        # Count graph-expanded refs — refs carry kind directly, no hydration.
         graph_count = sum(
             1
             for refs in cbs.values()
@@ -58,11 +37,8 @@ def _summarize_node_update(node_name: str, update: dict[str, Any]) -> dict[str, 
 
     elif node_name == "critic":
         summary["confidence"] = update.get("confidence")
-        # Numeric grade (0..1) so the frontend can render a real score, not
-        # just the high/medium/low label. Additive — older UIs ignore it.
         summary["score"] = update.get("critic_score")
         summary["reasoning"] = (update.get("critic_reasoning") or "")[:200]
-        # Pull the latest critic trace entry for grade counts
         trace = update.get("trace") or []
         if trace:
             for entry in reversed(trace):
@@ -86,13 +62,38 @@ def _summarize_node_update(node_name: str, update: dict[str, Any]) -> dict[str, 
             if (isinstance(r, dict) and r.get("kind") == "web")
         )
         summary["web_chunks_added"] = web_count
-        # Providers come from the trace entries — refs don't carry that.
         trace = update.get("trace") or []
         providers: set[str] = set()
         for e in trace:
             if e.get("node") == "web_fallback":
                 providers.update(e.get("providers") or [])
         summary["providers_used"] = sorted(providers)
+
+    elif node_name == "paper_discovery":
+        papers = update.get("papers_discovered") or []
+        cbs = update.get("chunk_refs_by_subq") or {}
+        paper_count = sum(
+            1
+            for refs in cbs.values()
+            for r in (refs or [])
+            if (isinstance(r, dict) and r.get("kind") == "paper")
+        )
+        summary["papers_found"] = len(papers)
+        summary["paper_chunks_added"] = paper_count
+
+    elif node_name == "verifier":
+        verdicts = update.get("citation_verdicts") or {}
+        summary["claims_checked"] = len(verdicts)
+        supports = sum(1 for v in verdicts.values() if v == "supports")
+        contradicts = sum(1 for v in verdicts.values() if v == "contradicts")
+        summary["supports"] = supports
+        summary["contradicts"] = contradicts
+
+    elif node_name == "memory_keeper":
+        payload = update.get("memory_payload") or {}
+        summary["topics_extracted"] = len(payload.get("topics") or [])
+        summary["entities_extracted"] = len(payload.get("entities") or [])
+        summary["gaps_extracted"] = len(payload.get("gaps") or [])
 
     elif node_name == "generator":
         summary["answer_chars"] = len(update.get("draft_answer") or "")
@@ -107,6 +108,9 @@ def _summarize_node_update(node_name: str, update: dict[str, Any]) -> dict[str, 
     elif node_name == "no_answer":
         summary["reason"] = update.get("error") or "no_chunks_retrieved"
 
+    elif node_name == "llm_reasoning":
+        summary["method"] = "prior-only"
+
     return summary
 
 
@@ -115,13 +119,8 @@ def stream_agent(
     *,
     k: int = 8,
     run_id: str | None = None,
+    domain_scope: list[str] | None = None,
 ) -> Iterator[dict[str, Any]]:
-    """
-    Run the agent and yield one event dict per node transition.
-
-    No checkpointer here — streaming runs are ephemeral by default. The
-    blocking `run_agent` path uses the checkpointer for replay/audit.
-    """
     rid = run_id or uuid.uuid4().hex[:12]
     graph = build_graph(use_checkpointer=False)
 
@@ -130,6 +129,8 @@ def stream_agent(
         "run_id": rid,
         "k": k,  # type: ignore[typeddict-unknown-key]
     }
+    if domain_scope:
+        initial["domain_scope"] = domain_scope
 
     yield {
         "type": "run_started",
@@ -140,11 +141,8 @@ def stream_agent(
 
     final_state: AgentState = {}
     try:
-        # stream_mode="updates" yields {node_name: state_delta} dicts per step.
         for chunk in graph.stream(initial, stream_mode="updates"):
             for node_name, update in chunk.items():
-                # Accumulate into our local view of final state for the
-                # terminal event.
                 if isinstance(update, dict):
                     final_state.update(update)  # type: ignore[arg-type]
                 yield {
@@ -161,26 +159,48 @@ def stream_agent(
         }
         return
 
-    # Final terminal event with the fully materialized answer. Citations
-    # live as refs in state; hydrate them HERE — the one and only place
-    # where chunk text crosses the network boundary to the browser.
+    # Memory extraction payload (if any)
+    memory_payload = final_state.get("memory_payload")
+    if memory_payload:
+        yield {
+            "type": "memory_extracted",
+            "payload": memory_payload,
+            "ts": time.time(),
+        }
+
+    # Final terminal event with fully materialized answer.
     from src.agent.artifacts import hydrate_one
+
     citation_refs = final_state.get("citation_refs") or {}
     ordered_tags = sorted(citation_refs.keys(), key=lambda t: int(t[1:])) if citation_refs else []
     hydrated = hydrate_one([citation_refs[t] for t in ordered_tags]) if ordered_tags else []
     citation_map = dict(zip(ordered_tags, hydrated))
+    citation_verdicts = final_state.get("citation_verdicts") or {}
     sources_payload = []
     for tag, c in citation_map.items():
-        sources_payload.append(
-            {
-                "tag": tag,
-                "citation": c.citation,
-                "signal": c.signal,
-                "rrf_score": None,
-                "score": None,
-                "preview": c.text[:300],
-            }
-        )
+        entry = {
+            "tag": tag,
+            "citation": c.citation,
+            "signal": c.signal,
+            "rrf_score": None,
+            "score": None,
+            "preview": c.text[:300],
+            "doc_title": c.doc_title,
+            "url": c.url or "",
+            "source_file": c.source_file,
+        }
+        if c.authors:
+            entry["authors"] = c.authors
+        if c.year is not None:
+            entry["year"] = c.year
+        if c.venue:
+            entry["venue"] = c.venue
+        if c.arxiv_id:
+            entry["arxiv_id"] = c.arxiv_id
+        v = citation_verdicts.get(str(tag))
+        if v:
+            entry["verdict"] = v
+        sources_payload.append(entry)
 
     yield {
         "type": "final",
@@ -193,15 +213,13 @@ def stream_agent(
         "score": float(final_state.get("critic_score") or 0.0),
         "rewrite_attempts": int(final_state.get("rewrite_attempts") or 0),
         "web_used": bool(final_state.get("web_used")),
+        "papers_used": bool(final_state.get("papers_used")),
         "reflection_attempts": int(final_state.get("reflection_attempts") or 0),
         "error": final_state.get("error"),
         "ts": time.time(),
     }
 
-    # ---- Auto-save (optional, gated by confidence) ----
-    # If the user has auto_save_to_notes enabled and the run cleared the
-    # quality gate, persist it to the notes folder right here in the
-    # stream so the browser learns the saved path via an SSE event.
+    # ---- Auto-save ----
     from src.agent.save import auto_save_run, should_auto_save
     from src.config import settings as _settings
 
@@ -228,9 +246,6 @@ def stream_agent(
             "ts": time.time(),
         }
     else:
-        # Always emit an explicit save-decision event so the UI knows the
-        # stream is genuinely done (vs. waiting for an auto-save that's
-        # never coming). The reason field makes the skip auditable.
         if not _settings.auto_save_to_notes:
             reason = "auto_save_disabled"
         elif final_state.get("error") == "no_sources_used_llm_priors":

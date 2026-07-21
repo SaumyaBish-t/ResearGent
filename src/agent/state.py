@@ -1,5 +1,4 @@
-"""
-Agent state — the typed object that flows through every node in the graph.
+"""Agent state — the typed object that flows through every node in the graph.
 
 Why a TypedDict
 ---------------
@@ -39,18 +38,6 @@ Rules every node MUST follow:
 The only TEXT field that lives in state is `draft_answer` — bounded by
 the generator's max_tokens (≈4-6KB), and the whole point of running the
 agent in the first place.
-
-Field reference (mental model)
-------------------------------
-    question              the original user question
-    sub_questions         planner output; >=1 entry, may equal [question]
-    is_complex            true if planner decomposed into multiple sub-Qs
-    chunk_refs_by_subq    {sub_q: [ChunkRef-as-dict, ...]} — pointer-based
-    draft_answer          generator's synthesized markdown answer
-    citation_refs         {S<n>: ChunkRef-as-dict}; hydrated only at format-time
-    error                 set by NoAnswer node when retrieval finds nothing
-    run_id                stable id for this query, used for checkpoint lookup
-    trace                 append-only log of node entries (for debugging)
 """
 
 from __future__ import annotations
@@ -86,17 +73,9 @@ class AgentState(TypedDict, total=False):
     # ---- Inputs ----
     question: str
     run_id: str
-    # Optional: restrict retrieval to a specific set of registry doc_ids
-    # (UUID strings). When unset, the entire corpus is searched. Lets the
-    # caller scope a query to "just my uploads" / "just my notes" / etc.
-    # without code changes elsewhere.
     doc_id_scope: list[str]
 
     # Phase 15: optional restriction to one or more registered domain ids
-    # (e.g. ["agentic_ai", "time_series"]). When unset the agent searches
-    # across every domain bucket. Set either by the CLI's `--domain` flag
-    # (explicit user intent) or by the planner's keyword auto-router
-    # (implicit, only when the query has strong domain signals).
     domain_scope: list[str]
 
     # ---- Planner outputs ----
@@ -105,16 +84,9 @@ class AgentState(TypedDict, total=False):
     planner_reasoning: str
 
     # ---- Retriever outputs (Phase 13 pointer form) ----
-    # Each value is a list of ChunkRef-shaped dicts: {"kind": str, "id": str}.
-    # Hydration to text happens inside each consuming node via
-    # `src.agent.artifacts.hydrate()`.
     chunk_refs_by_subq: Annotated[dict[str, list[dict[str, str]]], _merge_refs_by_subq]
 
     # ---- Critic outputs (Phase 4) ----
-    # Overall verdict on the current retrieval round.
-    #   "high"   -> proceed to generator
-    #   "medium" -> rewrite & retry if budget left, else proceed
-    #   "low"    -> rewrite & retry if budget left, else web fallback
     confidence: str          # "high" | "medium" | "low"
     critic_score: float      # weighted score from the last Critic wave (0.0–1.0)
     critic_reasoning: str    # one-line explanation for the trace
@@ -128,27 +100,22 @@ class AgentState(TypedDict, total=False):
 
     # ---- Paper discovery (Phase 7) ----
     papers_used: bool
-    # Lightweight summary of discovered papers for trace/display (not the
-    # full PaperChunk objects — those live in `agent_artifacts` via refs).
     papers_discovered: list[dict]
 
     # ---- Self-reflection (Phase 5) ----
-    # How many times the Reflector has triggered a loopback. Bounded by
-    # settings.reflection_max_iterations to prevent infinite refinement loops.
     reflection_attempts: int
-    # One-line gap descriptions surfaced by the latest Reflector pass — kept
-    # for trace/display so users can see WHY a reflection loop triggered.
     reflection_gaps: list[str]
-    # Follow-up sub-questions appended to sub_questions on the latest loop.
-    # Surfaced separately so the AgentResult formatter can show what changed.
     reflection_follow_ups: list[str]
 
     # ---- Generator outputs ----
     draft_answer: str
-    # Pointer form of citation map: {"S1": {"kind": ..., "id": ...}, ...}.
-    # Hydrated for display in run.py / stream.py / vault_writer.py via
-    # `src.agent.artifacts.hydrate_one()`.
     citation_refs: dict[str, dict[str, str]]
+
+    # Claim verification verdicts: {S1: "supports"|"contradicts"|"unclear", ...}
+    citation_verdicts: dict[str, str]
+
+    # ---- Memory keeper output (Phase 18) ----
+    memory_payload: dict | None
 
     # ---- Flow control / observability ----
     error: str | None
