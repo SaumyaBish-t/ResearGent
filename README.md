@@ -1,6 +1,8 @@
 # 🌌 ResearGent
 
-**A hallucination-resistant, multi-agent research engine with a live 3D dashboard.**
+**A hallucination-resistant, multi-agent research companion with a live 3D dashboard.**
+
+ResearGent is a full personal research platform, not just a Q&A bot. It ingests your papers and notes, runs an adversarial Corrective-RAG + self-reflection loop, verifies provenance and originality before you ever see an answer, and persists trusted results back into a growing Markdown knowledge base — streamed live to a 3D agent dashboard.
 
 [![Live](https://img.shields.io/badge/Live-resear--gent.vercel.app-22d3ee)](https://resear-gent.vercel.app)
 [![API](https://img.shields.io/badge/API-researgent.onrender.com-34d399)](https://researgent.onrender.com)
@@ -8,6 +10,8 @@
 [![Backend: LangGraph](https://img.shields.io/badge/Backend-LangGraph-orange)](https://langchain-ai.github.io/langgraph/)
 [![Frontend: Next.js + R3F](https://img.shields.io/badge/Frontend-Next.js%20%2B%20R3F-black)](https://docs.pmnd.rs/react-three-fiber)
 [![Bring Your Own Model](https://img.shields.io/badge/LLM-Bring%20Your%20Own-success)](#-bring-your-own-model-byom)
+[![Provenance](https://img.shields.io/badge/Provenance-Crossref%20%2B%20Retraction%20Watch-green)](https://github.com/SaumyaBish-t/ResearGent)
+[![Originality](https://img.shields.io/badge/Originality-embedding%20%2B%20ngram-blue)](https://github.com/SaumyaBish-t/ResearGent)
 
 > 🌐 **Live demo:** **<https://resear-gent.vercel.app>**
 > Sign in with Google → 3 free researches / month + 3 follow-ups per thread.
@@ -15,7 +19,7 @@
 > (Brave users: disable Shields for the site so the cross-site session cookie
 > can travel between Vercel ↔ Render).
 
-ResearGent answers research questions by **grounding every claim in evidence it can cite** — and refusing to bluff when it can't. Instead of trusting a single vector-search pass, it runs an adversarial **Corrective-RAG + self-reflection** loop: a Critic grades the retrieved context, a Rewriter retries weak queries, and when local knowledge runs out the agent **cascades to academic APIs (arXiv / Semantic Scholar) and live web search** before writing a cited answer. High-confidence results are auto-saved to a local Markdown knowledge base that grows over time.
+ResearGent answers research questions by **grounding every claim in evidence it can cite** — and refusing to bluff when it can't. Instead of trusting a single vector-search pass, it runs an adversarial **Corrective-RAG + self-reflection** loop: a Critic grades the retrieved context, a Rewriter retries weak queries, a **Provenance Check** filters out retracted or corrected papers *before* the Critic even sees them, the **Originality Check** compares the draft against full source texts to catch uncited copying, and when local knowledge runs out the agent **cascades to academic APIs (arXiv / Semantic Scholar) and live web search** before writing a cited answer. High-confidence results are auto-saved to a local Markdown knowledge base that grows over time — and Phase 21 lets you inject your own experimental results verbatim so the agent writes the discussion around your numbers, not invented ones.
 
 The whole agent graph streams to a **Next.js + React Three Fiber dashboard** that visualizes the pipeline in real time over Server-Sent Events.
 
@@ -28,14 +32,47 @@ The whole agent graph streams to a **Next.js + React Three Fiber dashboard** tha
 
 - **Domain specialization.** Users can now restrict the agent to a specific knowledge domain (e.g. *agentic AI*, *quant finance*, *time‑series*) via the `domain` query parameter.
 - **Persistent Research Memory.** Every research run is analyzed by a *Memory Keeper* node that extracts topics, entities, and knowledge gaps into a personal knowledge graph. Past context is injected into new queries — *"Last time you studied X, but Y was unresolved — here's an update"*.
-- **Literature Review Generation.** The new `/api/review` endpoint generates structured multi‑paper literature reviews with sections, inline citations, and a BibTeX bibliography — students and researchers can go from question to draft in minutes.
+- **Literature Review Generation.** The `/api/review` endpoint generates structured multi‑paper literature reviews with sections, inline citations, and a BibTeX bibliography — students and researchers can go from question to draft in minutes.
 - **BibTeX export.** Download a fully‑cited BibTeX bibliography via `/api/threads/{id}/turns/{n}/export.bib` or verify individual claims with the Verifier node.
 - **It proves before it answers.** A strict Critic node grades retrieved chunks (relevant / partial / irrelevant) and assigns a confidence score. Weak evidence triggers correction, not confident‑sounding fabrication.
 - **It cascades instead of giving up.** Local retrieval → query rewriting → academic paper discovery (arXiv + Semantic Scholar, full‑text PDF parsing) → live web fallback → last‑resort priors. Each stage only fires when the previous one falls short.
-- **It self‑reflects.** After drafting, a Reflector node looks for gaps and can loop back for another targeted retrieval pass within a bounded budget.
-- **It only saves what it trusts.** Answers that clear a configurable confidence gate are written back to your notes folder as cited Markdown. Pure‑guess answers (no sources) are never saved.
+- **It filters bad science at the source.** The Provenance Check node queries Crossref and the Retraction Watch cache for every retrieved paper *before* grading. Retracted papers are hard-dropped; corrected / expression-of-concern papers pass through with a transparent caveat so the generator surfaces the issue.
+- **It checks your draft for plagiarism risk.** The Originality Check node compares the generated answer against the full text of every retrieved source using embedding similarity + n-gram overlap. It flags verbatim uncited copying and uncited paraphrases, producing a report attached to the run for human review before publishing.
+- **It ingests your experimental results immutably.** Drop in your own dataset, metrics, and methodology notes — Phase 21 locks them into the prompt as verbatim blocks. The generator must reproduce your numbers exactly; it cannot round, rephrase, or invent additional metrics.
+- **It auto-saves only what it trusts.** Answers that clear a configurable confidence gate are written back to your notes folder as cited Markdown. A background sweep re-checks every cited source periodically and appends timestamped provenance alerts when a paper's status changes. Pure‑guess answers (no sources) are never saved.
 - **It's model‑agnostic.** Every LLM call is routed by *capability tier*, so you bring your own provider and decide which model does the heavy thinking vs. the fast inner‑loop work. See [BYOM](#-bring-your-own-model-byom).
 - **It's observable.** A cinematic 3D dashboard shows each node activating, data flowing along its edges, and the final cited answer — all live.
+
+---
+
+## 🔬 Research Integrity & Provenance
+
+ResearGent goes beyond retrieval to ensure the answers it produces are trustworthy and attributable.
+
+### Provenance Check (Phase 19)
+
+Every paper the agent retrieves is checked against **Crossref** and a local **Retraction Watch** cache *before* the Critic grades it. This runs unconditionally on every retrieval round — not only when the user explicitly asks "is this retracted?".
+
+| Status | Action |
+|--------|--------|
+| **Retracted** | Hard-dropped — removed from `chunk_refs_by_subq`, never reaches the Critic or Generator, cannot be cited |
+| **Corrected / Expression of Concern** | Flagged — passes through with `provenance_status="flagged"`, the Critic applies a `0.5×` confidence multiplier, and the generator surfaces an explicit caveat |
+| **Clean / Unverified** | Passes through normally |
+
+Phase 23 adds a **background sweep** that re-checks every source you've ever cited. When a paper's status flips (e.g. was clean when cited, later retracted), the sweep appends a timestamped provenance alert to the affected note and surfaces it as a notification in the dashboard.
+
+### Originality Check (Phase 20)
+
+The draft answer is compared against the **full text of every retrieved source** (not just the ones cited) using two signals:
+
+1. **Embedding cosine similarity** — fast, catches paraphrase-level overlap.
+2. **N-gram overlap** — catches verbatim / near-verbatim copying specifically.
+
+The result is an `originality_report` (score + flags) attached to the run. No auto-punishment — the report is presented to the user for review before publishing.
+
+### Results Ingestion (Phase 21)
+
+Users can supply their own experimental results (dataset, metrics, methodology) via the API. These are locked into the prompt as **verbatim, immutable blocks** — the generator must reproduce the numbers exactly. A post-draft verification step (`_verify_results_untouched`) checks that every metric value appears in the answer; missing values are flagged in the run's trace.
 
 ---
 
@@ -122,6 +159,8 @@ flowchart TD
 9. **Reflector** — audits the draft for gaps and can trigger one more retrieval loop.
 10. **Memory Keeper** — extracts topics, entities, relationships, and knowledge gaps from the answer and persists them to the user's Personal Knowledge Graph.
 11. **Vault Gate** — writes high-confidence, cited answers to your local Markdown knowledge base.
+12. **Provenance Check** — queries Crossref and the Retraction Watch cache for every retrieved chunk's DOI/arXiv ID *before* the Critic grades it. Retracted papers are hard-dropped; corrected/concern papers pass through with a caveat so the generator surfaces the issue transparently.
+13. **Originality Check** — compares the generator's draft against the full text of every retrieved source using embedding cosine similarity + n-gram overlap. Flags verbatim copying and uncited paraphrases; produces a report attached to the run for human review.
 
 > The retrieval cascade is **corrective**: each fallback stage only runs when the Critic isn't satisfied, so cheap local answers stay cheap and only hard questions pay for paper/web lookups.
 
