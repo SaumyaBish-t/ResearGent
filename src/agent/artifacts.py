@@ -95,6 +95,11 @@ class HydratedChunk:
     venue: str = ""
     arxiv_id: str = ""
 
+    # Provenance (Phase 19)
+    doi: str = ""
+    provenance_status: str = "unchecked"   # "clean" | "flagged" | "retracted" | "unchecked"
+    provenance_reason: str = ""            # populated for "flagged"/"retracted"
+
 
 # ---------------------------------------------------------------------------
 # Postgres table for non-Chroma chunks (web / paper / graph)
@@ -259,6 +264,7 @@ def _to_hydrated(c: Any) -> HydratedChunk:
             source_file=c.source_file, page_number=c.page_number,
             chunk_index=c.chunk_index, signal="local",
             wikilinks=list(c.wikilinks), tags=list(c.tags),
+            doi=getattr(c, "doi", ""),
         )
     if name == "WebChunk":
         return HydratedChunk(
@@ -276,6 +282,7 @@ def _to_hydrated(c: Any) -> HydratedChunk:
             year=getattr(c, "year", None),
             venue=getattr(c, "venue", ""),
             arxiv_id=getattr(c, "arxiv_id", ""),
+            doi=getattr(c, "doi", ""),
         )
     if name == "GraphChunk":
         return HydratedChunk(
@@ -283,6 +290,7 @@ def _to_hydrated(c: Any) -> HydratedChunk:
             source_file=c.source_file, page_number=c.page_number,
             chunk_index=c.chunk_index, signal="graph",
             wikilinks=list(c.wikilinks), tags=list(c.tags),
+            doi=getattr(c, "doi", ""),
         )
     raise TypeError(f"Don't know how to flatten chunk of type {name}")
 

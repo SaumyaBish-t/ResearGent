@@ -352,9 +352,13 @@ def _path_for(name: str) -> Path:
     return DB_PATH / f"{_sanitize(name)}.pkl"
 
 
-def get_or_create_papers_collection() -> Collection:
+def get_or_create_papers_collection() -> Any:
     """Get the collection that matches the *currently configured* embedder."""
     name = collection_name_for_current_embedder()
+    if app_settings.store_backend == "postgres":
+        from src.store_pg import PgCollection
+        return PgCollection(name=name)
+
     if name not in _collections:
         _collections[name] = Collection(name=name, path=_path_for(name))
     return _collections[name]
@@ -362,6 +366,24 @@ def get_or_create_papers_collection() -> Collection:
 
 def list_collections() -> list[dict]:
     """All persisted collections + chunk counts. Diagnostic."""
+    if app_settings.store_backend == "postgres":
+        from src.store_pg import PgCollection
+        from src.auth.context import get_current_user_id
+        from src.db import connection
+        user_id = get_current_user_id()
+        with connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT DISTINCT collection FROM chunks WHERE user_id = %s::UUID ORDER BY collection;",
+                    (user_id,),
+                )
+                rows = cur.fetchall()
+        out = []
+        for r in rows:
+            col = PgCollection(name=r["collection"])
+            out.append({"name": r["collection"], "count": col.count()})
+        return out
+
     DB_PATH.mkdir(parents=True, exist_ok=True)
     out = []
     for p in sorted(DB_PATH.glob("*.pkl")):
@@ -374,6 +396,18 @@ def list_collections() -> list[dict]:
 def reset_papers_collection() -> str:
     """Drop the current embedder's collection (in-memory + on-disk)."""
     name = collection_name_for_current_embedder()
+    if app_settings.store_backend == "postgres":
+        from src.auth.context import get_current_user_id
+        from src.db import connection
+        user_id = get_current_user_id()
+        with connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM chunks WHERE user_id = %s::UUID AND collection = %s;",
+                    (user_id, name),
+                )
+        return name
+
     _collections.pop(name, None)
     p = _path_for(name)
     if p.exists():

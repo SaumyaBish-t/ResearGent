@@ -33,14 +33,20 @@ similar would just add latency for no benefit at this scale.
 
 from __future__ import annotations
 
+import contextvars
 import pickle
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from rank_bm25 import BM25Okapi
 
+from src.config import settings
 from src.store import DB_PATH, collection_name_for_current_embedder
+
+# Request-local cache variable to hold in-memory BM25 index payloads during a query run
+_bm25_request_cache: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar("_bm25_request_cache", default=None)
 
 # Where pickled BM25 indexes live. Sibling directory to the vector store.
 BM25_DIR = DB_PATH.parent / "bm25_idx"
@@ -101,6 +107,10 @@ def build_index(ids: list[str], texts: list[str], metadatas: list[dict]) -> None
     need a different data structure — BM25's IDF depends on the full corpus,
     so adding one doc cheaply isn't possible.)
     """
+    if settings.store_backend == "postgres":
+        invalidate_cache()
+        return
+
     if not ids:
         # Empty index — write a sentinel so callers know we tried.
         _index_path().write_bytes(pickle.dumps(None))
@@ -137,6 +147,10 @@ def invalidate_cache() -> None:
     """Drop the in-memory cache so the next call reloads from disk."""
     global _cache
     _cache = object()
+    # Also reset the request cache dict if currently set in context
+    cache = _bm25_request_cache.get()
+    if cache is not None:
+        cache.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +173,33 @@ def search(query: str, k: int = 10) -> list[BM25Hit]:
     Returns ALL chunks ranked, then slices to k — `rank_bm25` doesn't expose
     a top-k API directly, and the corpus is small enough that this is fine.
     """
-    payload = _load()
+    if settings.store_backend == "postgres":
+        from src.store import get_or_create_papers_collection
+        col = get_or_create_papers_collection()
+        col_name = col.name
+
+        # Check the request-level ContextVar cache
+        cache = _bm25_request_cache.get()
+        if cache is not None and col_name in cache:
+            payload = cache[col_name]
+        else:
+            data = col.get()
+            if not data["ids"]:
+                payload = None
+            else:
+                tokenized = [tokenize(t) for t in data["documents"]]
+                bm25 = BM25Okapi(tokenized)
+                payload = _BM25Payload(
+                    bm25=bm25,
+                    ids=data["ids"],
+                    texts=data["documents"],
+                    metadatas=data["metadatas"],
+                )
+            if cache is not None:
+                cache[col_name] = payload
+    else:
+        payload = _load()
+
     if payload is None:
         return []
 
@@ -184,6 +224,16 @@ def search(query: str, k: int = 10) -> list[BM25Hit]:
 
 def index_stats() -> dict:
     """Diagnostic — what's in the persisted index?"""
+    if settings.store_backend == "postgres":
+        from src.store import get_or_create_papers_collection
+        col = get_or_create_papers_collection()
+        return {
+            "exists": True,
+            "path": "postgres://chunks",
+            "chunks": col.count(),
+            "size_kb": 0,
+        }
+
     p = _index_path()
     if not p.exists():
         return {"exists": False, "path": str(p)}

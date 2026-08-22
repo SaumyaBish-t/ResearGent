@@ -288,10 +288,39 @@ def generate(state: AgentState) -> dict[str, Any]:
 
     user_msg, prompt_chars = _build_prompt(_GEN_CHUNK_CHAR_CAP)
 
+    # Phase 19: inject provenance caveat if any flagged sources exist
+    prov_flagged = state.get("provenance_flagged_count", 0)
+    if prov_flagged:
+        system_prompt = SYSTEM_PROMPT + (
+            "\n\nNOTE: some sources in your evidence pool have an active "
+            "correction or expression of concern (not a full retraction). "
+            "When citing them, note the caveat explicitly rather than "
+            "presenting them as clean, uncontested evidence."
+        )
+    else:
+        system_prompt = SYSTEM_PROMPT
+
+    # Phase 21: inject user-supplied results as immutable block
+    user_results = state.get("user_results")
+    if user_results:
+        results_block = (
+            "\n\n=== FIXED EXPERIMENTAL RESULTS (verbatim — do not alter numbers) ===\n"
+            f"Dataset: {user_results.get('dataset', '')}\n"
+            f"Methodology: {user_results.get('methodology_notes', '')}\n"
+            "Metrics:\n" +
+            "\n".join(f"  - {m['name']}: {m['value']} {m.get('unit','')}"
+                       for m in user_results.get("metrics", [])) +
+            "\n=== END FIXED RESULTS ===\n\n"
+            "Write the results/discussion section AROUND these numbers. "
+            "Do not invent additional metrics. Do not round or rephrase the "
+            "numeric values above — reproduce them exactly as given."
+        )
+        system_prompt += results_block
+
     t0 = time.perf_counter()
     answer = chat(
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_msg},
         ],
         tier=ModelTier.REASONING,
@@ -334,6 +363,9 @@ def generate(state: AgentState) -> dict[str, Any]:
             "Try re-running, or lower the per-paper chunk count in the cascade."
         )
 
+    # Phase 21: verify that user_results metrics appear verbatim in the answer
+    missing_metrics = _verify_results_untouched(answer, user_results)
+
     dur_ms = int((time.perf_counter() - t0) * 1000)
 
     return {
@@ -345,14 +377,23 @@ def generate(state: AgentState) -> dict[str, Any]:
                 "duration_ms": dur_ms,
                 "n_sources": len(citation_refs),
                 "answer_chars": len(answer),
-                # Surface prompt size so day-budget pressure + retries are
-                # observable. If `prompt_chars` is the shrink-retry value,
-                # we know the first attempt came back empty.
                 "prompt_chars": prompt_chars,
                 "est_tokens": prompt_chars // 4,
+                "results_integrity_warning": missing_metrics if missing_metrics else None,
             }
         ],
     }
+
+
+def _verify_results_untouched(answer: str, user_results: dict | None) -> list[str]:
+    """Check that every user-supplied metric value appears verbatim in the answer."""
+    if not user_results:
+        return []
+    missing = []
+    for m in user_results.get("metrics", []):
+        if str(m["value"]) not in answer:
+            missing.append(m["name"])
+    return missing
 
 
 def no_answer(state: AgentState) -> dict[str, Any]:

@@ -47,6 +47,8 @@ class AgentResult:
     # Phase 7 additions — open-domain
     papers_used: bool = False
     papers_discovered: list[dict] | None = None
+    # Phase 20 additions — Originality Check
+    originality_report: dict | None = None
     error: str | None = None
 
     def formatted(self) -> str:
@@ -138,6 +140,7 @@ def run_agent(
     run_id: str | None = None,
     use_checkpointer: bool = True,
     domain_scope: list[str] | None = None,
+    user_results: dict | None = None,
 ) -> AgentResult:
     """
     Execute the agent graph end-to-end.
@@ -161,6 +164,8 @@ def run_agent(
     }
     if domain_scope:
         initial["domain_scope"] = list(domain_scope)
+    if user_results:
+        initial["user_results"] = user_results
 
     # LangGraph requires a thread_id when using a checkpointer, so the run is
     # addressable for replay. Without a checkpointer this is ignored.
@@ -197,5 +202,6 @@ def run_agent(
         reflection_follow_ups=final.get("reflection_follow_ups") or [],
         papers_used=bool(final.get("papers_used")),
         papers_discovered=final.get("papers_discovered") or [],
+        originality_report=final.get("originality_report"),
         error=final.get("error"),
     )

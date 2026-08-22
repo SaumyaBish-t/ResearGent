@@ -1455,5 +1455,89 @@ def review(
         console.print(markdown_out)
 
 
+# ---- Provenance CLI (Phase 19) -----------------------------------------------
+provenance_app = typer.Typer(help="Provenance / retraction check utilities (Phase 19).")
+app.add_typer(provenance_app, name="provenance")
+
+
+@provenance_app.command("import-retraction-watch")
+def provenance_import_retraction_watch(
+    csv: str = typer.Option(..., "--csv", help="Path to Retraction Watch Database CSV export"),
+) -> None:
+    """Bulk-import Retraction Watch CSV into the retraction_status_cache."""
+    from src.provenance.retraction_watch import import_csv
+    console.print(f"[dim]Importing Retraction Watch CSV: {csv}[/dim]")
+    result = import_csv(csv)
+    console.print(f"[green]Imported {result['imported']} rows[/green] [dim](skipped {result['skipped']})[/dim]")
+
+
+@provenance_app.command("check-doi")
+def provenance_check_doi(
+    doi: str = typer.Argument(..., help="DOI to look up"),
+) -> None:
+    """Ad-hoc single DOI lookup (live Crossref query)."""
+    import asyncio
+    from src.provenance.crossref_client import lookup_doi
+    console.print(f"[dim]Querying Crossref for: {doi}[/dim]")
+    result = asyncio.run(lookup_doi(doi))
+    console.print(f"Status: [bold]{result['status']}[/bold]")
+    if result["reason"]:
+        console.print(f"Reason: {result['reason']}")
+    if result["notice_url"]:
+        console.print(f"Notice URL: {result['notice_url']}")
+
+
+@provenance_app.command("stats")
+def provenance_stats() -> None:
+    """Show cache size and last import date."""
+    from src.db import connection
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM retraction_status_cache;")
+            total = cur.fetchone()[0]
+            cur.execute("SELECT max(checked_at) FROM retraction_status_cache;")
+            last = cur.fetchone()[0]
+    console.print(f"Total cached DOIs: {total}")
+    if last:
+        console.print(f"Last checked: {last.isoformat()}")
+
+
+@provenance_app.command("sweep")
+def provenance_sweep(
+    since_days: int | None = typer.Option(None, "--since-days", help="Only re-check sources cited within the last N days"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Report what would change without touching files"),
+) -> None:
+    """Background sweep: re-check all cited sources for status changes (Phase 23)."""
+    import asyncio
+    from src.provenance.sweep import run_sweep
+    console.print(f"[dim]Running provenance sweep... dry_run={dry_run}[/dim]")
+    result = asyncio.run(run_sweep(since_days=since_days, dry_run=dry_run))
+    console.print(f"[green]Checked {result['checked']} sources[/green], [yellow]{result['changed']} changed[/yellow]")
+    for c in result["details"]:
+        console.print(f"  {c['doi'] or c['arxiv_id']}: {c['last_known_status']} -> {c['new_status']}")
+
+
+# ---- Results Ingestion CLI (Phase 21) -------------------------------------------
+@app.command()
+def research(
+    question: str = typer.Argument(..., help="Research question"),
+    k: int = typer.Option(8, help="Top-k chunks per sub-question"),
+    domain: str | None = typer.Option(None, "--domain", help="Restrict to domain (agentic_ai|quant_finance|time_series)"),
+    results_file: str | None = typer.Option(None, "--results-file", help="Path to JSON file with user_results for Phase 21"),
+) -> None:
+    """Run a research query with optional user-supplied results (Phase 21)."""
+    import json
+    from src.agent import run_agent
+
+    user_results = None
+    if results_file:
+        with open(results_file) as f:
+            user_results = json.load(f)
+
+    domain_scope = [domain] if domain else None
+    result = run_agent(question, k=k, domain_scope=domain_scope, user_results=user_results)
+    console.print(result.formatted())
+
+
 if __name__ == "__main__":
     app()

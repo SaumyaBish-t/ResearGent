@@ -300,6 +300,10 @@ class Settings(BaseSettings):
     # cleanly separated from notes you wrote by hand.
     obsidian_output_folder: str = "ResearGent"
 
+    # Backend selection: "local" (files) or "postgres" (neon DB)
+    store_backend: str = "local"
+    notes_backend: str = "local"
+
     # ---- Auto-save to knowledge base ---------------------------------------
     # When True, every research run that meets the confidence gate is
     # written back as a note in the notes folder — the brain grows
@@ -427,6 +431,45 @@ class Settings(BaseSettings):
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
             f"?sslmode={self.postgres_sslmode}"
         )
+
+    # ---- Provenance Check (Phase 19) ----------------------------------------
+    # Master kill-switch. When False, provenance_check is a no-op passthrough
+    # (every chunk gets provenance_status="unchecked") — useful for local dev
+    # without a populated retraction cache.
+    provenance_check_enabled: bool = True
+
+    # Crossref REST API — free, no key required, but ask nicely with a
+    # mailto param (Crossref's "polite pool" gets faster/more reliable
+    # rate limits when you identify yourself). Set to your email.
+    crossref_mailto: str | None = None
+    crossref_base_url: str = "https://api.crossref.org"
+
+    # Retraction Watch data. Two supported modes:
+    #   "bulk"  — periodically import the Retraction Watch Database CSV
+    #             (retracted-articles export, distributed via Crossref Labs
+    #             http://api.labs.crossref.org/data/retractionwatch)
+    #             into the retraction_status_cache table. Fast, no live call
+    #             per chunk. RECOMMENDED for production.
+    #   "live"  — Crossref's own metadata now carries retraction relations
+    #             (`update-to` type "retraction", or `is-retracted` flag) —
+    #             query Crossref per-DOI in real time. Slower, but always
+    #             current without a scheduled job.
+    retraction_source_mode: str = "bulk"  # "bulk" | "live"
+
+    # How long a cached retraction-status row is trusted before Provenance
+    # Check treats it as stale and re-queries live. Independent of the
+    # Background Sweep (Phase 23) cadence — this is a per-lookup safety net.
+    retraction_cache_ttl_hours: int = 168  # 7 days
+
+    # Confidence penalty applied by the Critic when a chunk is tagged
+    # "flagged" (corrected / concern / EOC) rather than "clean". Multiplies
+    # into the weighted score numerator alongside relevant/partial weights —
+    # see critic.py's `_derive_verdict`.
+    provenance_flagged_score_multiplier: float = 0.5
+
+    # Max concurrent outbound provenance lookups per provenance_check call.
+    # Crossref's public pool tolerates modest bursts; keep this conservative.
+    provenance_max_concurrent_lookups: int = 5
 
     # ---- Validators ---------------------------------------------------------
     @field_validator(

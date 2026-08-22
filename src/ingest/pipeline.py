@@ -763,3 +763,74 @@ def ingest_vault(
         bm25_n = _rebuild_bm25_from_chroma()
         console.print(f"  [green]BM25[/green] indexed {bm25_n} chunks")
     return results
+
+
+def ingest_db_note(
+    *,
+    user_id: str,
+    path: str,
+    content: str,
+    domain: str | None = None,
+    verbose: bool = False,
+) -> int:
+    """
+    Chunk, embed, and store a Postgres-backed note into the chunks table.
+
+    This is the database-note equivalent of the vault ingest path. It parses
+    the note content in-memory (no filesystem access), chunks it, embeds the
+    chunks, and stores them into the pgvector-backed chunks table.
+
+    Returns the number of chunks inserted.
+    """
+    from src.ingest.obsidian import parse_note_from_string, chunk_note
+
+    note = parse_note_from_string(content, rel_path=path)
+    chunks = chunk_note(note)
+    if not chunks:
+        return 0
+
+    # Delete any existing chunks for this note's content hash
+    removed = _delete_existing_doc(note.doc_id)
+
+    # Use the content hash as the doc_id (no registry needed for db notes)
+    registry_doc_id = note.doc_id
+
+    col = get_or_create_papers_collection()
+    inserted = 0
+
+    for batch in _batched(chunks, EMBED_BATCH):
+        texts = [_augment_text_with_entities(c.text, c.entities) for c in batch]
+        try:
+            vectors = embed(texts, tier=ModelTier.EMBED)
+        except Exception:
+            if verbose:
+                console.print(f"  [red]embed FAIL[/red] for db note {path}")
+            raise
+
+        ids = [f"{note.doc_id}:{c.chunk_index}" for c in batch]
+        metadatas = [
+            {
+                "doc_id": registry_doc_id,
+                "content_hash": note.doc_id,
+                "source_file": c.source_file,
+                "page_number": c.page_number,
+                "chunk_index": c.chunk_index,
+                "token_count": c.token_count,
+                "doc_title": c.note_title,
+                "source_type": "vault",
+                "heading_path": c.heading_path,
+                "tags": ",".join(c.tags),
+                "wikilinks": ",".join(c.wikilinks),
+                "entities": ", ".join(c.entities),
+                "domain": domain or "",
+            }
+            for c in batch
+        ]
+        col.add(ids=ids, embeddings=vectors, documents=texts, metadatas=metadatas)
+        inserted += len(batch)
+
+    if verbose:
+        console.print(f"  [green]ingested[/green] {path}: {inserted} chunks (replaced {removed})")
+
+    return inserted
+

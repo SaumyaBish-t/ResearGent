@@ -52,8 +52,10 @@ from src.agent.nodes import (
     generator,
     llm_reasoning,
     memory_keeper,
+    originality_check,
     paper_discovery,
     planner,
+    provenance_check,
     reflector,
     retriever,
     rewriter,
@@ -109,13 +111,13 @@ def _route_after_papers(state: AgentState) -> str:
     have_web_key = bool(settings.tavily_api_key)
     if not web_already_tried and have_web_key:
         return "web_fallback"
-    return "critic"
+    return "provenance_check"
 
 
 def _route_after_web(state: AgentState) -> str:
     chunks_by_subq = state.get("chunk_refs_by_subq") or {}
     if any(chunks_by_subq.values()):
-        return "critic"
+        return "provenance_check"
     if settings.llm_reasoning_fallback_enabled:
         return "llm_reasoning"
     return "no_answer"
@@ -157,6 +159,10 @@ def build_graph(use_checkpointer: bool = True):
     g.add_node("verifier", verifier.verify)
     # Phase 18: memory extraction
     g.add_node("memory_keeper", memory_keeper.extract_memory)
+    # Phase 19: provenance check
+    g.add_node("provenance_check", provenance_check.provenance_check)
+    # Phase 20: originality check
+    g.add_node("originality_check", originality_check.originality_check)
 
     g.add_edge(START, "planner")
     g.add_edge("planner", "retriever")
@@ -164,13 +170,14 @@ def build_graph(use_checkpointer: bool = True):
         "retriever",
         _route_after_retriever,
         {
-            "critic": "critic",
+            "critic": "provenance_check",   # CHANGED — was "critic"
             "paper_discovery": "paper_discovery",
             "web_fallback": "web_fallback",
             "llm_reasoning": "llm_reasoning",
             "no_answer": "no_answer",
         },
     )
+    g.add_edge("provenance_check", "critic")   # NEW
     g.add_conditional_edges(
         "critic",
         _route_after_critic,
@@ -185,21 +192,25 @@ def build_graph(use_checkpointer: bool = True):
     g.add_conditional_edges(
         "paper_discovery",
         _route_after_papers,
-        {"critic": "critic", "web_fallback": "web_fallback"},
+        {
+            "provenance_check": "provenance_check",
+            "web_fallback": "web_fallback",
+        },
     )
     g.add_conditional_edges(
         "web_fallback",
         _route_after_web,
         {
-            "critic": "critic",
+            "provenance_check": "provenance_check",
             "no_answer": "no_answer",
             "llm_reasoning": "llm_reasoning",
         },
     )
     g.add_edge("llm_reasoning", END)
-    # Phase 17: generator → verifier → reflector
+    # Phase 17: generator → verifier → originality_check → reflector
     g.add_edge("generator", "verifier")
-    g.add_edge("verifier", "reflector")
+    g.add_edge("verifier", "originality_check")
+    g.add_edge("originality_check", "reflector")
     # Phase 18: reflector → memory_keeper → END
     g.add_conditional_edges(
         "reflector",

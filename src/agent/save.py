@@ -96,6 +96,9 @@ def auto_save_run(
     error: str | None = None,
     score: float | None = None,
     domain_scope: list[str] | None = None,
+    provenance_dropped_count: int = 0,
+    provenance_flagged_count: int = 0,
+    originality_report: dict | None = None,
 ) -> Path | None:
     """
     Apply gating + write the run to the notes folder.
@@ -137,6 +140,62 @@ def auto_save_run(
     if len(domain_scope) != 1:
         return None
 
+    if settings.notes_backend == "postgres":
+        try:
+            from src.auth.context import get_current_user_id
+            from src.agent.vault_writer import write_run_to_db_vault
+            from src.ingest.pipeline import ingest_db_note
+
+            user_id = get_current_user_id()
+            note_path = write_run_to_db_vault(
+                user_id=user_id,
+                question=question,
+                answer=answer,
+                sources=sources,
+                sub_questions=sub_questions,
+                is_complex=is_complex,
+                confidence=confidence,
+                rewrite_attempts=rewrite_attempts,
+                web_used=web_used,
+                papers_used=papers_used,
+                reflection_attempts=reflection_attempts,
+                run_id=run_id,
+                provenance_dropped_count=provenance_dropped_count,
+                provenance_flagged_count=provenance_flagged_count,
+                originality_report=originality_report,
+            )
+
+            # Retrieve content from database to run the ingestion pipeline
+            from src.db import connection
+            with connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT content FROM notes WHERE user_id = %s::UUID AND path = %s;",
+                        (user_id, note_path),
+                    )
+                    row = cur.fetchone()
+                    content = row["content"] if row else ""
+
+            if content:
+                ingest_db_note(
+                    user_id=user_id,
+                    path=note_path,
+                    content=content,
+                    domain=domain_scope[0] if domain_scope else None,
+                )
+
+            # Also register every cited DOI into cited_sources (feeds Phase 23 sweep)
+            _register_cited_sources(
+                sources=sources,
+                user_id=user_id,
+                run_id=run_id,
+                note_path=note_path,
+            )
+
+            return Path(note_path)
+        except Exception:
+            return None
+
     try:
         from src.domains import get_domain
 
@@ -164,8 +223,59 @@ def auto_save_run(
             papers_used=papers_used,
             reflection_attempts=reflection_attempts,
             run_id=run_id,
+            provenance_dropped_count=provenance_dropped_count,
+            provenance_flagged_count=provenance_flagged_count,
+            originality_report=originality_report,
         )
     except Exception:
         # Auto-save failure must not break the run. Caller's responsibility
         # to log if desired.
         return None
+
+
+def _register_cited_sources(
+    *,
+    sources: dict,
+    user_id: str,
+    run_id: str,
+    note_path: str,
+) -> None:
+    """Upsert each cited source into cited_sources for Phase 23 sweep."""
+    from src.agent.artifacts import hydrate_one
+    from src.db import connection
+
+    # Hydrate to get DOI/arXiv ID
+    tags = list(sources.keys())
+    refs = [sources[t] for t in tags]
+    hydrated = hydrate_one(refs)
+
+    with connection() as conn:
+        with conn.cursor() as cur:
+            for tag, chunk in zip(tags, hydrated):
+                doi = getattr(chunk, "doi", "") or ""
+                arxiv_id = getattr(chunk, "arxiv_id", "") or ""
+                if not doi and not arxiv_id:
+                    continue
+
+                if doi:
+                    cur.execute(
+                        """
+                        INSERT INTO cited_sources (doi, cite_locations)
+                        VALUES (%s, %s::jsonb)
+                        ON CONFLICT (doi) DO UPDATE SET
+                            last_cited_at = now(),
+                            cite_locations = cited_sources.cite_locations || %s::jsonb;
+                        """,
+                        (doi, [{"note_path": note_path, "run_id": run_id}], [{"note_path": note_path, "run_id": run_id}]),
+                    )
+                if arxiv_id:
+                    cur.execute(
+                        """
+                        INSERT INTO cited_sources (arxiv_id, cite_locations)
+                        VALUES (%s, %s::jsonb)
+                        ON CONFLICT (arxiv_id) DO UPDATE SET
+                            last_cited_at = now(),
+                            cite_locations = cited_sources.cite_locations || %s::jsonb;
+                        """,
+                        (arxiv_id, [{"note_path": note_path, "run_id": run_id}], [{"note_path": note_path, "run_id": run_id}]),
+                    )

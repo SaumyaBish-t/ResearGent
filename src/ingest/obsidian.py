@@ -146,6 +146,48 @@ def _extract_wikilinks(body: str) -> list[str]:
     return sorted({t for t in targets if t})
 
 
+def parse_note_from_string(content: str, rel_path: str) -> VaultNote:
+    """Parse raw Markdown string (with frontmatter) directly in memory."""
+    fm, body = _parse_frontmatter(content)
+
+    # Title precedence: frontmatter > first H1 > filename
+    title = ""
+    if isinstance(fm.get("title"), str) and fm["title"].strip():
+        title = fm["title"].strip()
+    if not title:
+        h1 = re.search(r"^#\s+(.+?)\s*$", body, re.MULTILINE)
+        if h1:
+            title = h1.group(1).strip()
+    if not title:
+        title = Path(rel_path).stem
+
+    # Frontmatter tags can be a list OR a comma string ("tags: a, b").
+    fm_tags_raw = fm.get("tags") or []
+    if isinstance(fm_tags_raw, str):
+        fm_tags = [t.strip() for t in fm_tags_raw.split(",") if t.strip()]
+    elif isinstance(fm_tags_raw, list):
+        fm_tags = [str(t).strip() for t in fm_tags_raw if str(t).strip()]
+    else:
+        fm_tags = []
+    body_tags = _extract_tags(body)
+    all_tags = sorted(set(fm_tags + body_tags))
+
+    # Compute a unique content hash
+    h = hashlib.sha256()
+    h.update(content.encode("utf-8", errors="ignore"))
+    doc_id = h.hexdigest()[:16]
+
+    return VaultNote(
+        doc_id=doc_id,
+        rel_path=rel_path.replace("\\", "/"),
+        title=title,
+        body=body,
+        frontmatter=fm,
+        tags=all_tags,
+        wikilinks=_extract_wikilinks(body),
+    )
+
+
 def parse_note(path: Path, vault_root: Path) -> VaultNote:
     """Read one .md file and surface frontmatter + tags + wikilinks."""
     text = path.read_text(encoding="utf-8", errors="ignore")

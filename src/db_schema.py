@@ -179,6 +179,89 @@ _DDL: list[str] = [
         CREATE INDEX IF NOT EXISTS literature_reviews_user_created_idx
             ON literature_reviews(user_id, created_at DESC);
         """,
+        # ---- pgvector chunks (Phase 19) -------------------------------------
+        """
+        CREATE TABLE IF NOT EXISTS chunks (
+            id          TEXT PRIMARY KEY,
+            user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            collection  TEXT NOT NULL,
+            embedding   VECTOR,
+            document    TEXT NOT NULL,
+            metadata    JSONB NOT NULL,
+            created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        """,
+        "CREATE INDEX IF NOT EXISTS chunks_user_collection_idx ON chunks (user_id, collection);",
+
+        # ---- vault notes (Phase 19) ----------------------------------------
+        """
+        CREATE TABLE IF NOT EXISTS notes (
+            id          TEXT PRIMARY KEY,
+            user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            path        TEXT UNIQUE NOT NULL,
+            frontmatter JSONB NOT NULL,
+            content     TEXT NOT NULL,
+            updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        """,
+        "CREATE INDEX IF NOT EXISTS notes_user_idx ON notes (user_id);",
+
+        # ---- retraction_status_cache (Phase 19: Provenance Check) --------------
+        # One row per known DOI/arXiv-ID we've ever looked up or bulk-imported.
+        # `status` values: "clean" | "retracted" | "corrected" | "concern" (EOC)
+        # `reason` is Retraction Watch's free-text reason field when available
+        # (e.g. "Data Fabrication", "Duplicate Publication") — used by the
+        # severity-weighted confidence penalty (see 19.6 "future work" note).
+        """
+        CREATE TABLE IF NOT EXISTS retraction_status_cache (
+            id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            doi             TEXT,
+            arxiv_id        TEXT,
+            status          TEXT NOT NULL DEFAULT 'clean',
+            reason          TEXT,
+            source          TEXT NOT NULL DEFAULT 'crossref',
+            notice_url      TEXT,
+            checked_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE(doi),
+            UNIQUE(arxiv_id)
+        );
+        """,
+        "CREATE INDEX IF NOT EXISTS retraction_status_doi_idx ON retraction_status_cache(doi);",
+        "CREATE INDEX IF NOT EXISTS retraction_status_arxiv_idx ON retraction_status_cache(arxiv_id);",
+        "CREATE INDEX IF NOT EXISTS retraction_status_checked_idx ON retraction_status_cache(checked_at);",
+
+        # ---- cited_sources (Phase 23: Background Sweep target list) ------------
+        # Tracks every (doi|arxiv_id) that has EVER been cited in a saved run,
+        # across both the vault (markdown notes) and research_turns (Postgres).
+        # The sweep job iterates this table, not the notes folder, so re-flagging
+        # doesn't require re-parsing markdown frontmatter.
+        """
+        CREATE TABLE IF NOT EXISTS cited_sources (
+            id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            doi             TEXT,
+            arxiv_id        TEXT,
+            first_cited_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+            last_cited_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+            cite_locations  JSONB NOT NULL DEFAULT '[]',
+            UNIQUE(doi),
+            UNIQUE(arxiv_id)
+        );
+        """,
+        "CREATE INDEX IF NOT EXISTS cited_sources_doi_idx ON cited_sources(doi);",
+
+        # ---- provenance_reflags (Phase 23: Background Sweep notifications) -----
+        """
+        CREATE TABLE IF NOT EXISTS provenance_reflags (
+            id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            doi           TEXT,
+            arxiv_id      TEXT,
+            old_status    TEXT,
+            new_status    TEXT NOT NULL,
+            detected_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+            notified      BOOLEAN NOT NULL DEFAULT false
+        );
+        """,
+        "CREATE INDEX IF NOT EXISTS provenance_reflags_notified_idx ON provenance_reflags(notified) WHERE notified = false;",
     ]
 
 
@@ -192,6 +275,8 @@ def run_migrations() -> list[str]:
         with conn.cursor() as cur:
             cur.execute(_ENABLE_PGCRYPTO)
             applied.append("pgcrypto extension")
+            cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+            applied.append("vector extension")
             for stmt in _DDL:
                 cur.execute(stmt)
                 first_line = stmt.strip().splitlines()[0]

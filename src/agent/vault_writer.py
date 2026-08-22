@@ -145,6 +145,9 @@ def write_run_to_vault(
     reflection_attempts: int,
     run_id: str,
     extra_tags: list[str] | None = None,
+    provenance_dropped_count: int = 0,
+    provenance_flagged_count: int = 0,
+    originality_report: dict | None = None,
 ) -> Path:
     """Materialize one agent run as a markdown note inside the vault."""
     vault = Path(vault_path).resolve()
@@ -222,5 +225,166 @@ def write_run_to_vault(
     parts.append(f"sources_total:  {len(sources or {})}")
     parts.append("```")
 
+    # ---- Source Integrity (Phase 19: Provenance Check) ----
+    if provenance_dropped_count or provenance_flagged_count:
+        parts.append("")
+        parts.append("## Source Integrity")
+        parts.append("")
+        if provenance_dropped_count:
+            parts.append(f"- {provenance_dropped_count} retracted source(s) excluded automatically")
+        if provenance_flagged_count:
+            parts.append(f"- {provenance_flagged_count} source(s) carry an active correction/concern — see caveats in the answer above")
+        parts.append("")
+
+    # ---- Originality Report (Phase 20) ----
+    if originality_report:
+        parts.append("## Originality Report")
+        parts.append("")
+        parts.append(f"Score: {originality_report['score']}")
+        if originality_report["flags"]:
+            parts.append("")
+            for f in originality_report["flags"]:
+                parts.append(f"- **{f['status']}** (sim={f['similarity']}) vs [{f['source_tag']}]: \"{f['draft_sentence'][:100]}...\"")
+        parts.append("")
+
     target.write_text("\n".join(parts) + "\n", encoding="utf-8")
     return target
+
+
+def write_run_to_db_vault(
+    *,
+    user_id: str,
+    question: str,
+    answer: str,
+    sources: dict,
+    sub_questions: list[str],
+    is_complex: bool,
+    confidence: str,
+    rewrite_attempts: int,
+    web_used: bool,
+    papers_used: bool,
+    reflection_attempts: int,
+    run_id: str,
+    extra_tags: list[str] | None = None,
+    provenance_dropped_count: int = 0,
+    provenance_flagged_count: int = 0,
+    originality_report: dict | None = None,
+) -> str:
+    """
+    Persist one agent run as a markdown note directly inside the Postgres `notes` table.
+    Returns the relative path of the note.
+    """
+    import json
+    import hashlib
+    from datetime import datetime, timezone
+    from src.db import connection
+
+    ts = datetime.now(timezone.utc)
+    date_str = ts.strftime("%Y-%m-%d")
+
+    filename = _slugify(question)
+    path = f"ResearGent/{date_str}/{filename}.md"
+
+    # ---- Build frontmatter ----
+    tags = list(extra_tags or []) + ["researgent"]
+    if confidence == "low":
+        tags.append("low-confidence")
+    if not sources:
+        tags.append("no-sources")
+    meta = {
+        "title": question,
+        "date": date_str,
+        "source": "ResearGent",
+        "run_id": run_id,
+        "confidence": confidence or "unknown",
+        "rewrites": rewrite_attempts,
+        "web_used": web_used,
+        "papers_used": papers_used,
+        "reflections": reflection_attempts,
+        "n_sources": len(sources or {}),
+        "tags": sorted(set(tags)),
+    }
+
+    # ---- Build body ----
+    parts: list[str] = []
+    # Prepend the frontmatter block so the content column has the full Markdown representation
+    parts.append(_frontmatter(meta))
+    parts.append("")
+    parts.append(f"# {question}")
+    parts.append("")
+
+    if is_complex and len(sub_questions) > 1:
+        parts.append("**Decomposed into sub-questions:**")
+        for sq in sub_questions:
+            parts.append(f"- {sq}")
+        parts.append("")
+
+    parts.append(answer.strip() if answer else "_(no answer produced)_")
+    parts.append("")
+
+    # ---- Sources ----
+    if sources:
+        parts.append("## Sources")
+        parts.append("")
+        for tag, src in sorted(sources.items(), key=lambda kv: int(kv[0][1:])):
+            parts.append(_format_citation_line(tag, src))
+        parts.append("")
+
+    # ---- Provenance ----
+    parts.append("## Provenance")
+    parts.append("")
+    parts.append("```yaml")
+    parts.append(f"run_id:         {run_id}")
+    parts.append(f"timestamp:      {ts.isoformat(timespec='seconds')}")
+    parts.append(f"confidence:     {confidence}")
+    parts.append(f"rewrites:       {rewrite_attempts}")
+    parts.append(f"web_fallback:   {web_used}")
+    parts.append(f"paper_discovery:{papers_used}")
+    parts.append(f"reflections:    {reflection_attempts}")
+    parts.append(f"sources_total:  {len(sources or {})}")
+    parts.append("```")
+
+    # ---- Source Integrity (Phase 19: Provenance Check) ----
+    if provenance_dropped_count or provenance_flagged_count:
+        parts.append("")
+        parts.append("## Source Integrity")
+        parts.append("")
+        if provenance_dropped_count:
+            parts.append(f"- {provenance_dropped_count} retracted source(s) excluded automatically")
+        if provenance_flagged_count:
+            parts.append(f"- {provenance_flagged_count} source(s) carry an active correction/concern — see caveats in the answer above")
+        parts.append("")
+
+    # ---- Originality Report (Phase 20) ----
+    if originality_report:
+        parts.append("## Originality Report")
+        parts.append("")
+        parts.append(f"Score: {originality_report['score']}")
+        if originality_report["flags"]:
+            parts.append("")
+            for f in originality_report["flags"]:
+                parts.append(f"- **{f['status']}** (sim={f['similarity']}) vs [{f['source_tag']}]: \"{f['draft_sentence'][:100]}...\"")
+        parts.append("")
+
+    content = "\n".join(parts) + "\n"
+
+    # Compute content hash for id
+    h = hashlib.sha256()
+    h.update(f"{user_id}:{path}:{content}".encode("utf-8", errors="ignore"))
+    note_id = h.hexdigest()[:16]
+
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO notes (id, user_id, path, frontmatter, content, updated_at)
+                VALUES (%s, %s::UUID, %s, %s::JSONB, %s, now())
+                ON CONFLICT (path) DO UPDATE SET
+                    frontmatter = EXCLUDED.frontmatter,
+                    content = EXCLUDED.content,
+                    updated_at = now();
+                """,
+                (note_id, user_id, path, json.dumps(meta), content),
+            )
+
+    return path

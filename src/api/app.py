@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +69,28 @@ def create_app() -> FastAPI:
     )
     app.include_router(auth_router)
     app.include_router(billing_router)
+
+    # ── User context middleware ────────────────────────────────────────────
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.requests import Request
+    from starlette.responses import Response as StarletteResponse
+    from src.auth.context import current_user_id as _ctx_user_id
+
+    class UserContextMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request: Request, call_next):
+            # Try to resolve the user from the session cookie
+            uid: str | None = None
+            user_data = request.session.get("user")
+            if user_data and isinstance(user_data, dict):
+                uid = user_data.get("id")
+            token = _ctx_user_id.set(uid)
+            try:
+                response = await call_next(request)
+            finally:
+                _ctx_user_id.reset(token)
+            return response
+
+    app.add_middleware(UserContextMiddleware)
 
     @app.get("/health", include_in_schema=False)
     async def health() -> dict:
@@ -280,6 +303,83 @@ def create_app() -> FastAPI:
         ctx = memory_store.build_memory_context(user_id=user.id, domain_scope=domain_scope)
         return PlainTextResponse(ctx)
 
+    # ── Provenance Reflags API (Phase 23) ─────────────────────────────────────
+    @app.get("/api/provenance/reflags")
+    async def provenance_reflags(
+        since_days: int | None = Query(None, description="Only show reflags from last N days"),
+        unnotified_only: bool = Query(True, description="Only show un-notified reflags"),
+        user: User = Depends(current_user),
+    ):
+        from src.db import connection
+        with connection() as conn:
+            with conn.cursor() as cur:
+                if since_days:
+                    cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
+                    if unnotified_only:
+                        cur.execute(
+                            """
+                            SELECT doi, arxiv_id, old_status, new_status, detected_at, notified
+                            FROM provenance_reflags
+                            WHERE detected_at >= %s AND notified = false
+                            ORDER BY detected_at DESC
+                            """,
+                            (cutoff,),
+                        )
+                    else:
+                        cur.execute(
+                            """
+                            SELECT doi, arxiv_id, old_status, new_status, detected_at, notified
+                            FROM provenance_reflags
+                            WHERE detected_at >= %s
+                            ORDER BY detected_at DESC
+                            """,
+                            (cutoff,),
+                        )
+                else:
+                    if unnotified_only:
+                        cur.execute(
+                            """
+                            SELECT doi, arxiv_id, old_status, new_status, detected_at, notified
+                            FROM provenance_reflags
+                            WHERE notified = false
+                            ORDER BY detected_at DESC
+                            """
+                        )
+                    else:
+                        cur.execute(
+                            """
+                            SELECT doi, arxiv_id, old_status, new_status, detected_at, notified
+                            FROM provenance_reflags
+                            ORDER BY detected_at DESC
+                            """
+                        )
+                rows = cur.fetchall()
+                return JSONResponse([
+                    {
+                        "doi": r[0],
+                        "arxiv_id": r[1],
+                        "old_status": r[2],
+                        "new_status": r[3],
+                        "detected_at": r[4].isoformat(),
+                        "notified": r[5],
+                    }
+                    for r in rows
+                ])
+
+    @app.post("/api/provenance/reflags/mark-notified")
+    async def mark_reflags_notified(
+        ids: list[str],
+        user: User = Depends(current_user),
+    ):
+        from src.db import connection
+        with connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE provenance_reflags SET notified = true WHERE id = ANY(%s)",
+                    (ids,),
+                )
+        return JSONResponse({"updated": cur.rowcount})
+
     # ── Literature Review endpoint ──────────────────────────────────────────
     @app.get("/api/review")
     async def literature_review(
@@ -402,6 +502,54 @@ def create_app() -> FastAPI:
                 "Content-Disposition": f"attachment; filename={filename}"
             },
         )
+
+    # ── Document upload endpoint ────────────────────────────────────────────
+    from fastapi import UploadFile, File, Form
+
+    @app.post("/api/documents")
+    async def upload_document(
+        file: UploadFile = File(...),
+        domain: str | None = Form(None),
+        user: User = Depends(current_user),
+    ):
+        """Upload a PDF or Markdown note for ingestion."""
+        import tempfile
+        from src.auth.context import current_user_id as _ctx_uid
+
+        _ctx_uid.set(str(user.id))
+
+        filename = file.filename or "upload"
+        content_bytes = await file.read()
+
+        if filename.lower().endswith(".pdf"):
+            # Write to a temp file, ingest, clean up
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                tmp.write(content_bytes)
+                tmp_path = Path(tmp.name)
+            try:
+                from src.ingest.pipeline import ingest_file
+                result = await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: ingest_file(tmp_path, domain=domain, verbose=False)
+                )
+            finally:
+                tmp_path.unlink(missing_ok=True)
+            return JSONResponse(result)
+
+        elif filename.lower().endswith(".md"):
+            content_str = content_bytes.decode("utf-8", errors="ignore")
+            from src.ingest.pipeline import ingest_db_note
+            inserted = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: ingest_db_note(
+                    user_id=str(user.id),
+                    path=f"uploads/{filename}",
+                    content=content_str,
+                    domain=domain,
+                ),
+            )
+            return JSONResponse({"filename": filename, "chunks_inserted": inserted})
+
+        raise HTTPException(400, "Only .pdf and .md files are supported.")
 
     # ── Diagnostic endpoints ────────────────────────────────────────────────
     @app.get("/api/status")
