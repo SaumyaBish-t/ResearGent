@@ -19,7 +19,6 @@ ResearGent answers research questions by **grounding every claim in evidence it 
 
 The whole agent graph streams to a **Next.js + React Three Fiber dashboard** that visualizes the pipeline in real time over Server-Sent Events.
 
-> *(Run `researgent serve` + the frontend to see the live 3D agent network — or skip setup and try it at the live link above.)*
 > <!-- Add a screenshot or GIF of the 3D dashboard here, e.g. docs/demo.gif -->
 > *(Run `researgent serve` + the frontend to see the live 3D agent network — or skip setup and try it at the live link above.)*
 
