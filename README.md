@@ -2,8 +2,6 @@
 
 **A hallucination-resistant, multi-agent research companion with a live 3D dashboard.**
 
-ResearGent is a full personal research platform, not just a Q&A bot. It ingests your papers and notes, runs an adversarial Corrective-RAG + self-reflection loop, verifies provenance and originality before you ever see an answer, and persists trusted results back into a growing Markdown knowledge base — streamed live to a 3D agent dashboard.
-
 [![Live](https://img.shields.io/badge/Live-resear--gent.vercel.app-22d3ee)](https://resear-gent.vercel.app)
 [![API](https://img.shields.io/badge/API-researgent.onrender.com-34d399)](https://researgent.onrender.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
@@ -13,16 +11,15 @@ ResearGent is a full personal research platform, not just a Q&A bot. It ingests 
 [![Provenance](https://img.shields.io/badge/Provenance-Crossref%20%2B%20Retraction%20Watch-green)](https://github.com/SaumyaBish-t/ResearGent)
 [![Originality](https://img.shields.io/badge/Originality-embedding%20%2B%20ngram-blue)](https://github.com/SaumyaBish-t/ResearGent)
 
-> 🌐 **Live demo:** **<https://resear-gent.vercel.app>**
-> Sign in with Google → 3 free researches / month + 3 follow-ups per thread.
+> 🌐 **Live demo:** <https://resear-gent.vercel.app> — Sign in with Google → 3 free researches / month + 3 follow-ups per thread.
 > Lifetime unlock for ₹499 (one-time) via Razorpay. Best in Chrome / Firefox
-> (Brave users: disable Shields for the site so the cross-site session cookie
-> can travel between Vercel ↔ Render).
+> (Brave users: disable Shields for the site so the cross-site session cookie can travel between Vercel ↔ Render).
 
 ResearGent answers research questions by **grounding every claim in evidence it can cite** — and refusing to bluff when it can't. Instead of trusting a single vector-search pass, it runs an adversarial **Corrective-RAG + self-reflection** loop: a Critic grades the retrieved context, a Rewriter retries weak queries, a **Provenance Check** filters out retracted or corrected papers *before* the Critic even sees them, the **Originality Check** compares the draft against full source texts to catch uncited copying, and when local knowledge runs out the agent **cascades to academic APIs (arXiv / Semantic Scholar) and live web search** before writing a cited answer. High-confidence results are auto-saved to a local Markdown knowledge base that grows over time — and Phase 21 lets you inject your own experimental results verbatim so the agent writes the discussion around your numbers, not invented ones.
 
 The whole agent graph streams to a **Next.js + React Three Fiber dashboard** that visualizes the pipeline in real time over Server-Sent Events.
 
+> *(Run `researgent serve` + the frontend to see the live 3D agent network — or skip setup and try it at the live link above.)*
 > <!-- Add a screenshot or GIF of the 3D dashboard here, e.g. docs/demo.gif -->
 > *(Run `researgent serve` + the frontend to see the live 3D agent network — or skip setup and try it at the live link above.)*
 
