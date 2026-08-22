@@ -90,16 +90,19 @@ The agent is a state machine: retrieve, **grade**, and only ship when the eviden
 flowchart TD
     Q(["Query"]) --> P["Planner"]
     P --> R["Local Retriever<br/>dense + BM25 + RRF"]
-    R --> C{"Critic<br/>grade + confidence"}
+    R --> PC{"Provenance Check<br/>retraction/correction/concern filter"}
+    PC -->|retracted dropped| R
+    PC -->|clean / flagged| C{"Critic<br/>grade + confidence"}
     C -->|high| G["Generator<br/>cited answer"]
     C -->|"low / medium - retries left"| RW["Rewriter"]
     RW --> C
     C -->|"budget exhausted"| PD["Paper Discovery<br/>arXiv + Semantic Scholar"]
-    PD --> C
+    PD --> PC
     PD -.->|"still weak"| WF["Web Fallback<br/>Tavily -> Serper -> DDG"]
-    WF --> C
+    WF --> PC
     G --> VF["Verifier<br/>claim grading"]
-    VF --> RF{"Reflector<br/>gap audit"}
+    VF --> OC["Originality Check<br/>embedding + n-gram overlap"]
+    OC --> RF{"Reflector<br/>gap audit"}
     RF -->|"gaps found - budget left"| R
     RF -->|accept| MK["Memory Keeper<br/>topic extraction"]
     MK --> V[("Vault Gate<br/>auto-save if confident")]
