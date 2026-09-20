@@ -60,13 +60,6 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    app.add_middleware(
-        SessionMiddleware,
-        secret_key=settings.session_secret,
-        same_site="lax",
-        https_only=settings.cookie_secure,
-        max_age=600,
-    )
     app.include_router(auth_router)
     app.include_router(billing_router)
 
@@ -91,6 +84,16 @@ def create_app() -> FastAPI:
             return response
 
     app.add_middleware(UserContextMiddleware)
+    # SessionMiddleware added AFTER UserContextMiddleware so it runs FIRST
+    # (last-added = outermost in Starlette). It must populate scope["session"]
+    # before UserContextMiddleware reads request.session at dispatch time.
+    app.add_middleware(
+        SessionMiddleware,
+        secret_key=settings.session_secret,
+        same_site="lax",
+        https_only=settings.cookie_secure,
+        max_age=600,
+    )
 
     @app.get("/health", include_in_schema=False)
     async def health() -> dict:
