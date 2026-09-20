@@ -9,6 +9,7 @@ uvicorn[standard]>=0.32
 sse-starlette>=2.1
 starlette>=0.41
 itsdangerous>=2.2          # SessionMiddleware
+python-multipart>=0.0.20   # required by UploadFile/Form endpoints (/api/documents)
 
 # --- Auth + billing ---
 authlib>=1.7
