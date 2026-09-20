@@ -44,9 +44,11 @@ export default function Overlay() {
   if (!mounted) return null;
 
   // ---- Auth gate ----
-  if (!authReady) {
-    return <div className="pointer-events-none absolute inset-0 z-10" />;
-  }
+  // Optimistic: show the sign-in screen IMMEDIATELY instead of gating on
+  // authReady. A cold-started API (Render free tier sleeps after 15min idle)
+  // makes /auth/me take 40-50s — gating on it left visitors staring at a
+  // blank overlay. The mount-time /auth/me still runs (doubles as the
+  // wake-up request); signed-in users swap to the main UI once it resolves.
   if (!user) {
     return (
       <div className="absolute inset-0 z-10">

@@ -10,6 +10,7 @@ import { useAgentStore } from "@/lib/store";
  */
 export default function SignInLanding() {
   const signIn = useAgentStore((s) => s.signIn);
+  const authReady = useAgentStore((s) => s.authReady);
 
   return (
     <motion.div
@@ -41,9 +42,20 @@ export default function SignInLanding() {
           Sign in with Google
         </button>
 
-        <p className="mt-6 font-mono text-[10px] uppercase tracking-[0.28em] text-ink-mute">
-          free · 3 researches / month
-        </p>
+        {/* Cold-start notice — API free tier sleeps after 15min idle; the first
+            request takes ~40s to wake it. Communicates the wait instead of
+            leaving the CTA unresponsive-looking. */}
+        {!authReady && (
+          <p className="mt-6 flex items-center justify-center gap-2 font-mono text-[10px] uppercase tracking-[0.28em] text-ink-mute">
+            <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
+            waking the api — first load takes a minute
+          </p>
+        )}
+        {authReady && (
+          <p className="mt-6 font-mono text-[10px] uppercase tracking-[0.28em] text-ink-mute">
+            free · 3 researches / month
+          </p>
+        )}
       </div>
     </motion.div>
   );
