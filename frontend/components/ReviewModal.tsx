@@ -19,41 +19,8 @@ export default function ReviewModal() {
   const reviewTrace = useAgentStore((s) => s.reviewTrace);
   const currentReviewId = useAgentStore((s) => s.currentReviewId);
   const [dismissed, setDismissed] = useState(false);
-  const [pdfDownloading, setPdfDownloading] = useState(false);
-  const [pdfError, setPdfError] = useState<string | null>(null);
 
   const md = reviewMarkdown;
-
-  const downloadPdf = async () => {
-    if (!currentReviewId || pdfDownloading) return;
-    setPdfDownloading(true);
-    setPdfError(null);
-    try {
-      const response = await fetch(`${API_BASE}/api/reviews/${currentReviewId}/pdf`, {
-        credentials: "include",
-      });
-      if (!response.ok) {
-        const detail = await response.text();
-        throw new Error(detail || `Download failed (${response.status})`);
-      }
-      if (!response.headers.get("content-type")?.includes("application/pdf")) {
-        throw new Error("The server did not return a PDF file.");
-      }
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = `literature-review-${currentReviewId}.pdf`;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-    } catch (error) {
-      setPdfError(error instanceof Error ? error.message : "Could not download the PDF.");
-    } finally {
-      setPdfDownloading(false);
-    }
-  };
 
   // Re-open when new review arrives, starts running, or review ID changes
   useEffect(() => {
@@ -122,13 +89,14 @@ export default function ReviewModal() {
 
               <div className="flex items-center gap-3">
                 {currentReviewId && !reviewRunning && (
-                  <button
-                    onClick={downloadPdf}
-                    disabled={pdfDownloading}
-                    className="rounded-lg border border-accent/30 bg-accent/10 px-3.5 py-1.5 font-mono text-[10px] uppercase tracking-widest text-accent transition hover:bg-accent/20 hover:border-accent/50 disabled:cursor-wait disabled:opacity-60"
+                  <a
+                    href={`${API_BASE}/api/reviews/${currentReviewId}/pdf`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="rounded-lg border border-accent/30 bg-accent/10 px-3.5 py-1.5 font-mono text-[10px] uppercase tracking-widest text-accent transition hover:bg-accent/20 hover:border-accent/50"
                   >
-                    {pdfDownloading ? "Preparing PDF…" : "Download PDF"}
-                  </button>
+                    Download PDF
+                  </a>
                 )}
                 <button
                   onClick={() => setDismissed(true)}
@@ -138,12 +106,6 @@ export default function ReviewModal() {
                 </button>
               </div>
             </header>
-            {pdfError && (
-              <p role="alert" className="px-7 pb-2 font-mono text-xs text-red-400">
-                PDF download failed: {pdfError}
-              </p>
-            )}
-
             {/* Body — loading or markdown */}
             {reviewRunning && !md ? (
               <div className="flex-1 overflow-y-auto px-7 py-8">
