@@ -39,6 +39,7 @@ ddgs>=9.0
 arxiv>=2.1
 pypdf>=5.0
 pymupdf>=1.24
+reportlab>=5.0.0
 
 # --- Utilities ---
 numpy>=2.0
