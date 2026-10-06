@@ -184,17 +184,18 @@ def _grade_one_subq(
     # Critic's input tokens.
     #
     # Total-chunks cap MAX_CHUNKS_PER_CALL prevents paper_discovery's
-    # 5-papers × 5-slices expansion from flooding one Critic prompt.
+    # 8-papers × 3-slices expansion from flooding one Critic prompt.
     # When over the cap, chunks past the cap get auto-stamped "partial"
     # downstream — they're NOT actually graded by the LLM. So WHICH 20
     # we send matters: that's exactly the reorder logic below.
     #
-    # Bumped 12 -> 20 because the Critic was upgraded from llama-3.1-8b
-    # (Groq) to llama-3.3-70b (Cerebras/Groq cascade). The 70B model
+    # Bumped to 24 to grade the full 8-papers × 3-slices paper budget.
+    # The Critic was upgraded from llama-3.1-8b (Groq) to llama-3.3-70b
+    # (Cerebras/Groq cascade). The 70B model
     # handles ~25 chunks per call comfortably inside the token budget,
     # and 12 was leaving paper_discovery's fresh PDF slices ungraded.
     MAX_CHUNK_CHARS = 800
-    MAX_CHUNKS_PER_CALL = 20
+    MAX_CHUNKS_PER_CALL = 24
 
     # Critical ordering rule for the FIRST MAX_CHUNKS_PER_CALL chunks:
     # fresh external discoveries (paper:*, web:*) must beat local chunks
@@ -396,6 +397,8 @@ def critique(state: AgentState) -> dict[str, Any]:
         return {
             "confidence": "low",
             "critic_reasoning": "no chunks retrieved",
+            "critic_score": 0.0,
+            "paper_critic_score": 0.0,
             "trace": [{"node": "critic", "skipped": "empty_input"}],
         }
 
@@ -413,6 +416,7 @@ def critique(state: AgentState) -> dict[str, Any]:
     # inspect provenance signals (paper:* / web:*) and pick the right
     # HIGH threshold. We only need the chunk objects, not the refs.
     all_graded_chunks: list[HydratedChunk] = []
+    paper_grades: list[str] = []
 
     for sq, chunks in chunks_by_subq.items():
         total_chunks_in += len(chunks)
@@ -420,28 +424,12 @@ def critique(state: AgentState) -> dict[str, Any]:
         total_ms += ms
         total_prompt_chars += prompt_chars
 
-        # CASCADE-FETCHED PAPER FLOOR: never drop a paper:* chunk to
-        # "irrelevant" — at worst demote to "partial" so it survives
-        # the filter on line 412.
-        #
-        # Why: by the time a paper:* chunk reaches the Critic, the
-        # cascade has paid S2 round-trip + PDF download + parse +
-        # semantic-chunk + embed for it. The paper itself was chosen
-        # because it ranked top against the user's named entity (e.g.
-        # "AutoGen paper by Wu et al." → arxiv:2308.08155). Empirically
-        # the 70B Critic on llama-3.3 still rejects ~half of cascade
-        # PDF slices when web summaries are present in the same prompt —
-        # it prefers cleaner prose. That's a model-judgment bias we
-        # don't want to trust to evict evidence the user explicitly
-        # asked for. Letting paper:* through as "partial" gives the
-        # generator a fair shot at citing it; the generator's own
-        # prompt-budget pressure will naturally down-weight slices
-        # that genuinely don't help.
-        for i, c in enumerate(chunks):
-            sig = (getattr(c, "signal", "") or "").lower()
-            if sig.startswith("paper:") and i < len(grades) and grades[i] == "irrelevant":
-                grades[i] = "partial"
-
+        # Irrelevant paper chunks are dropped so the confidence score can trigger web fallback.
+        paper_grades.extend(
+            grade
+            for chunk, grade in zip(chunks, grades)
+            if (getattr(chunk, "signal", "") or "").lower().startswith("paper:")
+        )
         all_grades.extend(grades)
         all_graded_chunks.extend(chunks)
         if reasoning:
@@ -471,6 +459,13 @@ def critique(state: AgentState) -> dict[str, Any]:
         (rel_n * 1.00 + par_n * 0.75)
         / max(rel_n + par_n + irr_n * 0.50, 1)
     )
+    paper_rel = paper_grades.count("relevant")
+    paper_par = paper_grades.count("partial")
+    paper_irr = paper_grades.count("irrelevant")
+    paper_score = (
+        (paper_rel + paper_par * 0.75)
+        / max(paper_rel + paper_par + paper_irr * 0.50, 1)
+    )
     summary = "; ".join(reasonings)[:300] if reasonings else ""
 
     return {
@@ -483,6 +478,7 @@ def critique(state: AgentState) -> dict[str, Any]:
         # score 0.69 (almost high) would be indistinguishable to the save
         # policy.
         "critic_score": round(weighted_score, 3),
+        "paper_critic_score": round(paper_score, 3),
         "critic_reasoning": summary,
         "trace": [
             {
@@ -495,6 +491,7 @@ def critique(state: AgentState) -> dict[str, Any]:
                 # threshold applied so a low/medium verdict is explainable
                 # without having to reproduce the formula by hand.
                 "score": round(weighted_score, 3),
+                "paper_score": round(paper_score, 3),
                 "threshold_hi": threshold_hi,
                 "external_fresh_pool": has_external,
                 # Phase 15.1 telemetry: rough payload size across all sub-Q

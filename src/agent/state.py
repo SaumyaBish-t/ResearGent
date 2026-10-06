@@ -89,6 +89,7 @@ class AgentState(TypedDict, total=False):
     # ---- Critic outputs (Phase 4) ----
     confidence: str          # "high" | "medium" | "low"
     critic_score: float      # weighted score from the last Critic wave (0.0–1.0)
+    paper_critic_score: float # same score, calculated from paper chunks only
     critic_reasoning: str    # one-line explanation for the trace
 
     # ---- Rewriter / loop control (Phase 4) ----

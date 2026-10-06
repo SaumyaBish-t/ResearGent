@@ -65,6 +65,18 @@ from src.agent.nodes import (
 from src.agent.state import AgentState
 from src.config import settings
 
+PAPER_CONFIDENCE_THRESHOLD = 0.70
+
+
+def _web_search_available() -> bool:
+    configured = {
+        "tavily": bool(settings.tavily_api_key),
+        "serper": bool(settings.serper_api_key),
+        "duckduckgo": True,
+    }
+    cascade = settings.web_search_cascade or list(configured)
+    return any(configured.get(provider, False) for provider in cascade)
+
 
 def _route_after_retriever(state: AgentState) -> str:
     if retriever.has_any_chunks(state):
@@ -72,17 +84,42 @@ def _route_after_retriever(state: AgentState) -> str:
 
     if settings.paper_discovery_enabled and not state.get("papers_used"):
         return "paper_discovery"
-    if settings.tavily_api_key and not state.get("web_used"):
+    if _web_search_available() and not state.get("web_used"):
         return "web_fallback"
     if settings.llm_reasoning_fallback_enabled:
         return "llm_reasoning"
     return "no_answer"
 
 
+def _route_after_planner(state: AgentState) -> str:
+    """Search academic papers before local retrieval and web fallback."""
+    if settings.paper_discovery_enabled and not state.get("papers_used"):
+        return "paper_discovery"
+    return "retriever"
+
+
 def _route_after_critic(state: AgentState) -> str:
     conf = state.get("confidence") or "low"
     attempts = int(state.get("rewrite_attempts") or 0)
     max_rewrites = settings.crag_max_rewrites
+    paper_score = float(state.get("paper_critic_score") or 0.0)
+    papers_tried = bool(state.get("papers_used"))
+    web_already_tried = bool(state.get("web_used"))
+    chunks_by_subq = state.get("chunk_refs_by_subq") or {}
+    has_chunks = any(chunks_by_subq.values())
+
+    if papers_tried and not web_already_tried:
+        if paper_score < PAPER_CONFIDENCE_THRESHOLD and _web_search_available():
+            return "web_fallback"
+        if paper_score >= PAPER_CONFIDENCE_THRESHOLD:
+            return "generator"
+
+    if web_already_tried:
+        if has_chunks:
+            return "generator"
+        if settings.llm_reasoning_fallback_enabled:
+            return "llm_reasoning"
+        return "no_answer"
 
     if conf == "high":
         return "generator"
@@ -90,28 +127,19 @@ def _route_after_critic(state: AgentState) -> str:
     if attempts < max_rewrites:
         return "rewriter"
 
-    papers_tried = bool(state.get("papers_used"))
     if not papers_tried and settings.paper_discovery_enabled:
         return "paper_discovery"
 
-    web_already_tried = bool(state.get("web_used"))
-    have_web_key = bool(settings.tavily_api_key)
+    have_web_key = _web_search_available()
     if not web_already_tried and have_web_key:
         return "web_fallback"
 
-    chunks_by_subq = state.get("chunk_refs_by_subq") or {}
-    if any(chunks_by_subq.values()):
+    if has_chunks:
         return "generator"
 
-    return "web_fallback"
-
-
-def _route_after_papers(state: AgentState) -> str:
-    web_already_tried = bool(state.get("web_used"))
-    have_web_key = bool(settings.tavily_api_key)
-    if not web_already_tried and have_web_key:
-        return "web_fallback"
-    return "provenance_check"
+    if settings.llm_reasoning_fallback_enabled:
+        return "llm_reasoning"
+    return "no_answer"
 
 
 def _route_after_web(state: AgentState) -> str:
@@ -165,7 +193,11 @@ def build_graph(use_checkpointer: bool = True):
     g.add_node("originality_check", originality_check.originality_check)
 
     g.add_edge(START, "planner")
-    g.add_edge("planner", "retriever")
+    g.add_conditional_edges(
+        "planner",
+        _route_after_planner,
+        {"paper_discovery": "paper_discovery", "retriever": "retriever"},
+    )
     g.add_conditional_edges(
         "retriever",
         _route_after_retriever,
@@ -186,17 +218,12 @@ def build_graph(use_checkpointer: bool = True):
             "rewriter": "rewriter",
             "paper_discovery": "paper_discovery",
             "web_fallback": "web_fallback",
+            "llm_reasoning": "llm_reasoning",
+            "no_answer": "no_answer",
         },
     )
     g.add_edge("rewriter", "critic")
-    g.add_conditional_edges(
-        "paper_discovery",
-        _route_after_papers,
-        {
-            "provenance_check": "provenance_check",
-            "web_fallback": "web_fallback",
-        },
-    )
+    g.add_edge("paper_discovery", "retriever")
     g.add_conditional_edges(
         "web_fallback",
         _route_after_web,

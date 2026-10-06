@@ -49,14 +49,10 @@ def retrieve(state: AgentState) -> dict[str, Any]:
     """
     sub_qs = state.get("sub_questions") or [state["question"]]
 
-    # Production kill-switch: when there's no shared local vault to query,
-    # return empty refs for every sub-q. The Critic will mark confidence
-    # `low`, the graph will skip to web_fallback + paper_discovery, and the
-    # Generator will compose from those + LLM priors. Saves ~1-2s vs running
-    # the local hybrid search against an empty/irrelevant corpus.
+    # Production kill-switch: when local retrieval is disabled, return no
+    # ref updates. Paper refs may already be present and must be preserved.
     if not settings.enable_local_retrieval:
         return {
-            "chunk_refs_by_subq": {sq: [] for sq in sub_qs},
             "trace": [{
                 "node": "retriever",
                 "skipped_local_retrieval": True,
@@ -70,8 +66,15 @@ def retrieve(state: AgentState) -> dict[str, Any]:
 
     # Idempotency check is on REFS, not chunks — no hydration needed.
     existing_refs = dict(state.get("chunk_refs_by_subq") or {})
-    to_retrieve = [sq for sq in sub_qs if not existing_refs.get(sq)]
-    skipped = [sq for sq in sub_qs if existing_refs.get(sq)]
+
+    def _has_local_ref(sq: str) -> bool:
+        return any(
+            (ref.get("kind") if isinstance(ref, dict) else getattr(ref, "kind", None)) == "local"
+            for ref in (existing_refs.get(sq) or [])
+        )
+
+    to_retrieve = [sq for sq in sub_qs if not _has_local_ref(sq)]
+    skipped = [sq for sq in sub_qs if _has_local_ref(sq)]
 
     # We hold chunks in memory only for the duration of this node call.
     # Pre-existing sub-Qs get hydrated so graph-expansion can read their
@@ -128,7 +131,7 @@ def retrieve(state: AgentState) -> dict[str, Any]:
                     "duration_ms": int((time.perf_counter() - t1) * 1000),
                 }
             )
-        chunks_by_subq[sq] = hits
+        chunks_by_subq[sq] = list(chunks_by_subq.get(sq) or []) + hits
         timings.append(
             {
                 "node": "retriever",

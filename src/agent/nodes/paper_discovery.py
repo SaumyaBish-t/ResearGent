@@ -1,6 +1,6 @@
 """
-Paper discovery node — searches arXiv + Semantic Scholar when the local
-corpus + retries didn't surface enough evidence.
+Paper discovery node searches arXiv + Semantic Scholar before local retrieval,
+so academic papers are the first evidence source considered.
 
 This sits BEFORE web_fallback in the CRAG cascade because:
   - Paper abstracts are denser + more authoritative than web snippets
@@ -30,9 +30,19 @@ from src.domains import infer_domains_from_query
 from src.llm import chat
 from src.retrieval import discover_papers
 
-# Don't blow out the prompt with too many papers — abstract per paper is
-# ~200 tokens, 5 papers = ~1000 tokens, comfortable budget.
-DEFAULT_MAX_PAPERS = 5
+# Keep a bounded paper set. Three semantic slices per paper stay within the
+# critic and generator context budgets while covering more distinct studies.
+DEFAULT_MAX_PAPERS = 8
+
+
+def _current_turn_question(question: str) -> str:
+    """Strip prior-turn context from a follow-up query when present."""
+    match = re.search(
+        r"\[(?:Current|New) question\]\s*(.*)$",
+        question,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return match.group(1).strip() if match else question.strip()
 
 # Tight FAST-tier prompt to convert a verbose user question into a keyword
 # query that academic search engines actually like.
@@ -133,16 +143,21 @@ def _extract_search_query(question: str) -> str:
 def discover(state: AgentState) -> dict[str, Any]:
     """Search arXiv + Semantic Scholar and merge results into state."""
     question = state["question"]
+    search_question = _current_turn_question(question)
     thread_id = state.get("run_id") or ""
     existing_refs = dict(state.get("chunk_refs_by_subq") or {})
 
     # Auto-detect domain for the paper discovery
-    detected_domains = infer_domains_from_query(question, min_hits=1)
+    detected_domains = infer_domains_from_query(search_question, min_hits=1)
     domain_id = detected_domains[0] if detected_domains else None
 
     # Use the original question - the new discover_papers handles multi-query generation internally
     t0 = time.perf_counter()
-    papers = discover_papers(question, max_results=DEFAULT_MAX_PAPERS, domain_id=domain_id)
+    papers = discover_papers(
+        search_question,
+        max_results=DEFAULT_MAX_PAPERS,
+        domain_id=domain_id,
+    )
     dur_ms = int((time.perf_counter() - t0) * 1000)
 
     if not papers:
@@ -153,7 +168,7 @@ def discover(state: AgentState) -> dict[str, Any]:
                 {
                     "node": "paper_discovery",
                     "duration_ms": dur_ms,
-                    "search_query": question[:80],
+                    "search_query": search_question[:80],
                     "results": 0,
                     "note": "no papers found",
                     "domain": domain_id,
@@ -162,13 +177,13 @@ def discover(state: AgentState) -> dict[str, Any]:
         }
 
     # Persist paper chunks as ephemeral artifacts and merge their refs
-    # under the ORIGINAL question key. We use the original question (not
+    # under the current-turn question key, excluding prior-turn context (not
     # a sub-q) because paper discovery is top-level evidence — the
     # abstracts are usually broad enough to cover multiple sub-questions.
-    new_refs = persist_mixed(thread_id, {question: list(papers)})
+    new_refs = persist_mixed(thread_id, {search_question: list(papers)})
     merged_refs = dict(existing_refs)
-    merged_refs[question] = list(existing_refs.get(question) or []) + list(
-        new_refs.get(question) or []
+    merged_refs[search_question] = list(existing_refs.get(search_question) or []) + list(
+        new_refs.get(search_question) or []
     )
 
     # Dedupe the display summary by (arxiv_id, title) — after
@@ -210,7 +225,7 @@ def discover(state: AgentState) -> dict[str, Any]:
                 {
                     "node": "paper_discovery",
                     "duration_ms": dur_ms,
-                    "search_query": question[:80],
+                    "search_query": search_question[:80],
                     "results": len(papers),
                     "providers": sorted({p.source for p in papers}),
                     "top_score": round(max(p.score for p in papers), 3),

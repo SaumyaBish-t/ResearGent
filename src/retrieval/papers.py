@@ -617,9 +617,9 @@ def _rank_by_relevance(query: str, papers: list[PaperChunk], top_k: int) -> list
     Embedding-based reranking with citation and recency awareness.
     
     Combines:
-    - Semantic similarity (cosine) — 60% weight
-    - Citation count (log-normalized) — 30% weight  
-    - Recency bonus (newer papers get slight boost) — 10% weight
+    - Semantic similarity (cosine) — 80% weight
+    - Citation count (log-normalized) — 15% weight
+    - Recency bonus (newer papers get slight boost) — 5% weight
     
     arXiv/SS each have their own ranking, but they're not directly comparable
     and tend to weight recency / citations heavily. For our use case we want
@@ -677,7 +677,7 @@ def _rank_by_relevance(query: str, papers: list[PaperChunk], top_k: int) -> list
         recency_score = max(0.0, 1.0 - age / 10.0)
         
         # Combined score
-        p.score = 0.6 * semantic_score + 0.3 * citation_score + 0.1 * recency_score
+        p.score = 0.8 * semantic_score + 0.15 * citation_score + 0.05 * recency_score
 
     papers.sort(key=lambda p: p.score, reverse=True)
     return papers[:top_k]
@@ -770,7 +770,6 @@ def _crag_rewrite_and_retry(
         return current_papers
     
     # Count papers above floor
-    _PAPER_SCORE_FLOOR = 0.75
     strong_papers = [p for p in current_papers if p.score >= _PAPER_SCORE_FLOOR]
     
     if len(strong_papers) >= 3:
@@ -786,7 +785,7 @@ def _crag_rewrite_and_retry(
         
         rewrite_prompt = f"""The user asked: "{original_question}"
 
-Our paper search returned only {len(strong_papers)} highly relevant papers (score >= 0.75).
+Our paper search returned only {len(strong_papers)} highly relevant papers (score >= {_PAPER_SCORE_FLOOR}).
 The top results were:
 {chr(10).join(f'- {p.title[:80]} (score={p.score:.2f}, citations={p.citations})' for p in current_papers[:5])}
 
@@ -877,9 +876,10 @@ _MAX_PARALLEL_FETCHES = 4
 # UserProxyAgent) didn't rank in the top-3 by cosine to the generic query
 # "AutoGen conversational programming" — deeper methodology sections
 # scored higher and crowded it out, so the Critic graded all surviving
-# slices irrelevant to "what are the two classes of agents". 5 slices
-# gives the intro a reliable seat at the table.
-_MAX_CHUNKS_PER_PAPER = 5
+# slices irrelevant to "what are the two classes of agents". Three slices
+# retain both early definitions and one query-matched passage per paper.
+_MAX_CHUNKS_PER_PAPER = 3
+_PAPER_SCORE_FLOOR = 0.50
 
 # Hard cap on raw extracted PDF text. Some open-access PDFs are 80+ page
 # theses; semantically chunking 200K chars per paper is wasted work since
@@ -1141,7 +1141,7 @@ def _expand_with_semantic_chunks(
 
         top_n = scored[:_MAX_CHUNKS_PER_PAPER]
 
-        # Pin the FIRST TWO slices (intro/abstract + first methods section).
+        # Pin early slices (intro/abstract + first methods section).
         #
         # Empirical reason for two, not one: in AutoGen (arxiv:2308.08155),
         # the literal text defining the class taxonomy —
@@ -1157,11 +1157,11 @@ def _expand_with_semantic_chunks(
         # Pinning the first 2 covers both the intro framing AND the
         # first concrete-definitions section, which together handle
         # ~all "what is X / how many X" style questions. The remaining
-        # 3 of 5 slots stay query-similarity ranked for tail questions
+        # One slot stays query-similarity ranked for tail questions
         # like "how does X handle Y under condition Z".
         #
-        # Budget stays constant: swap pinned slices in for the
-        # lowest-scored kept slices, never grow past _MAX_CHUNKS_PER_PAPER.
+        # Keep a small per-paper budget so discovery can include more
+        # distinct papers without flooding critic/generator context.
         _PIN_EARLY_N = 2
         for early in slices[:_PIN_EARLY_N]:
             if any(s == early for _, s in top_n):
@@ -1237,28 +1237,7 @@ def discover_papers(
 
     t0 = time.perf_counter()
 
-    # RELEVANCE FLOOR: drop papers below the query-similarity threshold.
-    #
-    # Empirically on the AutoGen run, the cascade returned 5 papers:
-    #   AutoGen          0.82   ← the user actually asked about this one
-    #   Multi-Agent RL    0.70
-    #   AutoGen-Powered  0.69   ← related framework, not the paper named
-    #   AUTOGEN STUDIO   0.68   ← also not the paper named
-    #   Hanabi           0.67   ← totally unrelated
-    # All 5 then expanded into 5 slices each → 25 paper chunks reaching
-    # the Critic and generator, of which only the 5 AutoGen slices were
-    # genuinely relevant to the question. The 20 off-topic slices filled
-    # source slots [S6]-[S25] with noise that diluted the reasoning LLM's
-    # synthesis budget.
-    #
-    # 0.75 is the threshold the user picked after seeing the score
-    # distribution. Empirically on framework-named queries this keeps the
-    # 1-2 directly-on-target papers and drops the topically-adjacent ones.
-    # Web fallback then fills in the breadth.
-    #
-    # SAFETY: if the floor would leave 0 papers, keep the top-1 anyway —
-    # never return an empty discovery just because nothing crossed the bar.
-    _PAPER_SCORE_FLOOR = 0.75
+    # Keep candidates above a permissive search-score floor; the Critic makes the final evidence decision.
     if ranked:
         kept = [p for p in ranked if p.score >= _PAPER_SCORE_FLOOR]
         if not kept:
