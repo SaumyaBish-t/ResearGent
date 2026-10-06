@@ -64,6 +64,10 @@ _TRANSIENT_ERRORS = (
     openai.PermissionDeniedError,
 )
 
+# NVIDIA's hosted embedding endpoint rejects requests with more than 256
+# inputs. Keep larger caller batches transparent by sending them in slices.
+_NVIDIA_MAX_EMBED_BATCH = 256
+
 
 # ---------------------------------------------------------------------------
 # Provider descriptors
@@ -386,11 +390,21 @@ def embed(
                     if step.kind == "nvidia"
                     else None
                 )
-                resp = client.embeddings.create(
-                    model=step.model, input=texts_list, extra_body=extra_body
+                batch_size = (
+                    _NVIDIA_MAX_EMBED_BATCH
+                    if step.kind == "nvidia"
+                    else max(1, len(texts_list))
                 )
-                ctx["usage"] = getattr(resp, "usage", None)
-                return [d.embedding for d in resp.data]
+                vectors: list[list[float]] = []
+                for start in range(0, len(texts_list), batch_size):
+                    resp = client.embeddings.create(
+                        model=step.model,
+                        input=texts_list[start : start + batch_size],
+                        extra_body=extra_body,
+                    )
+                    vectors.extend(d.embedding for d in resp.data)
+                    ctx["usage"] = getattr(resp, "usage", None)
+                return vectors
         except _TRANSIENT_ERRORS as e:
             last_exc = e
             continue
