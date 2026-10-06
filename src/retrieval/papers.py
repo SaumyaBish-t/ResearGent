@@ -36,19 +36,16 @@ ArXiv ID where available, otherwise by exact-title match.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import sys
 import time
 import traceback
 from dataclasses import dataclass
-from typing import Any
+from datetime import UTC, datetime
+from pathlib import Path
 
 import httpx
-
-
-import os
-from datetime import datetime
-from pathlib import Path
 
 # Sidecar log file — written in addition to stderr so we have ground truth
 # even when terminal capture, Rich panels, or Windows stdout buffering hide
@@ -252,16 +249,144 @@ _S2_STOPWORDS: frozenset[str] = frozenset({
     "flow",
     "for", "from", "general", "handle", "handles", "have", "her", "here",
     "his", "how", "i", "in", "into", "introduce", "introduced", "introduces",
-    "is", "it", "its", "large", "latest", "learning", "method", "methods",
-    "model", "models", "multi", "network", "new", "novel", "now", "of", "on",
-    "or", "paper", "paradigm", "process", "real", "recent", "review", "study",
-    "studies", "survey", "system", "systems", "technique", "techniques", "than",
-    "that", "the", "their", "them", "then", "this", "those", "through", "to",
-    "two", "use", "uses", "using", "via", "way", "what", "when", "where",
-    "which", "while", "who", "whom", "why", "with", "work", "works", "would",
+    "is", "it", "its", "large", "latest", "learning", "method", "methods", "model",
+    "models", "multi", "network", "new", "novel", "now", "of", "on", "or", "paper",
+    "paradigm", "process", "real", "recent", "review", "study", "studies", "survey",
+    "system", "systems", "technique", "techniques", "than", "that", "the", "their",
+    "them", "then", "this", "those", "through", "to", "two", "use", "uses", "using",
+    "via", "way", "what", "when", "where", "which", "while", "who", "whom", "why",
+    "with", "work", "works", "would",
     # "et al." artifacts after punctuation strip
     "al",
 })
+
+
+# ---------------------------------------------------------------------------
+# Multi-query generation for stronger paper discovery
+# ---------------------------------------------------------------------------
+
+# Domain vocabulary expansions — synonyms and related terms that help recall
+# when the user's question uses different terminology than the paper.
+# Loaded from domains.py routing_keywords + seed_queries for automatic coverage.
+_DOMAIN_VOCAB: dict[str, list[str]] = {}
+
+
+def _load_domain_vocab() -> None:
+    """Populate _DOMAIN_VOCAB from the domain registry."""
+    global _DOMAIN_VOCAB
+    if _DOMAIN_VOCAB:
+        return
+    try:
+        from src.domains import DOMAINS
+        for dom_id, dom in DOMAINS.items():
+            terms: list[str] = []
+            terms.extend(dom.routing_keywords)
+            for sq in dom.seed_queries:
+                # Extract meaningful tokens from seed queries
+                tokens = re.findall(r"[A-Za-z][A-Za-z0-9.\-]*", sq)
+                for tok in tokens:
+                    if len(tok) >= 3 and tok.lower() not in _S2_STOPWORDS:
+                        terms.append(tok)
+            # Dedupe, keep order
+            seen = set()
+            unique = []
+            for t in terms:
+                key = t.lower()
+                if key not in seen:
+                    seen.add(key)
+                    unique.append(t)
+            _DOMAIN_VOCAB[dom_id] = unique
+    except Exception:
+        _DOMAIN_VOCAB = {}
+
+
+def _expand_with_domain_vocab(query: str, domain_id: str | None) -> list[str]:
+    """
+    Generate query variants by injecting domain-relevant terms.
+    
+    Returns the original query plus up to 2 expanded variants that add
+    domain vocabulary terms not already present in the query.
+    """
+    if not domain_id:
+        return [query]
+    _load_domain_vocab()
+    vocab = _DOMAIN_VOCAB.get(domain_id, [])
+    if not vocab:
+        return [query]
+    
+    q_lower = query.lower()
+    # Find vocab terms not already in the query
+    missing = [t for t in vocab if t.lower() not in q_lower]
+    if not missing:
+        return [query]
+    
+    # Create 2 variants: add top 1-2 missing terms each
+    variants = [query]
+    # Variant 1: add top missing term
+    v1 = query + " " + missing[0]
+    variants.append(v1)
+    # Variant 2: add top 2 missing terms (if available)
+    if len(missing) >= 2:
+        v2 = query + " " + " ".join(missing[:2])
+        variants.append(v2)
+    return variants
+
+
+def _generate_search_queries(
+    question: str, 
+    domain_id: str | None = None,
+    max_queries: int = 5
+) -> list[str]:
+    """
+    Generate multiple diverse search queries from a single research question.
+    
+    Strategies:
+    1. Original — user's verbatim question (arXiv handles this well)
+    2. Entity-focused — only named entities + acronyms (S2 loves this)
+    3. Technical — LLM-rewritten to academic keywords (current _extract_search_query behavior)
+    4. Domain-expanded — inject domain vocabulary for recall
+    5. Broad — strip to 1-2 core concepts
+    
+    Returns up to max_queries unique, non-empty queries.
+    """
+    from src.agent.nodes.paper_discovery import _extract_named_entities, _extract_search_query
+    
+    queries: list[str] = []
+    seen: set[str] = set()
+    
+    def add(q: str) -> None:
+        q = q.strip()
+        if q and q.lower() not in seen:
+            seen.add(q.lower())
+            queries.append(q)
+    
+    # 1. Original question (verbatim)
+    add(question)
+    
+    # 2. Entity-focused — just the anchors
+    anchors = _extract_named_entities(question)
+    if anchors:
+        add(" ".join(anchors))
+    
+    # 3. Technical/LLM-rewritten (current behavior)
+    technical = _extract_search_query(question)
+    add(technical)
+    
+    # 4. Domain-expanded variants
+    for variant in _expand_with_domain_vocab(technical, domain_id):
+        add(variant)
+    
+    # 5. Broad — take first 1-2 anchor/content tokens
+    if anchors:
+        add(" ".join(anchors[:2]))
+    else:
+        # Fallback: first few meaningful words from technical query
+        tokens = re.findall(r"[A-Za-z][A-Za-z0-9.\-]*", technical)
+        content_tokens = [t for t in tokens if len(t) >= 4 and t.lower() not in _S2_STOPWORDS]
+        if content_tokens:
+            add(" ".join(content_tokens[:2]))
+    
+    return queries[:max_queries]
 
 
 def _is_anchor_token(tok: str) -> bool:
@@ -489,8 +614,13 @@ def _dedupe(papers: list[PaperChunk]) -> list[PaperChunk]:
 
 def _rank_by_relevance(query: str, papers: list[PaperChunk], top_k: int) -> list[PaperChunk]:
     """
-    Embedding-based reranking.
-
+    Embedding-based reranking with citation and recency awareness.
+    
+    Combines:
+    - Semantic similarity (cosine) — 60% weight
+    - Citation count (log-normalized) — 30% weight  
+    - Recency bonus (newer papers get slight boost) — 10% weight
+    
     arXiv/SS each have their own ranking, but they're not directly comparable
     and tend to weight recency / citations heavily. For our use case we want
     SEMANTIC relevance to the user's question — cosine on the embedder
@@ -502,9 +632,12 @@ def _rank_by_relevance(query: str, papers: list[PaperChunk], top_k: int) -> list
 
     # Import here to avoid pulling the LLM stack when discovery is used
     # purely for display (e.g. the `discover` CLI command without ingestion).
+    from datetime import datetime
+
     import numpy as np
-    from src.llm import embed
+
     from src.config import ModelTier
+    from src.llm import embed
 
     texts = [p.text[:2000] for p in papers]  # cap to keep embed batch sane
     try:
@@ -519,16 +652,183 @@ def _rank_by_relevance(query: str, papers: list[PaperChunk], top_k: int) -> list
     qv = np.asarray(vectors[0], dtype=np.float32)
     qn = qv / (np.linalg.norm(qv) + 1e-12)
 
+    # Compute max citations for normalization
+    max_citations = max((p.citations or 0) for p in papers)
+    current_year = datetime.now().year
+
     for p, v in zip(papers, vectors[1:]):
         pv = np.asarray(v, dtype=np.float32)
         pn = pv / (np.linalg.norm(pv) + 1e-12)
         # Clamp to [0, 1] — cosine can go negative for orthogonal vectors
         # but for natural-language embeddings that's vanishingly rare and
         # negative scores confuse downstream display.
-        p.score = max(0.0, float(np.dot(qn, pn)))
+        semantic_score = max(0.0, float(np.dot(qn, pn)))
+        
+        # Citation score: log(citations + 1) / log(max_citations + 1)
+        citations = p.citations or 0
+        if max_citations > 0:
+            citation_score = np.log(citations + 1) / np.log(max_citations + 1)
+        else:
+            citation_score = 0.0
+        
+        # Recency score: linear decay from current year, papers >= 10 years old get 0
+        year = p.year or current_year
+        age = current_year - year
+        recency_score = max(0.0, 1.0 - age / 10.0)
+        
+        # Combined score
+        p.score = 0.6 * semantic_score + 0.3 * citation_score + 0.1 * recency_score
 
     papers.sort(key=lambda p: p.score, reverse=True)
     return papers[:top_k]
+
+
+def _domain_boost(papers: list[PaperChunk], domain_id: str | None) -> list[PaperChunk]:
+    """
+    Boost papers that match the domain's vocabulary.
+    
+    Adds a small bonus (up to +0.1) to papers whose title/abstract/venue
+    contain domain routing keywords or seed query terms.
+    """
+    if not domain_id:
+        return papers
+    
+    _load_domain_vocab()
+    vocab = _DOMAIN_VOCAB.get(domain_id, [])
+    if not vocab:
+        return papers
+    
+    vocab_lower = {v.lower() for v in vocab}
+    
+    for p in papers:
+        # Check title, abstract, venue for domain terms
+        text = f"{p.title} {p.abstract} {p.venue}".lower()
+        matches = sum(1 for v in vocab_lower if v in text)
+        if matches > 0:
+            # Small boost: +0.02 per match, capped at +0.1
+            boost = min(0.02 * matches, 0.1)
+            p.score = min(1.0, p.score + boost)
+    
+    papers.sort(key=lambda p: p.score, reverse=True)
+    return papers
+
+
+def _multi_query_search(
+    queries: list[str], 
+    max_results: int,
+    domain_id: str | None = None
+) -> list[PaperChunk]:
+    """
+    Run multiple search queries against both providers, merge and dedupe results.
+    
+    Each query runs against arXiv and Semantic Scholar. Results are merged,
+    deduped, and ranked by relevance.
+    """
+    all_papers: list[PaperChunk] = []
+    
+    for q in queries:
+        _debug(f"[multi-query] Searching: {q!r}")
+        arxiv_hits = _arxiv_search(q, max_results=max_results)
+        _debug(f"[multi-query] arXiv returned {len(arxiv_hits)} hits for {q!r}")
+        ss_hits = _semantic_scholar_search(q, max_results=max_results)
+        _debug(f"[multi-query] S2 returned {len(ss_hits)} hits for {q!r}")
+        all_papers.extend(arxiv_hits)
+        all_papers.extend(ss_hits)
+    
+    # Dedupe across all queries
+    merged = _dedupe(all_papers)
+    _debug(f"[multi-query] After dedupe: {len(merged)} unique papers")
+    
+    if not merged:
+        return []
+    
+    # Rank by relevance (using the first query as the primary for semantic scoring)
+    primary_query = queries[0] if queries else ""
+    ranked = _rank_by_relevance(primary_query, merged, top_k=max_results * 2)  # Get more for domain boost
+    
+    # Apply domain boost if available
+    if domain_id:
+        ranked = _domain_boost(ranked, domain_id)
+    
+    return ranked[:max_results]
+
+
+def _crag_rewrite_and_retry(
+    original_question: str,
+    current_papers: list[PaperChunk],
+    domain_id: str | None,
+    attempt: int,
+    max_attempts: int = 2
+) -> list[PaperChunk]:
+    """
+    CRAG-style query rewriting when initial search yields weak results.
+    
+    If we have fewer than 3 papers above the relevance floor, use the FAST
+    LLM to rewrite the query and retry. Up to max_attempts rewrites.
+    """
+    if attempt >= max_attempts:
+        return current_papers
+    
+    # Count papers above floor
+    _PAPER_SCORE_FLOOR = 0.75
+    strong_papers = [p for p in current_papers if p.score >= _PAPER_SCORE_FLOOR]
+    
+    if len(strong_papers) >= 3:
+        return current_papers  # Good enough, no rewrite needed
+    
+    _debug(f"[CRAG] Weak results ({len(strong_papers)} strong papers), rewriting query (attempt {attempt + 1})")
+    
+    try:
+        import re
+
+        from src.config import ModelTier
+        from src.llm import chat
+        
+        rewrite_prompt = f"""The user asked: "{original_question}"
+
+Our paper search returned only {len(strong_papers)} highly relevant papers (score >= 0.75).
+The top results were:
+{chr(10).join(f'- {p.title[:80]} (score={p.score:.2f}, citations={p.citations})' for p in current_papers[:5])}
+
+Rewrite the search query to find MORE relevant papers. Focus on:
+- Different terminology the literature might use
+- Broader or narrower concepts
+- Related methods/frameworks
+
+Output ONLY the rewritten search query. Use PLAIN TEXT only — NO quotes, NO boolean operators (AND/OR/NOT), NO parentheses, NO special characters. Just a simple keyword query like "AutoGen multi-agent conversation framework"."""
+        
+        rewritten = chat(
+            messages=[
+                {"role": "system", "content": "You are a query rewriter for academic paper search. Output only a plain keyword query — no quotes, no boolean operators, no special characters."},
+                {"role": "user", "content": rewrite_prompt},
+            ],
+            tier=ModelTier.FAST,
+            temperature=0.3,
+            max_tokens=60,
+        ).strip().strip('"').strip("'").split('\n')[0].strip()
+        
+        # Clean up any remaining special characters that break arXiv
+        rewritten = re.sub(r'[\"\'\\(\\)\[\]\{\}\+\-\&\|\!\~\*\:]', ' ', rewritten)
+        rewritten = re.sub(r'\s+', ' ', rewritten).strip()
+        
+        if rewritten and rewritten.lower() != original_question.lower():
+            _debug(f"[CRAG] Rewritten query: {rewritten!r}")
+            # Generate new queries from rewritten question
+            new_queries = _generate_search_queries(rewritten, domain_id, max_queries=3)
+            new_papers = _multi_query_search(new_queries, max_results=5, domain_id=domain_id)
+            
+            # Merge with existing, dedupe, re-rank
+            all_papers = _dedupe(current_papers + new_papers)
+            reranked = _rank_by_relevance(original_question, all_papers, top_k=5)
+            if domain_id:
+                reranked = _domain_boost(reranked, domain_id)
+            
+            # Recursive retry
+            return _crag_rewrite_and_retry(original_question, reranked, domain_id, attempt + 1, max_attempts)
+    except Exception as e:
+        _debug(f"[CRAG] Rewrite failed: {type(e).__name__}: {e}")
+    
+    return current_papers
 
 
 # ---------------------------------------------------------------------------
@@ -589,7 +889,7 @@ _MAX_CHUNKS_PER_PAPER = 5
 _MAX_FULL_TEXT_CHARS = 60_000
 
 
-async def _fetch_pdf_bytes(client: "httpx.AsyncClient", url: str) -> bytes | None:
+async def _fetch_pdf_bytes(client: httpx.AsyncClient, url: str) -> bytes | None:
     """
     Download one PDF asynchronously. Returns the raw bytes on success, None
     on any failure (logged but non-fatal).
@@ -634,6 +934,7 @@ def _parse_pdf_bytes(data: bytes) -> str:
     for `pypdf.errors.PdfReadError` and friends).
     """
     import io
+
     import pypdf  # local import — heavy module, only loaded on the cascade path
 
     reader = pypdf.PdfReader(io.BytesIO(data))
@@ -653,7 +954,7 @@ def _parse_pdf_bytes(data: bytes) -> str:
     return "\n\n".join(pages)
 
 
-async def _enrich_one_paper(client: "httpx.AsyncClient", paper: PaperChunk) -> None:
+async def _enrich_one_paper(client: httpx.AsyncClient, paper: PaperChunk) -> None:
     """
     Fetch + parse one paper's open-access PDF, mutate `paper.full_text`
     in place. Silent no-op when the paper has no `pdf_url` or anything
@@ -897,11 +1198,13 @@ def _expand_with_semantic_chunks(
 
 
 def discover_papers(
-    query: str, *, max_results: int = 5, enrich_full_text: bool = True
+    query: str, *, max_results: int = 5, enrich_full_text: bool = True, domain_id: str | None = None
 ) -> list[PaperChunk]:
     """
-    Search arXiv + Semantic Scholar, dedupe, rerank by query relevance, then
+    Search arXiv + Semantic Scholar with multi-query strategy, dedupe, rerank by
+    query relevance with citation/recency awareness, apply domain boost, then
     enrich the open-access papers with full-text PDF parsing (Phase 15.1).
+    Includes CRAG-style query rewriting when initial results are weak.
 
     Returns up to ~max_results × _MAX_CHUNKS_PER_PAPER PaperChunks when
     enrichment is on (each open-access paper expands into multiple slices).
@@ -911,25 +1214,28 @@ def discover_papers(
     Set `enrich_full_text=False` for the CLI `discover` command (display-only)
     where the fetch+parse latency isn't worth paying for a list view.
     """
-    # Each provider gets a generous pool so dedupe + rerank can pick the best.
-    per_provider = max(max_results, 5)
+    # Auto-detect domain if not provided
+    if domain_id is None:
+        from src.domains import infer_domains_from_query
+        detected = infer_domains_from_query(query, min_hits=1)
+        if detected:
+            domain_id = detected[0]
+            _debug(f"[discover] Auto-detected domain: {domain_id}")
 
-    _debug(
-        f"=== discover_papers START query={query!r} "
-        f"max_results={max_results} enrich={enrich_full_text} ==="
-    )
+    # Generate multiple diverse search queries
+    queries = _generate_search_queries(query, domain_id, max_queries=5)
+    _debug(f"[discover] Generated {len(queries)} search queries: {queries}")
 
-    t0 = time.perf_counter()
-    arxiv_hits = _arxiv_search(query, max_results=per_provider)
-    _debug(f"[arxiv] returned {len(arxiv_hits)} hits")
-    ss_hits = _semantic_scholar_search(query, max_results=per_provider)
-    _debug(f"[S2] returned {len(ss_hits)} hits")
+    # Multi-query search across both providers
+    ranked = _multi_query_search(queries, max_results=max_results, domain_id=domain_id)
 
-    merged = _dedupe(arxiv_hits + ss_hits)
-    if not merged:
+    # CRAG-style query rewriting on weak results
+    ranked = _crag_rewrite_and_retry(query, ranked, domain_id, attempt=0, max_attempts=2)
+
+    if not ranked:
         return []
 
-    ranked = _rank_by_relevance(query, merged, top_k=max_results)
+    t0 = time.perf_counter()
 
     # RELEVANCE FLOOR: drop papers below the query-similarity threshold.
     #
@@ -1000,7 +1306,8 @@ def _auto_ingest_discovered_chunks(query: str, chunks: list[PaperChunk]) -> None
         return
 
     try:
-        from datetime import datetime, timezone
+        from datetime import datetime
+
         from src.llm.provider import embed
         from src.store import get_or_create_papers_collection
 
@@ -1039,7 +1346,7 @@ def _auto_ingest_discovered_chunks(query: str, chunks: list[PaperChunk]) -> None
                 "arxiv_id": c.arxiv_id or "",
                 "pdf_url": c.pdf_url or "",
                 "discovered_via_query": query[:100],
-                "ingested_at": datetime.now(timezone.utc).isoformat(),
+                "ingested_at": datetime.now(UTC).isoformat(),
             }
 
             new_ids.append(chunk_id)

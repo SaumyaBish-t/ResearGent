@@ -26,9 +26,9 @@ from typing import Any
 from src.agent.artifacts import persist_mixed
 from src.agent.state import AgentState
 from src.config import ModelTier
+from src.domains import infer_domains_from_query
 from src.llm import chat
 from src.retrieval import discover_papers
-
 
 # Don't blow out the prompt with too many papers — abstract per paper is
 # ~200 tokens, 5 papers = ~1000 tokens, comfortable budget.
@@ -136,12 +136,13 @@ def discover(state: AgentState) -> dict[str, Any]:
     thread_id = state.get("run_id") or ""
     existing_refs = dict(state.get("chunk_refs_by_subq") or {})
 
-    # Verbose questions retrieve poorly from arXiv/SS keyword search.
-    # Distill to a short query first.
-    search_query = _extract_search_query(question)
+    # Auto-detect domain for the paper discovery
+    detected_domains = infer_domains_from_query(question, min_hits=1)
+    domain_id = detected_domains[0] if detected_domains else None
 
+    # Use the original question - the new discover_papers handles multi-query generation internally
     t0 = time.perf_counter()
-    papers = discover_papers(search_query, max_results=DEFAULT_MAX_PAPERS)
+    papers = discover_papers(question, max_results=DEFAULT_MAX_PAPERS, domain_id=domain_id)
     dur_ms = int((time.perf_counter() - t0) * 1000)
 
     if not papers:
@@ -152,9 +153,10 @@ def discover(state: AgentState) -> dict[str, Any]:
                 {
                     "node": "paper_discovery",
                     "duration_ms": dur_ms,
-                    "search_query": search_query[:80],
+                    "search_query": question[:80],
                     "results": 0,
                     "note": "no papers found",
+                    "domain": domain_id,
                 }
             ],
         }
@@ -198,20 +200,21 @@ def discover(state: AgentState) -> dict[str, Any]:
         )
 
     return {
-        "chunk_refs_by_subq": merged_refs,
-        "papers_used": True,
-        "papers_discovered": discovered_summary,
-        # Reset critic-related state so the rewriter budget doesn't
-        # accidentally prevent re-grading the freshly-added evidence.
-        "rewrite_attempts": 0,
-        "trace": [
-            {
-                "node": "paper_discovery",
-                "duration_ms": dur_ms,
-                "search_query": search_query[:80],
-                "results": len(papers),
-                "providers": sorted({p.source for p in papers}),
-                "top_score": round(max(p.score for p in papers), 3),
-            }
-        ],
-    }
+            "chunk_refs_by_subq": merged_refs,
+            "papers_used": True,
+            "papers_discovered": discovered_summary,
+            # Reset critic-related state so the rewriter budget doesn't
+            # accidentally prevent re-grading the freshly-added evidence.
+            "rewrite_attempts": 0,
+            "trace": [
+                {
+                    "node": "paper_discovery",
+                    "duration_ms": dur_ms,
+                    "search_query": question[:80],
+                    "results": len(papers),
+                    "providers": sorted({p.source for p in papers}),
+                    "top_score": round(max(p.score for p in papers), 3),
+                    "domain": domain_id,
+                }
+            ],
+        }
