@@ -1426,6 +1426,8 @@ def review(
             etype = event.get("type")
             if etype == "review_started":
                 console.print(f"[dim]run_id:[/dim] {event.get('run_id')}")
+            elif etype == "review_progress":
+                console.print(f"[dim cyan]• {event.get('message')}[/dim cyan]")
             elif etype == "review_planned":
                 console.print(f"\n[bold green]Planned Outline:[/bold green] {event.get('title')}")
                 for idx, heading in enumerate(event.get("sections", []), start=1):

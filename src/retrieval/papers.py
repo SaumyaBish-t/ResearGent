@@ -362,6 +362,11 @@ def _generate_search_queries(
     
     # 1. Original question (verbatim)
     add(question)
+
+    # Callers that already supply a concise, targeted query can skip the
+    # rewrite step and its extra model call entirely.
+    if max_queries == 1:
+        return queries
     
     # 2. Entity-focused — just the anchors
     anchors = _extract_named_entities(question)
@@ -1198,7 +1203,8 @@ def _expand_with_semantic_chunks(
 
 
 def discover_papers(
-    query: str, *, max_results: int = 5, enrich_full_text: bool = True, domain_id: str | None = None
+    query: str, *, max_results: int = 5, enrich_full_text: bool = True, domain_id: str | None = None,
+    max_search_queries: int = 5, retry_weak: bool = True, auto_ingest: bool = True,
 ) -> list[PaperChunk]:
     """
     Search arXiv + Semantic Scholar with multi-query strategy, dedupe, rerank by
@@ -1223,14 +1229,15 @@ def discover_papers(
             _debug(f"[discover] Auto-detected domain: {domain_id}")
 
     # Generate multiple diverse search queries
-    queries = _generate_search_queries(query, domain_id, max_queries=5)
+    queries = _generate_search_queries(query, domain_id, max_queries=max(1, max_search_queries))
     _debug(f"[discover] Generated {len(queries)} search queries: {queries}")
 
     # Multi-query search across both providers
     ranked = _multi_query_search(queries, max_results=max_results, domain_id=domain_id)
 
     # CRAG-style query rewriting on weak results
-    ranked = _crag_rewrite_and_retry(query, ranked, domain_id, attempt=0, max_attempts=2)
+    if retry_weak:
+        ranked = _crag_rewrite_and_retry(query, ranked, domain_id, attempt=0, max_attempts=2)
 
     if not ranked:
         return []
@@ -1267,7 +1274,7 @@ def discover_papers(
         _debug(f"[enrich] DONE after_expand={len(ranked)} chunks")
 
     # Auto-promote discovered papers into the permanent central vector store
-    if ranked:
+    if ranked and auto_ingest:
         _auto_ingest_discovered_chunks(query, ranked)
 
     dur = time.perf_counter() - t0

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Iterator
+from typing import Any, Generator, Iterator
 
 from src.agent.nodes.review_planner import plan_review
 from src.agent.nodes.review_writer import write_section
@@ -13,11 +13,12 @@ def run_review(request: str) -> Iterator[dict[str, Any]]:
     """
     Run the full literature review pipeline: plan → gather → write → format.
 
-    Yields event dicts (review_planned, review_section_done, review_complete, review_error).
+    Yields progress events as each blocking phase starts, so clients can show live work.
     """
     t0 = time.perf_counter()
 
     # Phase 1: Plan
+    yield _progress("planning", "Building the review outline")
     plan = plan_review(request)
     title = plan["title"]
     sections_spec = plan["sections"]
@@ -47,9 +48,21 @@ def run_review(request: str) -> Iterator[dict[str, Any]]:
         desc = sec.get("description", "")
         search_queries = sec.get("search_queries", [request])
 
-        # Gather evidence via simple web/paper queries
-        evidence_text = _gather_evidence_for_section(
-            heading, desc, search_queries, citation_pool, next_tag
+        # Keep each section focused: the paper search itself expands each query
+        # into variants, so repeating all planner queries caused many serial API calls.
+        queries = list(dict.fromkeys(q.strip() for q in search_queries if isinstance(q, str) and q.strip()))[:2]
+        if not queries:
+            queries = [f"{heading} {desc}".strip() or request]
+
+        yield _progress(
+            "searching_papers",
+            f"Searching academic papers for section {i + 1}/{len(sections_spec)}: {heading}",
+            section_index=i,
+            section_count=len(sections_spec),
+        )
+        evidence_text = yield from _gather_evidence_for_section(
+            heading, desc, queries, citation_pool, next_tag,
+            section_index=i, section_count=len(sections_spec),
         )
         # Track how many tags this section consumed
         new_tags_count = len(
@@ -57,7 +70,13 @@ def run_review(request: str) -> Iterator[dict[str, Any]]:
         )
         next_tag += new_tags_count
 
-        # Write section
+        yield _progress(
+            "writing_section",
+            f"Writing section {i + 1}/{len(sections_spec)}: {heading}",
+            section_index=i,
+            section_count=len(sections_spec),
+            source_count=new_tags_count,
+        )
         body = write_section(heading, desc, evidence_text)
         section_bodies.append((heading, body))
 
@@ -70,7 +89,7 @@ def run_review(request: str) -> Iterator[dict[str, Any]]:
             "ts": time.time(),
         }
 
-    # Phase 3: Format
+    yield _progress("formatting", "Formatting the review and references")
     markdown = format_review(title, section_bodies, citation_pool)
 
     dur_ms = int((time.perf_counter() - t0) * 1000)
@@ -92,7 +111,8 @@ def _gather_evidence_for_section(
     queries: list[str],
     pool: dict[str, dict[str, Any]],
     start_tag: int,
-) -> str:
+    *, section_index: int, section_count: int,
+) -> Generator[dict[str, Any], None, str]:
     """Gather evidence for a section using academic paper discovery + web fallback.
 
     Returns a formatted evidence block with [S#] tags.
@@ -103,10 +123,21 @@ def _gather_evidence_for_section(
 
     current_tag = start_tag
 
-    for query in queries:
+    for query_index, query in enumerate(queries):
+        yield _progress(
+            "searching_papers", f"Searching papers ({query_index + 1}/{len(queries)}): {query[:90]}",
+            section_index=section_index, section_count=section_count,
+        )
         # 1. Try academic paper discovery
         try:
-            papers = discover_papers(query, max_results=3, enrich_full_text=False)
+            papers = discover_papers(
+                query, max_results=3, enrich_full_text=False,
+                max_search_queries=1, retry_weak=False, auto_ingest=False,
+            )
+            yield _progress(
+                "searching_papers", f"Academic search found {len(papers)} papers",
+                section_index=section_index, section_count=section_count,
+            )
             for paper in papers:
                 tag = f"S{current_tag}"
                 current_tag += 1
@@ -131,7 +162,15 @@ def _gather_evidence_for_section(
 
         # 2. Try web search
         try:
+            yield _progress(
+                "searching_web", f"Checking web sources ({query_index + 1}/{len(queries)})",
+                section_index=section_index, section_count=section_count,
+            )
             results = web_search(query, max_results=3)
+            yield _progress(
+                "searching_web", f"Web search found {len(results)} sources",
+                section_index=section_index, section_count=section_count,
+            )
             for r in results:
                 tag = f"S{current_tag}"
                 current_tag += 1
@@ -161,3 +200,7 @@ def _gather_evidence_for_section(
         evidence_parts.append("(No evidence found for this section)")
 
     return "\n\n---\n\n".join(evidence_parts)
+
+
+def _progress(stage: str, message: str, **details: Any) -> dict[str, Any]:
+    return {"type": "review_progress", "stage": stage, "message": message, **details, "ts": time.time()}

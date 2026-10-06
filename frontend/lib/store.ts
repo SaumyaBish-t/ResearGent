@@ -151,6 +151,7 @@ interface AgentState {
     reviewMarkdown: string | null;
     reviewTitle: string | null;
     reviewSections: string[];
+    reviewTrace: string[];
 
   // ---- actions ----
   bootstrap: () => Promise<void>;
@@ -406,6 +407,11 @@ export const useAgentStore = create<AgentState>((set, get) => {
 
     const handleReviewEvent = (evt: ReviewEvent) => {
       switch (evt.type) {
+        case "review_progress": {
+          set((s) => ({ reviewTrace: [...s.reviewTrace, evt.message].slice(-8) }));
+          log("review", evt.message, "info");
+          break;
+        }
         case "review_planned": {
           const e = evt as ReviewPlannedEvent;
           set({ reviewTitle: e.title, reviewSections: e.sections });
@@ -414,12 +420,13 @@ export const useAgentStore = create<AgentState>((set, get) => {
         }
         case "review_section_done": {
           const e = evt as ReviewSectionDoneEvent;
+          set((s) => ({ reviewTrace: [...s.reviewTrace, `Finished ${e.heading}: ${e.n_sources} sources gathered`].slice(-8) }));
           log("review", `section ${e.section_index + 1}: ${e.heading} (${e.n_sources} sources)`, "info");
           break;
         }
         case "review_complete": {
           const e = evt as ReviewCompleteEvent;
-          set({ reviewMarkdown: e.markdown, reviewRunning: false });
+          set({ reviewMarkdown: e.markdown, reviewRunning: false, currentReviewId: e.review_id || null });
           log("review", `complete: ${e.n_sources} sources · ${e.duration_ms}ms`, "success");
           closeStream();
           void get().refreshReviews();
@@ -472,6 +479,7 @@ export const useAgentStore = create<AgentState>((set, get) => {
         reviewMarkdown: null,
         reviewTitle: null,
         reviewSections: [],
+        reviewTrace: [],
 
         // ---- auth ----
     bootstrap: async () => {
@@ -780,13 +788,13 @@ export const useAgentStore = create<AgentState>((set, get) => {
         }
 
         closeStream();
-        set({ reviewRunning: true, reviewMarkdown: null, reviewTitle: null, reviewSections: [] });
+        set({ reviewRunning: true, reviewMarkdown: null, reviewTitle: null, reviewSections: [], reviewTrace: [] });
 
         const url = `${API_BASE}/api/review?q=${encodeURIComponent(queryStr)}`;
         es = new EventSource(url, { withCredentials: true });
 
         const reviewEvents: ReviewEvent["type"][] = [
-          "review_planned", "review_section_done", "review_complete", "review_error",
+          "review_progress", "review_planned", "review_section_done", "review_complete", "review_error",
         ];
         for (const name of reviewEvents) {
           es.addEventListener(name, (ev) => {

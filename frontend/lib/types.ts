@@ -146,6 +146,15 @@ export interface ReviewPlannedEvent {
   sections: string[];
   ts: number;
 }
+export interface ReviewProgressEvent {
+  type: "review_progress";
+  run_id?: string;
+  stage: string;
+  message: string;
+  section_index?: number;
+  section_count?: number;
+  ts: number;
+}
 export interface ReviewSectionDoneEvent {
   type: "review_section_done";
   run_id: string;
@@ -158,6 +167,7 @@ export interface ReviewSectionDoneEvent {
 export interface ReviewCompleteEvent {
   type: "review_complete";
   run_id: string;
+  review_id?: string;
   title: string;
   markdown: string;
   sections: string[];
@@ -172,6 +182,7 @@ export interface ReviewErrorEvent {
   ts: number;
 }
 export type ReviewEvent =
+  | ReviewProgressEvent
   | ReviewPlannedEvent
   | ReviewSectionDoneEvent
   | ReviewCompleteEvent
