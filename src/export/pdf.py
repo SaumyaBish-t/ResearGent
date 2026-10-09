@@ -13,10 +13,8 @@ from reportlab.lib import colors
 from reportlab.platypus import (
     SimpleDocTemplate,
     Paragraph,
-    Spacer,
     HRFlowable,
     Preformatted,
-    KeepTogether,
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
@@ -94,6 +92,7 @@ def markdown_to_pdf_bytes(title: str, markdown: str) -> bytes:
         fontName="Times-Roman",
         fontSize=10.5,
         leading=15,
+        wordWrap="CJK",
         textColor=colors.HexColor("#1e293b"),
         spaceAfter=10,
         firstLineIndent=0.25 * inch,  # Classic academic paragraph indent
@@ -129,13 +128,13 @@ def markdown_to_pdf_bytes(title: str, markdown: str) -> bytes:
     
     def add_code_block() -> None:
         if code_lines:
-            # Courier is fixed width: 96 characters fit inside the printable
+            # Courier is fixed width: 82 characters fit inside the printable
             # page width, and Preformatted inserts continuation lines for
             # long BibTeX URLs and other unbroken text.
             story.append(Preformatted(
                 _normalize_pdf_text("\n".join(code_lines)),
                 code_style,
-                maxLineLength=96,
+                maxLineLength=82,
                 newLineChars="  ",
             ))
             code_lines.clear()
@@ -287,6 +286,20 @@ def _normalize_pdf_text(text: str) -> str:
         "⁰": "^0", "¹": "^1", "²": "^2", "³": "^3", "⁴": "^4",
         "⁵": "^5", "⁶": "^6", "⁷": "^7", "⁸": "^8", "⁹": "^9",
         "⁺": "^+", "⁻": "^-", "⁼": "^=", "⁽": "^(", "⁾": ")",
+        "ₐ": "_a", "ₑ": "_e", "ₕ": "_h", "ᵢ": "_i", "ⱼ": "_j",
+        "ₖ": "_k", "ₗ": "_l", "ₘ": "_m", "ₙ": "_n", "ₒ": "_o",
+        "ₚ": "_p", "ᵣ": "_r", "ₛ": "_s", "ₜ": "_t", "ᵤ": "_u",
+        "ᵥ": "_v", "ₓ": "_x", "ᵦ": "_beta", "ᵧ": "_gamma",
+        "ᵨ": "_rho", "ᵩ": "_phi", "ᵪ": "_chi",
+        "ᵃ": "^a", "ᵇ": "^b", "ᶜ": "^c", "ᵈ": "^d", "ᵉ": "^e",
+        "ᶠ": "^f", "ᵍ": "^g", "ʰ": "^h", "ⁱ": "^i", "ʲ": "^j",
+        "ᵏ": "^k", "ˡ": "^l", "ᵐ": "^m", "ⁿ": "^n", "ᵒ": "^o",
+        "ᵖ": "^p", "ʳ": "^r", "ˢ": "^s", "ᵗ": "^t", "ᵘ": "^u",
+        "ᵛ": "^v", "ʷ": "^w", "ˣ": "^x", "ʸ": "^y", "ᶻ": "^z",
+        "ᴬ": "^A", "ᴮ": "^B", "ᴰ": "^D", "ᴱ": "^E", "ᴳ": "^G",
+        "ᴴ": "^H", "ᴵ": "^I", "ᴶ": "^J", "ᴷ": "^K", "ᴸ": "^L",
+        "ᴹ": "^M", "ᴺ": "^N", "ᴼ": "^O", "ᴾ": "^P", "ᴿ": "^R",
+        "ᵀ": "^T", "ᵁ": "^U", "ⱽ": "^V", "ᵂ": "^W",
     })
     symbols = {
         "∝": " proportional to ", "≤": " <= ", "≥": " >= ",
@@ -306,7 +319,7 @@ def _normalize_pdf_text(text: str) -> str:
             continue
         if "GREEK" in unicodedata.name(char, ""):
             name = unicodedata.name(char).split(" LETTER ")[-1]
-            name = re.sub(r"^(SMALL|CAPITAL) ", "", name).lower().replace("LAMDA", "lambda")
+            name = re.sub(r"^(SMALL|CAPITAL) ", "", name).lower().replace("lamda", "lambda")
             output.append(name)
             continue
         if char in "\u2010\u2011\u2012\u2013\u2014\u2015":

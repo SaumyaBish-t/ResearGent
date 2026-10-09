@@ -502,7 +502,8 @@ def create_app() -> FastAPI:
             content=pdf_bytes,
             media_type="application/pdf",
             headers={
-                "Content-Disposition": f"attachment; filename={filename}"
+                "Content-Disposition": f"attachment; filename={filename}",
+                "Cache-Control": "no-store",
             },
         )
 
