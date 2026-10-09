@@ -17,7 +17,7 @@ const jetbrains = JetBrains_Mono({
 export const metadata: Metadata = {
   title: "ResearGent — Agentic Network",
   description:
-    "Live 3D visualization of ResearGent's multi-model Corrective-RAG workers.",
+    "Live 3D visualization of ResearGent's multi-model GEN AI Corrective-RAG workers.",
 };
 
 export default function RootLayout({

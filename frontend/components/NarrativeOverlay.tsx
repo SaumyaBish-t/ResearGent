@@ -75,7 +75,7 @@ export default function NarrativeOverlay() {
             {/* eyebrow */}
             <div className="mb-3 flex items-center justify-center gap-2 font-mono text-[10px] uppercase tracking-[0.42em] text-ink-mute">
               <span className="h-px w-6 bg-line" />
-              corrective-rag · multi-model
+              corrective-rag · multi-model · GEN AI
               <span className="h-px w-6 bg-line" />
             </div>
 
