@@ -75,7 +75,7 @@ export default function NarrativeOverlay() {
             {/* eyebrow */}
             <div className="mb-3 flex items-center justify-center gap-2 font-mono text-[10px] uppercase tracking-[0.42em] text-ink-mute">
               <span className="h-px w-6 bg-line" />
-              corrective-rag · multi-agent
+              corrective-rag · multi-model
               <span className="h-px w-6 bg-line" />
             </div>
 
@@ -84,7 +84,7 @@ export default function NarrativeOverlay() {
             </h1>
 
             <p className="mx-auto mt-3 max-w-md text-[13.5px] leading-relaxed text-ink-dim">
-              A living map of agents that retrieve, critique, and rewrite their
+              A living map of workers that retrieve, critique, and rewrite their
               way to a grounded answer.
             </p>
           </motion.div>

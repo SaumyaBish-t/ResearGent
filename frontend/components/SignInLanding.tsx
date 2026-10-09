@@ -22,7 +22,7 @@ export default function SignInLanding() {
       <div className="glass w-[min(440px,92vw)] rounded-2xl p-8 text-center">
         <div className="mb-2 flex items-center justify-center gap-2 font-mono text-[10px] uppercase tracking-[0.42em] text-ink-mute">
           <span className="h-px w-6 bg-line" />
-          corrective-rag · multi-agent
+          corrective-rag · multi-model
           <span className="h-px w-6 bg-line" />
         </div>
 
@@ -30,7 +30,7 @@ export default function SignInLanding() {
           ResearGent
         </h1>
         <p className="mx-auto mt-2 max-w-sm text-[13px] leading-relaxed text-ink-dim">
-          A living map of agents that retrieve, critique, and rewrite their way
+          A living map of workers that retrieve, critique, and rewrite their way
           to a grounded answer.
         </p>
 
