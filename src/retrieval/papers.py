@@ -131,16 +131,13 @@ class PaperChunk:
         # `chunk_text` wins when set — that's a bounded passage (~500-800
         # tokens) safe to feed straight into the generator prompt.
         if self.chunk_text:
-            return f"{self.title}\n[Full-text passage]\n\n{self.chunk_text}"
+            return f"{self.title}\n\n{self.chunk_text}"
         # `full_text` fallback. Rarely emitted to the prompt path; mostly
         # useful when a caller wants the whole document for offline use.
         if self.full_text:
-            return f"{self.title}\n[Full-text document]\n\n{self.full_text}"
+            return f"{self.title}\n\n{self.full_text}"
         if self.abstract:
-            return (
-                f"{self.title}\n[Abstract only; full text could not be retrieved]\n\n"
-                f"{self.abstract}"
-            )
+            return f"{self.title}\n\n{self.abstract}"
         return self.title
 
     @property
@@ -366,13 +363,6 @@ def _generate_search_queries(
     # 1. Original question (verbatim)
     add(question)
 
-    # Exact-title lookup for questions about the original Transformer paper.
-    # A broad semantic search often favors newer papers that repeat terms like
-    # "scaled dot-product attention" over the foundational source.
-    canonical_title = _canonical_paper_title(question)
-    if canonical_title:
-        add(canonical_title)
-
     # Callers that already supply a concise, targeted query can skip the
     # rewrite step and its extra model call entirely.
     if max_queries == 1:
@@ -402,17 +392,6 @@ def _generate_search_queries(
             add(" ".join(content_tokens[:2]))
     
     return queries[:max_queries]
-
-
-def _canonical_paper_title(question: str) -> str | None:
-    normalized = re.sub(r"[-\s]+", " ", question.lower())
-    if (
-        "transformer" in normalized
-        and "attention" in normalized
-        and ("scaled dot product" in normalized or "multi head attention" in normalized)
-    ):
-        return "Attention Is All You Need"
-    return None
 
 
 def _is_anchor_token(tok: str) -> bool:
@@ -638,13 +617,7 @@ def _dedupe(papers: list[PaperChunk]) -> list[PaperChunk]:
     return out
 
 
-def _rank_by_relevance(
-    query: str,
-    papers: list[PaperChunk],
-    top_k: int,
-    *,
-    preferred_title: str | None = None,
-) -> list[PaperChunk]:
+def _rank_by_relevance(query: str, papers: list[PaperChunk], top_k: int) -> list[PaperChunk]:
     """
     Embedding-based reranking with citation and recency awareness.
     
@@ -671,24 +644,15 @@ def _rank_by_relevance(
     from src.config import ModelTier
     from src.llm import embed
 
-    def fallback_order() -> list[PaperChunk]:
-        if preferred_title:
-            preferred = re.sub(r"\W+", " ", preferred_title.lower()).strip()
-            papers.sort(
-                key=lambda p: re.sub(r"\W+", " ", p.title.lower()).strip() == preferred,
-                reverse=True,
-            )
-        return papers[:top_k]
-
     texts = [p.text[:2000] for p in papers]  # cap to keep embed batch sane
     try:
         vectors = embed([query] + texts, tier=ModelTier.EMBED)
     except Exception:
         # Embedder unavailable — fall back to source-native order.
-        return fallback_order()
+        return papers[:top_k]
 
     if not vectors or len(vectors) < 2:
-        return fallback_order()
+        return papers[:top_k]
 
     qv = np.asarray(vectors[0], dtype=np.float32)
     qn = qv / (np.linalg.norm(qv) + 1e-12)
@@ -719,10 +683,6 @@ def _rank_by_relevance(
         
         # Combined score
         p.score = 0.8 * semantic_score + 0.15 * citation_score + 0.05 * recency_score
-        if preferred_title and re.sub(r"\W+", " ", p.title.lower()).strip() == re.sub(
-            r"\W+", " ", preferred_title.lower()
-        ).strip():
-            p.score = max(p.score, 0.99)
 
     papers.sort(key=lambda p: p.score, reverse=True)
     return papers[:top_k]
@@ -769,10 +729,6 @@ def _multi_query_search(
     Each query runs against arXiv and Semantic Scholar. Results are merged,
     deduped, and ranked by relevance.
     """
-    canonical_title = _canonical_paper_title(queries[0]) if queries else None
-    if canonical_title and canonical_title in queries:
-        queries = [canonical_title] + [q for q in queries if q != canonical_title]
-
     all_papers: list[PaperChunk] = []
     
     for q in queries:
@@ -792,17 +748,8 @@ def _multi_query_search(
         return []
     
     # Rank by relevance (using the first query as the primary for semantic scoring)
-    preferred_title = next(
-        (q for q in queries if q.lower() == "attention is all you need"),
-        None,
-    )
-    primary_query = (
-        _canonical_paper_title(queries[0]) or queries[0]
-        if queries else ""
-    )
-    ranked = _rank_by_relevance(
-        primary_query, merged, top_k=max_results * 2, preferred_title=preferred_title
-    )  # Get more for domain boost
+    primary_query = queries[0] if queries else ""
+    ranked = _rank_by_relevance(primary_query, merged, top_k=max_results * 2)  # Get more for domain boost
     
     # Apply domain boost if available
     if domain_id:
@@ -1027,24 +974,6 @@ async def _enrich_one_paper(client: httpx.AsyncClient, paper: PaperChunk) -> Non
 
     try:
         data = await _fetch_pdf_bytes(client, url)
-        # Semantic Scholar sometimes returns a stale/blocked mirror URL even
-        # when the paper is openly available on arXiv. Retry the canonical
-        # arXiv PDF before giving up and falling back to the abstract.
-        canonical_arxiv_pdf = (
-            f"https://arxiv.org/pdf/{paper.arxiv_id}"
-            if paper.arxiv_id
-            else ""
-        )
-        should_retry_arxiv = (
-            not data
-            and canonical_arxiv_pdf
-            and url.rstrip("/") != canonical_arxiv_pdf.rstrip("/")
-        )
-        if should_retry_arxiv:
-            _debug(
-                f"[enrich] retrying canonical arXiv PDF for {paper.arxiv_id}"
-            )
-            data = await _fetch_pdf_bytes(client, canonical_arxiv_pdf)
         if not data:
             return
         text = _parse_pdf_bytes(data)
@@ -1303,16 +1232,12 @@ def discover_papers(
     queries = _generate_search_queries(query, domain_id, max_queries=max(1, max_search_queries))
     _debug(f"[discover] Generated {len(queries)} search queries: {queries}")
 
-    # Use a canonical title as the ranking intent when the question refers to
-    # a known foundational paper by its distinctive concepts.
-    ranking_query = _canonical_paper_title(query) or query
-
     # Multi-query search across both providers
     ranked = _multi_query_search(queries, max_results=max_results, domain_id=domain_id)
 
     # CRAG-style query rewriting on weak results
     if retry_weak:
-        ranked = _crag_rewrite_and_retry(ranking_query, ranked, domain_id, attempt=0, max_attempts=2)
+        ranked = _crag_rewrite_and_retry(query, ranked, domain_id, attempt=0, max_attempts=2)
 
     if not ranked:
         return []
@@ -1343,19 +1268,10 @@ def discover_papers(
         # journal mirrors. Total wall-time: ~1-3s for 5 papers on a warm
         # connection, dominated by the slowest single download.
         _enrich_with_full_text(ranked)
-        full_text_papers = sum(bool(p.full_text) for p in ranked)
-        abstract_only_papers = len(ranked) - full_text_papers
-        _debug(
-            f"[enrich] PDF bodies parsed={full_text_papers} "
-            f"abstract_only={abstract_only_papers}"
-        )
         # Expand each PDF-enriched paper into top-N semantic slices ranked
         # by query relevance. Papers without full_text pass through unchanged.
         ranked = _expand_with_semantic_chunks(query, ranked)
         _debug(f"[enrich] DONE after_expand={len(ranked)} chunks")
-    else:
-        full_text_papers = 0
-        abstract_only_papers = len(ranked)
 
     # Auto-promote discovered papers into the permanent central vector store
     if ranked and auto_ingest:

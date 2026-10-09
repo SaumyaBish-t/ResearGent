@@ -176,13 +176,6 @@ def discover(state: AgentState) -> dict[str, Any]:
             ],
         }
 
-    # Distinguish parsed paper-body passages from abstract fallback evidence.
-    # A paper may occur as several slices, so count unique papers by stable ID.
-    paper_text_status: dict[str, bool] = {}
-    for p in papers:
-        key = (p.arxiv_id or p.url or p.title).strip().lower()
-        paper_text_status[key] = paper_text_status.get(key, False) or bool(p.chunk_text or p.full_text)
-
     # Persist paper chunks as ephemeral artifacts and merge their refs
     # under the current-turn question key, excluding prior-turn context (not
     # a sub-q) because paper discovery is top-level evidence — the
@@ -235,8 +228,6 @@ def discover(state: AgentState) -> dict[str, Any]:
                     "search_query": search_question[:80],
                     "results": len(papers),
                     "providers": sorted({p.source for p in papers}),
-                    "full_text_papers": sum(paper_text_status.values()),
-                    "abstract_only_papers": len(paper_text_status) - sum(paper_text_status.values()),
                     "top_score": round(max(p.score for p in papers), 3),
                     "domain": domain_id,
                 }
