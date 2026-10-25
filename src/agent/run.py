@@ -12,11 +12,11 @@ Usage:
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
-from src.agent.graph import build_graph
 from src.agent.artifacts import HydratedChunk
+from src.agent.graph import build_graph
 from src.agent.state import AgentState
 
 
@@ -47,6 +47,8 @@ class AgentResult:
     # Phase 7 additions — open-domain
     papers_used: bool = False
     papers_discovered: list[dict] | None = None
+    provenance_dropped_count: int = 0
+    provenance_flagged_count: int = 0
     # Phase 20 additions — Originality Check
     originality_report: dict | None = None
     error: str | None = None
@@ -75,6 +77,10 @@ class AgentResult:
             crag_flags.append("web=YES")
         if self.reflection_attempts:
             crag_flags.append(f"reflections={self.reflection_attempts}")
+        if self.provenance_dropped_count:
+            crag_flags.append(f"retracted_blocked={self.provenance_dropped_count}")
+        if self.provenance_flagged_count:
+            crag_flags.append(f"provenance_flagged={self.provenance_flagged_count}")
         if self.error == "no_sources_used_llm_priors":
             crag_flags.append("LLM_PRIORS_ONLY")
         if crag_flags:
@@ -202,6 +208,8 @@ def run_agent(
         reflection_follow_ups=final.get("reflection_follow_ups") or [],
         papers_used=bool(final.get("papers_used")),
         papers_discovered=final.get("papers_discovered") or [],
+        provenance_dropped_count=int(final.get("provenance_dropped_count") or 0),
+        provenance_flagged_count=int(final.get("provenance_flagged_count") or 0),
         originality_report=final.get("originality_report"),
         error=final.get("error"),
     )

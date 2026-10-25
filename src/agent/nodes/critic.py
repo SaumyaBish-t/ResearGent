@@ -48,7 +48,7 @@ from typing import Any
 
 from src.agent.artifacts import HydratedChunk, hydrate
 from src.agent.state import AgentState
-from src.config import ModelTier
+from src.config import ModelTier, settings
 from src.llm import chat
 
 
@@ -301,7 +301,7 @@ def _has_external_fresh_source(chunks: list[HydratedChunk]) -> bool:
     """
     for c in chunks:
         sig = (getattr(c, "signal", "") or "").lower()
-        if sig.startswith("paper:") or sig.startswith("web:"):
+        if sig.startswith(("paper:", "web:")):
             return True
     return False
 
@@ -364,7 +364,20 @@ def _derive_verdict(
     _W_IRRELEVANT_DENOM = 0.50  # irrelevant chunks count at half weight in
                                 # the DENOMINATOR only, never the numerator
 
-    numerator = relevant_n * _W_RELEVANT + partial_n * _W_PARTIAL
+    if all_chunks:
+        numerator = 0.0
+        for grade, chunk in zip(all_grades, all_chunks):
+            multiplier = (
+                settings.provenance_flagged_score_multiplier
+                if getattr(chunk, "provenance_status", "") == "flagged"
+                else 1.0
+            )
+            if grade == "relevant":
+                numerator += _W_RELEVANT * multiplier
+            elif grade == "partial":
+                numerator += _W_PARTIAL * multiplier
+    else:
+        numerator = relevant_n * _W_RELEVANT + partial_n * _W_PARTIAL
     denominator = relevant_n + partial_n + irrelevant_n * _W_IRRELEVANT_DENOM
     score = numerator / max(denominator, 1)
 
@@ -404,6 +417,15 @@ def critique(state: AgentState) -> dict[str, Any]:
 
     # Hydrate every sub-Q together — one ChromaDB call + one PG query total.
     chunks_by_subq = hydrate(refs_by_subq)
+    provenance_by_ref = state.get("provenance_by_ref") or {}
+    for sq, chunks in chunks_by_subq.items():
+        for ref, chunk in zip(refs_by_subq.get(sq) or [], chunks):
+            info = provenance_by_ref.get(
+                f"{ref.get('kind', '')}:{ref.get('id', '')}"
+            )
+            if info:
+                chunk.provenance_status = info.get("status", "unchecked")
+                chunk.provenance_reason = info.get("reason", "")
 
     new_refs_by_subq: dict[str, list[dict[str, str]]] = {}
     all_grades: list[str] = []
@@ -455,16 +477,36 @@ def critique(state: AgentState) -> dict[str, Any]:
     rel_n = all_grades.count("relevant")
     par_n = all_grades.count("partial")
     irr_n = all_grades.count("irrelevant")
-    weighted_score = (
-        (rel_n * 1.00 + par_n * 0.75)
-        / max(rel_n + par_n + irr_n * 0.50, 1)
-    )
+    weighted_numerator = 0.0
+    for grade, chunk in zip(all_grades, all_graded_chunks):
+        multiplier = (
+            settings.provenance_flagged_score_multiplier
+            if getattr(chunk, "provenance_status", "") == "flagged"
+            else 1.0
+        )
+        if grade == "relevant":
+            weighted_numerator += 1.00 * multiplier
+        elif grade == "partial":
+            weighted_numerator += 0.75 * multiplier
+    weighted_score = weighted_numerator / max(rel_n + par_n + irr_n * 0.50, 1)
     paper_rel = paper_grades.count("relevant")
     paper_par = paper_grades.count("partial")
     paper_irr = paper_grades.count("irrelevant")
-    paper_score = (
-        (paper_rel + paper_par * 0.75)
-        / max(paper_rel + paper_par + paper_irr * 0.50, 1)
+    paper_weighted_numerator = 0.0
+    for chunk, grade in zip(all_graded_chunks, all_grades):
+        if not (getattr(chunk, "signal", "") or "").lower().startswith("paper:"):
+            continue
+        multiplier = (
+            settings.provenance_flagged_score_multiplier
+            if getattr(chunk, "provenance_status", "") == "flagged"
+            else 1.0
+        )
+        if grade == "relevant":
+            paper_weighted_numerator += multiplier
+        elif grade == "partial":
+            paper_weighted_numerator += 0.75 * multiplier
+    paper_score = paper_weighted_numerator / max(
+        paper_rel + paper_par + paper_irr * 0.50, 1
     )
     summary = "; ".join(reasonings)[:300] if reasonings else ""
 
@@ -494,6 +536,11 @@ def critique(state: AgentState) -> dict[str, Any]:
                 "paper_score": round(paper_score, 3),
                 "threshold_hi": threshold_hi,
                 "external_fresh_pool": has_external,
+                "provenance_flagged": sum(
+                    1
+                    for c in all_graded_chunks
+                    if getattr(c, "provenance_status", "") == "flagged"
+                ),
                 # Phase 15.1 telemetry: rough payload size across all sub-Q
                 # grading calls combined. Divide by ~4 for a ballpark token
                 # count. Bubbles into the CLI trace so day-budget pressure

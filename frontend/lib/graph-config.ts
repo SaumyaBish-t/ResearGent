@@ -36,6 +36,7 @@ export interface EdgeDef {
 export const NODES: NodeDef[] = [
   { id: "planner", label: "Planner", sublabel: "decompose", position: [0, 4, 0], accent: "violet" },
   { id: "retriever", label: "Local Retriever", sublabel: "vector search", position: [-2, 2, -2], accent: "cyan" },
+  { id: "provenance_check", label: "Provenance Check", sublabel: "retraction filter", position: [-1, 1, -1], accent: "orange", shape: "box" },
   { id: "critic", label: "The Critic", sublabel: "temporal grader", position: [0, 0, 0], accent: "orange", shape: "octa" },
   { id: "rewriter", label: "Rewriter", sublabel: "query retry", position: [2, 1, -1], accent: "violet" },
   { id: "paper_discovery", label: "S2 / arXiv", sublabel: "paper fetch", position: [-3, -2, 2], accent: "cyan" },
@@ -61,14 +62,16 @@ export const NODE_BY_ID: Record<NodeId, NodeDef> = NODES.reduce(
 // Directed edges — every transition the graph can make (see graph.py).
 export const EDGES: EdgeDef[] = [
   { from: "planner", to: "retriever" },
-  { from: "retriever", to: "critic" },
+  { from: "planner", to: "paper_discovery" },
+  { from: "retriever", to: "provenance_check" },
+  { from: "provenance_check", to: "critic" },
   { from: "critic", to: "generator" },
   { from: "critic", to: "rewriter" },
   { from: "critic", to: "paper_discovery" },
   { from: "critic", to: "web_fallback" },
   { from: "rewriter", to: "critic" },
-  { from: "paper_discovery", to: "critic" },
-  { from: "web_fallback", to: "critic" },
+  { from: "paper_discovery", to: "retriever" },
+  { from: "web_fallback", to: "provenance_check" },
   { from: "web_fallback", to: "llm_reasoning" },
   { from: "web_fallback", to: "no_answer" },
   { from: "retriever", to: "paper_discovery" },

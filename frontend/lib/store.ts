@@ -934,6 +934,15 @@ function summarizeNode(node: NodeId, s: NodeCompleteEvent["summary"]): string {
       return `rewrite attempt ${s.rewrite_attempt ?? "?"} · ${s.rewritten_count ?? 0} queries`;
     case "paper_discovery":
       return "discovering papers (arXiv + Semantic Scholar)";
+    case "provenance_check":
+      {
+        const blocked = (s.blocked_sources ?? [])
+          .map((source) => source.citation || source.doi || source.arxiv_id)
+          .filter(Boolean)
+          .slice(0, 2)
+          .join(", ");
+        return `clean ${s.clean ?? 0} · flagged ${s.flagged ?? 0} · blocked ${s.retracted_dropped ?? 0} retracted${blocked ? ` · ${blocked}` : ""}`;
+      }
     case "web_fallback":
       return `+${s.web_chunks_added ?? 0} web chunks${s.providers_used?.length ? ` via ${s.providers_used.join(", ")}` : ""}`;
     case "generator":

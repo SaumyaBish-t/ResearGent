@@ -12,6 +12,7 @@
 export type NodeId =
   | "planner"
   | "retriever"
+  | "provenance_check"
   | "critic"
   | "rewriter"
   | "paper_discovery"
@@ -65,6 +66,16 @@ export interface NodeSummary {
   // web_fallback
   web_chunks_added?: number;
   providers_used?: string[];
+  // provenance_check
+  clean?: number;
+  flagged?: number;
+  retracted_dropped?: number;
+  blocked_sources?: Array<{
+    citation?: string;
+    doi?: string;
+    arxiv_id?: string;
+    reason?: string;
+  }>;
   // generator
   answer_chars?: number;
   n_sources?: number;
@@ -108,6 +119,8 @@ export interface FinalEvent {
   rewrite_attempts: number;
   web_used: boolean;
   reflection_attempts: number;
+  provenance_dropped_count?: number;
+  provenance_flagged_count?: number;
   error: string | null;
   ts: number;
 }

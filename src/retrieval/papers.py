@@ -115,6 +115,7 @@ class PaperChunk:
     source: str = ""       # "arxiv" | "semantic_scholar"
     citations: int | None = None
     arxiv_id: str = ""     # canonical dedup key when present
+    doi: str = ""          # DOI when Semantic Scholar exposes one
     pdf_url: str = ""      # when openly available
     score: float = 0.0     # query-relevance, [0..1], filled by ranker
 
@@ -551,6 +552,7 @@ def _semantic_scholar_search(query: str, max_results: int = 5) -> list[PaperChun
             continue
         ext = item.get("externalIds") or {}
         arxiv_id = (ext.get("ArXiv") or "").strip()
+        doi = (ext.get("DOI") or ext.get("doi") or "").strip()
         oa = item.get("openAccessPdf") or {}
         pdf_url = (oa.get("url") if isinstance(oa, dict) else "") or ""
         # Explicit per-paper trace so we can SEE whether S2 returned an
@@ -587,6 +589,7 @@ def _semantic_scholar_search(query: str, max_results: int = 5) -> list[PaperChun
                 source="semantic_scholar",
                 citations=item.get("citationCount"),
                 arxiv_id=arxiv_id,
+                doi=doi,
                 pdf_url=pdf_url,
             )
         )
@@ -1191,6 +1194,7 @@ def _expand_with_semantic_chunks(
                 source=p.source,
                 citations=p.citations,
                 arxiv_id=p.arxiv_id,
+                doi=p.doi,
                 pdf_url=p.pdf_url,
                 score=score_i if score_i > 0 else p.score,
                 full_text="",          # don't carry the 60KB blob on every slice

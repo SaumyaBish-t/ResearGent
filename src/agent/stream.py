@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import time
 import uuid
-from typing import Any, Iterator
+from collections.abc import Iterator
+from typing import Any
 
 from src.agent.graph import build_graph
 from src.agent.state import AgentState
@@ -80,6 +81,17 @@ def _summarize_node_update(node_name: str, update: dict[str, Any]) -> dict[str, 
         )
         summary["papers_found"] = len(papers)
         summary["paper_chunks_added"] = paper_count
+
+    elif node_name == "provenance_check":
+        trace = update.get("trace") or []
+        entry = next(
+            (e for e in reversed(trace) if e.get("node") == "provenance_check"),
+            {},
+        )
+        summary["clean"] = entry.get("clean", 0)
+        summary["flagged"] = entry.get("flagged", 0)
+        summary["retracted_dropped"] = entry.get("retracted_dropped", 0)
+        summary["blocked_sources"] = entry.get("blocked_sources", [])
 
     elif node_name == "verifier":
         verdicts = update.get("citation_verdicts") or {}
@@ -215,6 +227,8 @@ def stream_agent(
         "web_used": bool(final_state.get("web_used")),
         "papers_used": bool(final_state.get("papers_used")),
         "reflection_attempts": int(final_state.get("reflection_attempts") or 0),
+        "provenance_dropped_count": int(final_state.get("provenance_dropped_count") or 0),
+        "provenance_flagged_count": int(final_state.get("provenance_flagged_count") or 0),
         "error": final_state.get("error"),
         "ts": time.time(),
     }
@@ -238,6 +252,8 @@ def stream_agent(
         error=final_state.get("error"),
         score=float(final_state.get("critic_score") or 0.0),
         domain_scope=list(final_state.get("domain_scope") or []) or None,
+        provenance_dropped_count=int(final_state.get("provenance_dropped_count") or 0),
+        provenance_flagged_count=int(final_state.get("provenance_flagged_count") or 0),
     )
     if saved_path is not None:
         yield {

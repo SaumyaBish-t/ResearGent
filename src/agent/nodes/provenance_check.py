@@ -34,6 +34,11 @@ def _identifiers_for(c: HydratedChunk) -> tuple[str, str]:
     return (doi, arxiv_id)
 
 
+def _ref_key(ref: dict[str, str]) -> str:
+    """Stable key for a pointer, safe to carry in lean graph state."""
+    return f"{ref.get('kind', '')}:{ref.get('id', '')}"
+
+
 def provenance_check(state: AgentState) -> dict[str, Any]:
     if not settings.provenance_check_enabled:
         return {"trace": [{"node": "provenance_check", "skipped": "disabled"}]}
@@ -51,9 +56,11 @@ def provenance_check(state: AgentState) -> dict[str, Any]:
     results = asyncio.run(check_many(identifiers))
 
     kept_refs_by_subq: dict[str, list[dict[str, str]]] = {}
+    provenance_by_ref: dict[str, dict[str, str]] = {}
     dropped_count = 0
     flagged_count = 0
     clean_count = 0
+    blocked_sources: list[dict[str, str]] = []
 
     for sq, chunks in chunks_by_subq.items():
         original_refs = refs_by_subq.get(sq) or []
@@ -61,25 +68,42 @@ def provenance_check(state: AgentState) -> dict[str, Any]:
         for i, c in enumerate(chunks):
             status_info = results.get(_identifiers_for(c), {"status": "clean"})
             status = status_info.get("status", "clean")
+            ref = original_refs[i] if i < len(original_refs) else None
             if status == "retracted":
                 dropped_count += 1
+                blocked_sources.append(
+                    {
+                        "citation": c.citation,
+                        "doi": getattr(c, "doi", "") or "",
+                        "arxiv_id": getattr(c, "arxiv_id", "") or "",
+                        "reason": status_info.get("reason", "retracted"),
+                    }
+                )
                 continue  # HARD DROP — never re-emitted into state
             elif status in ("corrected", "concern"):
                 flagged_count += 1
             else:
                 clean_count += 1
-            if i < len(original_refs):
-                kept_refs.append(original_refs[i])
+            if ref is not None:
+                kept_refs.append(ref)
+                if status != "clean":
+                    provenance_by_ref[_ref_key(ref)] = {
+                        "status": status,
+                        "reason": status_info.get("reason", ""),
+                        "notice_url": status_info.get("notice_url", ""),
+                    }
         kept_refs_by_subq[sq] = kept_refs
 
     return {
         "chunk_refs_by_subq": kept_refs_by_subq,
         "provenance_dropped_count": dropped_count,
         "provenance_flagged_count": flagged_count,
+        "provenance_by_ref": provenance_by_ref,
         "trace": [{
             "node": "provenance_check",
             "clean": clean_count,
             "flagged": flagged_count,
             "retracted_dropped": dropped_count,
+            "blocked_sources": blocked_sources[:50],
         }],
     }

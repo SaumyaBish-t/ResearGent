@@ -1032,6 +1032,8 @@ def research(
                         papers_used=result.papers_used,
                         reflection_attempts=result.reflection_attempts,
                         run_id=result.run_id,
+                        provenance_dropped_count=result.provenance_dropped_count,
+                        provenance_flagged_count=result.provenance_flagged_count,
                     )
                 else:
                     note_path = auto_save_run(
@@ -1049,6 +1051,8 @@ def research(
                         error=result.error,
                         score=result.critic_score,
                         domain_scope=result.domain_scope,
+                        provenance_dropped_count=result.provenance_dropped_count,
+                        provenance_flagged_count=result.provenance_flagged_count,
                     )
                 if note_path is None:
                     # Auto-save was attempted but the gate rejected it.
