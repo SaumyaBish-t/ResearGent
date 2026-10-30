@@ -33,16 +33,16 @@ Public API
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Iterable
 
+import httpx
 import openai
 from openai import OpenAI
 
 from src.config import ModelTier, ProviderName, settings
 from src.llm import observability as obs
-
 
 # Errors that mean "this provider can't serve this request — try the next".
 #
@@ -55,6 +55,13 @@ from src.llm import observability as obs
 #
 # We DELIBERATELY keep BadRequestError + AuthenticationError as fatal — those
 # are bugs in our code or fully-broken keys that no fallback can fix.
+#
+# httpx errors are included because the Ollama embed path calls httpx
+# DIRECTLY (`_embed_ollama_native`), bypassing the OpenAI SDK's exception
+# wrapping. Without these, a dead local daemon (connection refused / read
+# timeout) aborts the whole embed call instead of cascading to the next
+# configured provider — which is exactly what happened when Ollama was down
+# and EMBED_PROVIDER=ollama pointed the tier at it.
 _TRANSIENT_ERRORS = (
     openai.RateLimitError,
     openai.APITimeoutError,
@@ -62,6 +69,11 @@ _TRANSIENT_ERRORS = (
     openai.InternalServerError,
     openai.NotFoundError,
     openai.PermissionDeniedError,
+    httpx.ConnectError,
+    httpx.ReadTimeout,
+    httpx.ConnectTimeout,
+    httpx.RemoteProtocolError,
+    httpx.HTTPError,
 )
 
 # NVIDIA's hosted embedding endpoint rejects requests with more than 256
