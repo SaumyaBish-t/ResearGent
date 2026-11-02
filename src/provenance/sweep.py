@@ -16,13 +16,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from src.provenance.checker import check_many
-from src.db import connection
+from src.db import connection, row_get
 
 
 async def run_sweep(since_days: int | None = None, dry_run: bool = False) -> dict:
     sources = _load_cited_sources(since_days)
     identifiers = [(s["doi"], s["arxiv_id"]) for s in sources]
-    results = await check_many(identifiers)
+    # force_refresh: the sweep's whole job is to notice a status CHANGE.
+    # Reading the cache would just hand back the status the per-run check
+    # wrote, so the sweep would never detect anything.
+    results = await check_many(identifiers, force_refresh=True)
 
     changed: list[dict] = []
     for s in sources:
@@ -59,13 +62,18 @@ def _load_cited_sources(since_days: int | None = None) -> list[dict]:
                     """
                 )
             rows = cur.fetchall()
+            # Rows come back as DICTS (the pool sets row_factory=dict_row),
+            # so they must be read by column name — tuple indexing raised
+            # KeyError and crashed the sweep on its first row.
             return [
                 {
-                    "doi": r[0],
-                    "arxiv_id": r[1],
-                    "last_cited_at": r[2],
-                    "last_known_status": _get_cached_status(r[0], r[1]),
-                    "cite_locations": r[3] or [],
+                    "doi": row_get(r, "doi"),
+                    "arxiv_id": row_get(r, "arxiv_id"),
+                    "last_cited_at": row_get(r, "last_cited_at"),
+                    "last_known_status": _get_cached_status(
+                        row_get(r, "doi"), row_get(r, "arxiv_id")
+                    ),
+                    "cite_locations": row_get(r, "cite_locations") or [],
                 }
                 for r in rows
             ]
@@ -79,12 +87,14 @@ def _get_cached_status(doi: str, arxiv_id: str) -> str:
                 cur.execute("SELECT status FROM retraction_status_cache WHERE doi = %s", (doi,))
                 row = cur.fetchone()
                 if row:
-                    return row[0]
+                    return row_get(row, "status", 0) or "clean"
             if arxiv_id:
-                cur.execute("SELECT status FROM retraction_status_cache WHERE arxiv_id = %s", (arxiv_id,))
+                cur.execute(
+                    "SELECT status FROM retraction_status_cache WHERE arxiv_id = %s", (arxiv_id,)
+                )
                 row = cur.fetchone()
                 if row:
-                    return row[0]
+                    return row_get(row, "status", 0) or "clean"
     return "clean"
 
 

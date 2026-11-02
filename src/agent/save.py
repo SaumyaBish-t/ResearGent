@@ -99,6 +99,7 @@ def auto_save_run(
     provenance_dropped_count: int = 0,
     provenance_flagged_count: int = 0,
     originality_report: dict | None = None,
+    novelty_report: dict | None = None,
 ) -> Path | None:
     """
     Apply gating + write the run to the notes folder.
@@ -163,6 +164,7 @@ def auto_save_run(
                 provenance_dropped_count=provenance_dropped_count,
                 provenance_flagged_count=provenance_flagged_count,
                 originality_report=originality_report,
+                novelty_report=novelty_report,
             )
 
             # Retrieve content from database to run the ingestion pipeline
@@ -226,6 +228,7 @@ def auto_save_run(
             provenance_dropped_count=provenance_dropped_count,
             provenance_flagged_count=provenance_flagged_count,
             originality_report=originality_report,
+            novelty_report=novelty_report,
         )
     except Exception:
         # Auto-save failure must not break the run. Caller's responsibility

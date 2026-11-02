@@ -31,11 +31,39 @@ from typing import Any
 from src.agent.artifacts import hydrate, persist_mixed
 from src.agent.state import AgentState
 from src.config import settings
+from src.novelty.ingest import build_search_queries
 from src.retrieval import expand_via_wikilinks, hybrid_retrieve
 
 # Total target chunks to pass to the generator. Tunable per call from the
 # CLI; the node uses this when state doesn't carry an explicit k.
 DEFAULT_TOTAL_K = 8
+
+# Max user-derived queries issued per sub-question. The ingestion store
+# already caps its own list; this is the Retriever's own guard.
+MAX_USER_QUERIES = 3
+
+
+def _user_results_queries(user_results: dict | None) -> list[str]:
+    """
+    The retrieval queries derived from the user's OWN results.
+
+    The spec says R (Results Ingestion) feeds the Retriever only. When
+    the user has told us what they did, the Retriever looks for the
+    RELATED PRIOR WORK — papers doing the same method on the same
+    dataset and metric — because that is the only evidence the Novelty
+    Check can meaningfully compare the user's numbers against.
+
+    The stored payload already carries `search_queries` (built by the
+    ingestion normaliser). A hand-built payload without them falls back
+    to deriving them here.
+    """
+    if not user_results:
+        return []
+
+    queries = user_results.get("search_queries") or []
+    if not queries:
+        queries = build_search_queries(user_results)
+    return [q for q in queries if q][:MAX_USER_QUERIES]
 
 
 def retrieve(state: AgentState) -> dict[str, Any]:
@@ -100,6 +128,16 @@ def retrieve(state: AgentState) -> dict[str, Any]:
     # buckets. Set by the CLI's --domain or the planner's auto-router.
     domain_scope: list[str] | None = state.get("domain_scope")  # type: ignore[assignment]
 
+    # Phase 24: R (Results Ingestion) feeds the Retriever only.
+    #
+    # When the user has ingested their own results, each sub-question is
+    # searched with BOTH the sub-question itself AND the user-derived
+    # queries. The user-derived queries are what find the RELATED PRIOR
+    # WORK — papers doing the same method on the same dataset and metric
+    # — which is the only evidence the Novelty Check can compare the
+    # user's numbers against.
+    user_queries = _user_results_queries(state.get("user_results"))
+
     for sq in to_retrieve:
         t0 = time.perf_counter()
         hits = hybrid_retrieve(
@@ -140,6 +178,37 @@ def retrieve(state: AgentState) -> dict[str, Any]:
                 "hits": len(hits),
                 "domain_scope": domain_scope or [],
                 "widened": widened,
+                "duration_ms": int((time.perf_counter() - t0) * 1000),
+            }
+        )
+
+    # ---- Phase 24: the user-results queries --------------------------------
+    # These run AFTER the sub-question searches so their hits can be
+    # APPENDED to the same sub-question bucket — the user-derived queries
+    # answer the SAME sub-question, they are not separate sub-questions.
+    if user_queries:
+        t0 = time.perf_counter()
+        user_hits = []
+        for q in user_queries:
+            user_hits.extend(
+                hybrid_retrieve(
+                    q, k=per_subq_k, doc_ids=doc_id_scope, domains=domain_scope
+                )
+            )
+        # Attach to the FIRST sub-question bucket — the user's result is
+        # one claim about one thing, so it belongs with the primary
+        # question rather than being duplicated across every sub-question.
+        target_sq = to_retrieve[0] if to_retrieve else (
+            sub_qs[0] if sub_qs else ""
+        )
+        if target_sq and user_hits:
+            chunks_by_subq[target_sq] = list(chunks_by_subq.get(target_sq) or []) + user_hits
+        timings.append(
+            {
+                "node": "retriever",
+                "user_results_queries": list(user_queries),
+                "user_results_hits": len(user_hits),
+                "user_results_target": target_sq[:80],
                 "duration_ms": int((time.perf_counter() - t0) * 1000),
             }
         )

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from src.db import connection
+from src.db import connection, row_get
 from src.config import settings
 
 
@@ -70,7 +70,12 @@ def get_cached(*, doi: str = "", arxiv_id: str = "") -> dict | None:
                 )
                 row = cur.fetchone()
                 if row:
-                    return {"status": row[0], "reason": row[1], "notice_url": row[2], "source": row[3]}
+                    return {
+                        "status": row_get(row, "status", 0),
+                        "reason": row_get(row, "reason", 1),
+                        "notice_url": row_get(row, "notice_url", 2),
+                        "source": row_get(row, "source", 3),
+                    }
 
             if arxiv_id:
                 cur.execute(
@@ -83,6 +88,11 @@ def get_cached(*, doi: str = "", arxiv_id: str = "") -> dict | None:
                 )
                 row = cur.fetchone()
                 if row:
-                    return {"status": row[0], "reason": row[1], "notice_url": row[2], "source": row[3]}
+                    return {
+                        "status": row_get(row, "status", 0),
+                        "reason": row_get(row, "reason", 1),
+                        "notice_url": row_get(row, "notice_url", 2),
+                        "source": row_get(row, "source", 3),
+                    }
 
     return None

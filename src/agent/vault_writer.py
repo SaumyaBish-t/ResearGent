@@ -129,6 +129,57 @@ def _format_citation_line(tag: str, source) -> str:
     return f"- **[{tag}]** {cit}"
 
 
+def _render_novelty_report(novelty_report: dict | None) -> list[str]:
+    """
+    Render the Novelty Report as markdown lines.
+
+    The Originality Report answers "is this DRAFT copied?" and the Novelty
+    Report answers "is this RESULT new?". Both belong on the note — a
+    reader of a vault note needs to see both claims checked.
+
+    Returns a list of lines (empty when there is no report).
+    """
+    if not novelty_report:
+        return []
+
+    lines: list[str] = ["## Novelty Report", ""]
+    lines.append(f"Verdict: {novelty_report.get('verdict', 'unknown')}")
+    lines.append(
+        f"Overall similarity: {novelty_report.get('overall_similarity', 0.0)}"
+    )
+    lines.append(
+        f"Approach similarity: {novelty_report.get('approach_similarity', 0.0)}"
+    )
+    lines.append(
+        f"Result similarity: {novelty_report.get('result_similarity', 0.0)}"
+    )
+    lines.append(f"Papers compared: {novelty_report.get('compared_papers', 0)}")
+
+    approach = (novelty_report.get("user_approach") or "").strip()
+    if approach:
+        lines.append("")
+        lines.append(f"**Your approach:** {approach[:300]}")
+
+    matched = novelty_report.get("matched_metrics") or []
+    if matched:
+        lines.append("")
+        lines.append("**Metric comparison:**")
+        for m in matched:
+            lines.append(
+                f"- {m.get('name', '?')}: yours {m.get('value')} vs "
+                f"{m.get('paper_name', 'paper')} {m.get('paper_value')} "
+                f"({m.get('direction', '?')})"
+            )
+
+    rationale = (novelty_report.get("rationale") or "").strip()
+    if rationale:
+        lines.append("")
+        lines.append(rationale)
+
+    lines.append("")
+    return lines
+
+
 def write_run_to_vault(
     vault_path: str | Path,
     output_subfolder: str,
@@ -148,6 +199,7 @@ def write_run_to_vault(
     provenance_dropped_count: int = 0,
     provenance_flagged_count: int = 0,
     originality_report: dict | None = None,
+    novelty_report: dict | None = None,
 ) -> Path:
     """Materialize one agent run as a markdown note inside the vault."""
     vault = Path(vault_path).resolve()
@@ -247,6 +299,9 @@ def write_run_to_vault(
                 parts.append(f"- **{f['status']}** (sim={f['similarity']}) vs [{f['source_tag']}]: \"{f['draft_sentence'][:100]}...\"")
         parts.append("")
 
+    # ---- Novelty Report (Phase 24) ----
+    parts.extend(_render_novelty_report(novelty_report))
+
     target.write_text("\n".join(parts) + "\n", encoding="utf-8")
     return target
 
@@ -269,6 +324,7 @@ def write_run_to_db_vault(
     provenance_dropped_count: int = 0,
     provenance_flagged_count: int = 0,
     originality_report: dict | None = None,
+    novelty_report: dict | None = None,
 ) -> str:
     """
     Persist one agent run as a markdown note directly inside the Postgres `notes` table.
@@ -365,6 +421,9 @@ def write_run_to_db_vault(
             for f in originality_report["flags"]:
                 parts.append(f"- **{f['status']}** (sim={f['similarity']}) vs [{f['source_tag']}]: \"{f['draft_sentence'][:100]}...\"")
         parts.append("")
+
+    # ---- Novelty Report (Phase 24) ----
+    parts.extend(_render_novelty_report(novelty_report))
 
     content = "\n".join(parts) + "\n"
 

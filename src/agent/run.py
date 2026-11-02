@@ -51,6 +51,10 @@ class AgentResult:
     provenance_flagged_count: int = 0
     # Phase 20 additions — Originality Check
     originality_report: dict | None = None
+    # Phase 24 additions — Novelty Check + Human Review Gate
+    novelty_report: dict | None = None
+    novelty_review_approved: bool = False
+    novelty_review_decision: str | None = None
     error: str | None = None
 
     def formatted(self) -> str:
@@ -81,6 +85,10 @@ class AgentResult:
             crag_flags.append(f"retracted_blocked={self.provenance_dropped_count}")
         if self.provenance_flagged_count:
             crag_flags.append(f"provenance_flagged={self.provenance_flagged_count}")
+        if self.novelty_report:
+            crag_flags.append(f"novelty={self.novelty_report.get('verdict', '?')}")
+        if self.novelty_review_decision == "rejected":
+            crag_flags.append("review=REJECTED")
         if self.error == "no_sources_used_llm_priors":
             crag_flags.append("LLM_PRIORS_ONLY")
         if crag_flags:
@@ -211,5 +219,8 @@ def run_agent(
         provenance_dropped_count=int(final.get("provenance_dropped_count") or 0),
         provenance_flagged_count=int(final.get("provenance_flagged_count") or 0),
         originality_report=final.get("originality_report"),
+        novelty_report=final.get("novelty_report"),
+        novelty_review_approved=bool(final.get("novelty_review_approved")),
+        novelty_review_decision=final.get("novelty_review_decision"),
         error=final.get("error"),
     )

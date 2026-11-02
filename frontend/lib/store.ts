@@ -22,12 +22,15 @@
 
 import { create } from "zustand";
 import { NODES, edgeExists } from "./graph-config";
+// NOTE: IngestedResults / ReviewRequest / UserResultsInput are declared
+// LOCALLY in this file (below), not in ./types — do not import them.
 import type {
   AgentEvent,
   FinalEvent,
   NodeCompleteEvent,
   NodeId,
   NodeStatus,
+  NoveltyMetricMatch,
   RunStartedEvent,
   SavedEvent,
   SaveSkippedEvent,
@@ -153,6 +156,18 @@ interface AgentState {
     reviewSections: string[];
     reviewTrace: string[];
 
+    // ---- Phase 24: Results Ingestion + Novelty ----
+    // The user's OWN experimental results, as returned by POST /api/results.
+    // Ground truth: never generated, never rewritten. When set, the next run
+    // goes to /api/research-with-results so the Retriever can find the related
+    // prior work and the Novelty Check has something to compare against.
+    userResults: IngestedResults | null;
+    ingestingResults: boolean;
+    resultsError: string | null;
+    // Set when the Human Review Gate pauses the run.
+    reviewRequest: ReviewRequest | null;
+    resumingReview: boolean;
+
   // ---- actions ----
   bootstrap: () => Promise<void>;
   signIn: () => void;
@@ -174,8 +189,66 @@ interface AgentState {
     startReview: (topic: string) => Promise<void>;
     stopReview: () => void;
 
+  // ---- Phase 24 actions ----
+  /** Validate + ingest the user's results. Returns true on success. */
+  ingestResults: (payload: UserResultsInput) => Promise<boolean>;
+  clearResults: () => void;
+  /** Approve or reject a run paused at the Human Review Gate. */
+  resumeReview: (approved: boolean) => Promise<void>;
+
   closePaywall: () => void;
   subscribe: () => Promise<void>;
+}
+
+/**
+ * The raw payload the user fills in on the Results Ingestion panel.
+ * Mirrors what `POST /api/results` accepts.
+ */
+export interface UserResultsInput {
+  summary: string;
+  approach?: string;
+  dataset?: string;
+  methodology_notes?: string;
+  metrics: Array<{ name: string; value: string | number; unit?: string }>;
+}
+
+/** The normalised payload the backend echoes back from `POST /api/results`. */
+export interface IngestedResults {
+  ingestion_id?: string;
+  ingested_at?: string;
+  summary?: string;
+  approach?: string;
+  dataset?: string;
+  methodology_notes?: string;
+  metrics?: Array<{
+    name?: string;
+    value?: number | string;
+    numeric_value?: number;
+    unit?: string;
+  }>;
+  search_queries?: string[];
+}
+
+/**
+ * The pause payload the Human Review Gate surfaces.
+ *
+ * This is read from the `novelty_check` node_complete summary — the
+ * interrupt raises before the node writes its state, so the payload is NOT
+ * available from a later state fetch.
+ */
+export interface ReviewRequest {
+  similarity: number;
+  verdict?: string;
+  rationale?: string;
+  threshold?: number;
+  papers?: Array<{
+    title?: string;
+    citation?: string;
+    arxiv_id?: string;
+    approach_similarity?: number;
+    metrics?: NoveltyMetricMatch[];
+  }>;
+  matched_metrics?: NoveltyMetricMatch[];
 }
 
 function idleStatuses(): Record<NodeId, NodeStatus> {
@@ -209,6 +282,11 @@ function freshRunState(): Partial<AgentState> {
     savedPath: null,
     saveSkippedReason: null,
     error: null,
+    // Phase 24: clear any stale pause from a previous run. `userResults` is
+    // deliberately NOT reset — the user's ingested results persist across
+    // runs until they explicitly clear them.
+    reviewRequest: null,
+    resumingReview: false,
   };
 }
 
@@ -305,10 +383,39 @@ export const useAgentStore = create<AgentState>((set, get) => {
               patch.confidenceScore = e.summary.score;
             if (e.summary.confidence) patch.confidenceLabel = e.summary.confidence;
           }
+          // Phase 24: the Human Review Gate's pause payload arrives on the
+          // NOVELTY_CHECK summary, not on a separate event. `interrupt()`
+          // raises before the gate node writes its state, so this summary is
+          // the only place the payload ever appears.
+          if (node === "novelty_check" && e.summary.requires_review) {
+            patch.reviewRequest = {
+              similarity: e.summary.overall_similarity ?? 0,
+              verdict: e.summary.verdict,
+              threshold: undefined,
+              papers: [],
+              matched_metrics: e.summary.matched_metrics ?? [],
+            };
+          }
           return patch;
         });
 
+        // Phase 24: once the gate has decided, the prompt must go away.
+        if (node === "human_review_gate" && e.summary.decision) {
+          set({ reviewRequest: null });
+        }
         log(node, summarizeNode(node, e.summary), nodeLevel(node, e.summary));
+        break;
+      }
+
+      case "review_required": {
+        // The graph paused at the Human Review Gate. Keep `running` true so
+        // the UI does not declare the run finished, but mark that we are
+        // waiting on the human rather than on the model.
+        log(
+          "human_review_gate",
+          "review required — confirm or reject to continue",
+          "warn",
+        );
         break;
       }
 
@@ -480,6 +587,13 @@ export const useAgentStore = create<AgentState>((set, get) => {
         reviewTitle: null,
         reviewSections: [],
         reviewTrace: [],
+
+        // ---- Phase 24 initial state ----
+        userResults: null,
+        ingestingResults: false,
+        resultsError: null,
+        reviewRequest: null,
+        resumingReview: false,
 
         // ---- auth ----
     bootstrap: async () => {
@@ -694,7 +808,15 @@ export const useAgentStore = create<AgentState>((set, get) => {
             if (domain) {
               params.set("domain", domain);
             }
-      const url = `${API_BASE}/api/research?${params.toString()}`;
+      // Phase 24: when the user has ingested their own results, run against
+      // the results-aware endpoint so the Retriever searches for the related
+      // prior work and the Novelty Check has something to compare against.
+      const ingested = get().userResults;
+      if (ingested) {
+        params.set("results", JSON.stringify(ingested));
+      }
+      const endpoint = ingested ? "/api/research-with-results" : "/api/research";
+      const url = `${API_BASE}${endpoint}?${params.toString()}`;
       es = new EventSource(url, { withCredentials: true });
 
       const names: AgentEvent["type"][] = [
@@ -703,6 +825,9 @@ export const useAgentStore = create<AgentState>((set, get) => {
         "final",
         "saved",
         "save_skipped",
+        // Phase 24 — without this entry the EventSource listener is never
+        // registered and the review-gate pause is silently dropped.
+        "review_required",
         "error",
       ];
       for (const name of names) {
@@ -765,6 +890,89 @@ export const useAgentStore = create<AgentState>((set, get) => {
     stopRun: () => {
         closeStream();
         set({ running: false, finished: true });
+      },
+
+      // ---- Phase 24: Results Ingestion ----
+      // Validate + freeze the user's own results. The backend rejects a
+      // malformed payload with an actionable 422 message, which we surface
+      // verbatim so the user can fix their input.
+      ingestResults: async (payload) => {
+        set({ ingestingResults: true, resultsError: null });
+        try {
+          const res = await fetch(`${API_BASE}/api/results`, {
+            ...fetchOpts,
+            method: "POST",
+            body: JSON.stringify(payload),
+          });
+          if (!res.ok) {
+            let detail = `HTTP ${res.status}`;
+            try {
+              const body = await res.json();
+              if (typeof body?.detail === "string") detail = body.detail;
+            } catch {
+              /* non-JSON error body */
+            }
+            set({ ingestingResults: false, resultsError: detail });
+            return false;
+          }
+          const body = await res.json();
+          const ingested = (body?.results ?? null) as IngestedResults | null;
+          set({
+            ingestingResults: false,
+            resultsError: null,
+            userResults: ingested,
+          });
+          log(
+            "system",
+            `results ingested · ${ingested?.metrics?.length ?? 0} metric(s) · ${ingested?.search_queries?.length ?? 0} queries`,
+            "success",
+          );
+          return true;
+        } catch (err) {
+          set({ ingestingResults: false, resultsError: String(err) });
+          return false;
+        }
+      },
+
+      clearResults: () => set({ userResults: null, resultsError: null }),
+
+      // ---- Phase 24: Human Review Gate ----
+      // `runId` is the LangGraph thread id for the paused run — NOT the
+      // billing thread. Resume works against the graph checkpoint, so the
+      // run id is the correct handle.
+      resumeReview: async (approved) => {
+        const threadId = get().runId;
+        if (!threadId) {
+          set({ resultsError: "no paused run to resume" });
+          return;
+        }
+        set({ resumingReview: true });
+        try {
+          const res = await fetch(`${API_BASE}/api/novelty/review`, {
+            ...fetchOpts,
+            method: "POST",
+            body: JSON.stringify({ thread_id: threadId, approved }),
+          });
+          if (!res.ok) {
+            let detail = `HTTP ${res.status}`;
+            try {
+              const body = await res.json();
+              if (typeof body?.detail === "string") detail = body.detail;
+            } catch {
+              /* non-JSON */
+            }
+            set({ resumingReview: false, resultsError: detail });
+            return;
+          }
+          set({ resumingReview: false, reviewRequest: null });
+          log(
+            "system",
+            approved ? "review approved — resuming run" : "review rejected — run stopped",
+            approved ? "success" : "warn",
+          );
+        } catch (err) {
+          set({ resumingReview: false, resultsError: String(err) });
+        }
       },
 
       startReview: async (topic) => {
@@ -942,6 +1150,23 @@ function summarizeNode(node: NodeId, s: NodeCompleteEvent["summary"]): string {
           .slice(0, 2)
           .join(", ");
         return `clean ${s.clean ?? 0} · flagged ${s.flagged ?? 0} · blocked ${s.retracted_dropped ?? 0} retracted${blocked ? ` · ${blocked}` : ""}`;
+      }
+    case "novelty_check":
+      {
+        if (!s.verdict) return "no user results — nothing to compare";
+        const sim = typeof s.overall_similarity === "number"
+          ? ` · sim ${s.overall_similarity.toFixed(2)}`
+          : "";
+        const dropped = s.dropped_sources ? ` · ${s.dropped_sources} duplicate(s) dropped` : "";
+        const flag = s.requires_review ? " · needs review" : "";
+        return `${s.verdict}${sim}${dropped}${flag}`;
+      }
+    case "human_review_gate":
+      {
+        if (!s.decision) return "review pending";
+        const sim = typeof s.similarity === "number" ? ` at sim ${s.similarity.toFixed(2)}` : "";
+        if (s.decision === "auto_approved") return `auto-approved${sim}`;
+        return `${s.decision}${sim}`;
       }
     case "web_fallback":
       return `+${s.web_chunks_added ?? 0} web chunks${s.providers_used?.length ? ` via ${s.providers_used.join(", ")}` : ""}`;

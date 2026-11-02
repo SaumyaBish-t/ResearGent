@@ -471,6 +471,36 @@ class Settings(BaseSettings):
     # Crossref's public pool tolerates modest bursts; keep this conservative.
     provenance_max_concurrent_lookups: int = 5
 
+    # ---- Novelty Check (Phase 24) -----------------------------------------
+    # Master kill-switch. When False, `novelty_check` is a no-op passthrough
+    # (every source survives, no report is produced) — useful for local dev
+    # and for runs where no user results were ingested.
+    novelty_check_enabled: bool = True
+
+    # Approach-similarity at/above which the user's method is considered the
+    # SAME method as a prior paper's. Mirrors
+    # `src.novelty.scoring.APPROACH_SIMILARITY_THRESHOLD`; kept in config so
+    # it can be tuned per deployment without a code change.
+    novelty_approach_threshold: float = 0.50
+
+    # Overall-similarity at/above which the Human Review Gate PAUSES the
+    # pipeline for human confirmation. Per the spec: "If similarity is
+    # above 50%, the pipeline pauses (dashed arrow down). When you confirm,
+    # it resumes from Novelty Check (dashed arrow up)."
+    novelty_review_threshold: float = 0.50
+
+    # Max papers compared against the user's results in one novelty check.
+    # Bounds both the embed batch size and the report size.
+    novelty_max_papers_compared: int = 12
+
+    # Max user metrics compared per paper. Keeps the comparison matrix
+    # small enough to stay inside one LLM/embed batch.
+    novelty_max_metrics_compared: int = 10
+
+    # How long a paused run waits for human confirmation before the gate
+    # auto-continues (seconds). 0 = wait indefinitely.
+    novelty_review_timeout_seconds: int = 0
+
     # ---- Validators ---------------------------------------------------------
     @field_validator(
         "primary_provider",

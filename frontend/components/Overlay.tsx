@@ -8,6 +8,8 @@ import ModeSwitcher from "./ModeSwitcher";
 import NarrativeOverlay from "./NarrativeOverlay";
 import PaywallModal from "./PaywallModal";
 import ResultModal from "./ResultModal";
+import ResultsPanel from "./ResultsPanel";
+import ReviewGatePrompt from "./ReviewGatePrompt";
 import ReviewModal from "./ReviewModal";
 import SearchBar from "./SearchBar";
 import SignInLanding from "./SignInLanding";
@@ -112,6 +114,15 @@ export default function Overlay() {
 
             {/* Review — renders when mode=review */}
             <ReviewModal />
+
+            {/* Phase 24 — Results Ingestion. Lets the user declare their own
+                experimental results so the Novelty Check has something to
+                compare against. */}
+            <ResultsPanel />
+
+            {/* Phase 24 — Human Review Gate. Renders only while a run is
+                paused waiting for the human's decision. */}
+            <ReviewGatePrompt />
 
       {/* History sidebar — auto-hides during a live run. */}
       <HistorySidebar />

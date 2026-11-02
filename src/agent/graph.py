@@ -52,6 +52,7 @@ from src.agent.nodes import (
     generator,
     llm_reasoning,
     memory_keeper,
+    novelty_check,
     originality_check,
     paper_discovery,
     planner,
@@ -59,6 +60,7 @@ from src.agent.nodes import (
     reflector,
     retriever,
     rewriter,
+    review_gate,
     verifier,
     web_fallback,
 )
@@ -66,6 +68,36 @@ from src.agent.state import AgentState
 from src.config import settings
 
 PAPER_CONFIDENCE_THRESHOLD = 0.70
+
+# Cached result of the connectivity probe below. `None` = not probed yet.
+_PG_CHECKPOINTER_OK: bool | None = None
+
+
+def _postgres_checkpointer_available() -> bool:
+    """
+    True when the shared pool can ACTUALLY hand out a connection.
+
+    `settings.resolve_database_url()` only says a URL is configured — it
+    says nothing about reachability. Building a `PostgresSaver` over an
+    unreachable database succeeds (the pool connects lazily) and then the
+    run dies MID-STREAM on the first checkpoint write. Probing once and
+    caching the answer lets us fall back to an in-process checkpointer up
+    front instead of failing halfway through a run.
+    """
+    global _PG_CHECKPOINTER_OK
+    if _PG_CHECKPOINTER_OK is not None:
+        return _PG_CHECKPOINTER_OK
+    if not settings.resolve_database_url():
+        _PG_CHECKPOINTER_OK = False
+        return False
+    try:
+        from src.db import get_pool
+
+        with get_pool().connection(timeout=3):
+            _PG_CHECKPOINTER_OK = True
+    except Exception:
+        _PG_CHECKPOINTER_OK = False
+    return _PG_CHECKPOINTER_OK
 
 
 def _web_search_available() -> bool:
@@ -191,6 +223,9 @@ def build_graph(use_checkpointer: bool = True):
     g.add_node("provenance_check", provenance_check.provenance_check)
     # Phase 20: originality check
     g.add_node("originality_check", originality_check.originality_check)
+    # Phase 24: novelty check + human review gate
+    g.add_node("novelty_check", novelty_check.novelty_check)
+    g.add_node("human_review_gate", review_gate.human_review_gate)
 
     g.add_edge(START, "planner")
     g.add_conditional_edges(
@@ -209,7 +244,19 @@ def build_graph(use_checkpointer: bool = True):
             "no_answer": "no_answer",
         },
     )
-    g.add_edge("provenance_check", "critic")   # NEW
+    # Phase 24: provenance -> novelty_check -> human_review_gate -> critic
+    #
+    # The Critic's text says it only sees sources that passed Provenance
+    # AND Novelty. That is enforced structurally: the Novelty Check
+    # filters `chunk_refs_by_subq` in place, and the Critic reads that
+    # same field — so whatever the Novelty Check drops never reaches it.
+    #
+    # The Human Review Gate sits between the Novelty Check and the Critic
+    # as a side branch: it interrupts the graph when the novelty
+    # similarity is high, and on resume the graph continues to the Critic.
+    g.add_edge("provenance_check", "novelty_check")
+    g.add_edge("novelty_check", "human_review_gate")
+    g.add_edge("human_review_gate", "critic")
     g.add_conditional_edges(
         "critic",
         _route_after_critic,
@@ -234,25 +281,43 @@ def build_graph(use_checkpointer: bool = True):
         },
     )
     g.add_edge("llm_reasoning", END)
-    # Phase 17: generator → verifier → originality_check → reflector
+    # Phase 17/20/24: generator -> verifier -> reflector -> originality_check
+    #
+    # The Originality Check sits BETWEEN Answer Generation and the Vault.
+    # It used to run before the Reflector, which meant it could validate a
+    # draft that was not yet final. The Reflector does not rewrite the
+    # draft (only the Generator does), so by the time the Reflector
+    # returns, `draft_answer` is final — and the originality report
+    # describes exactly the text that will be written to the vault.
     g.add_edge("generator", "verifier")
-    g.add_edge("verifier", "originality_check")
-    g.add_edge("originality_check", "reflector")
-    # Phase 18: reflector → memory_keeper → END
+    g.add_edge("verifier", "reflector")
+    # Phase 18: reflector -> originality_check -> memory_keeper -> END
+    #
+    # The Originality Check now sits on the reflector's accept path, so the
+    # report describes exactly the final text that reaches the vault.
     g.add_conditional_edges(
         "reflector",
         _route_after_reflector,
-        {"retriever": "retriever", "end": "memory_keeper"},
+        {
+            "retriever": "retriever",
+            "end": "originality_check",
+        },
     )
+    g.add_edge("originality_check", "memory_keeper")
     g.add_edge("memory_keeper", END)
     g.add_edge("no_answer", END)
 
     if use_checkpointer:
-        if settings.resolve_database_url():
+        from langgraph.checkpoint.memory import MemorySaver
+
+        # Prefer the durable Postgres checkpointer, but only when the
+        # database is actually reachable. Otherwise fall back to an
+        # IN-PROCESS checkpointer: interrupt/resume still works within one
+        # server process, and local runs without a database keep working.
+        if _postgres_checkpointer_available():
             from src.db import get_checkpointer
 
             return g.compile(checkpointer=get_checkpointer())
-        from langgraph.checkpoint.memory import MemorySaver
 
         return g.compile(checkpointer=MemorySaver())
 

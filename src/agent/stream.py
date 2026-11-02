@@ -93,6 +93,40 @@ def _summarize_node_update(node_name: str, update: dict[str, Any]) -> dict[str, 
         summary["retracted_dropped"] = entry.get("retracted_dropped", 0)
         summary["blocked_sources"] = entry.get("blocked_sources", [])
 
+    elif node_name == "novelty_check":
+        report = update.get("novelty_report") or {}
+        summary["verdict"] = report.get("verdict")
+        summary["is_novel"] = report.get("is_novel")
+        summary["overall_similarity"] = report.get("overall_similarity", 0.0)
+        summary["approach_similarity"] = report.get("approach_similarity", 0.0)
+        summary["result_similarity"] = report.get("result_similarity", 0.0)
+        summary["requires_review"] = report.get("requires_review", False)
+        summary["matched_metrics"] = report.get("matched_metrics") or []
+        summary["compared_papers"] = report.get("compared_papers", 0)
+        trace = update.get("trace") or []
+        entry = next(
+            (e for e in reversed(trace) if e.get("node") == "novelty_check"),
+            {},
+        )
+        summary["dropped_sources"] = entry.get("dropped_sources", 0)
+        if entry.get("skipped"):
+            summary["skipped"] = entry["skipped"]
+
+    elif node_name == "human_review_gate":
+        trace = update.get("trace") or []
+        entry = next(
+            (e for e in reversed(trace) if e.get("node") == "human_review_gate"),
+            {},
+        )
+        summary["decision"] = entry.get(
+            "decision", update.get("novelty_review_decision")
+        )
+        summary["similarity"] = entry.get("similarity")
+        summary["threshold"] = entry.get("threshold")
+        summary["approved"] = update.get("novelty_review_approved")
+        if entry.get("reason"):
+            summary["reason"] = entry["reason"]
+
     elif node_name == "verifier":
         verdicts = update.get("citation_verdicts") or {}
         summary["claims_checked"] = len(verdicts)
@@ -132,9 +166,16 @@ def stream_agent(
     k: int = 8,
     run_id: str | None = None,
     domain_scope: list[str] | None = None,
+    user_results: dict | None = None,
 ) -> Iterator[dict[str, Any]]:
     rid = run_id or uuid.uuid4().hex[:12]
-    graph = build_graph(use_checkpointer=False)
+    # A CHECKPOINTER IS REQUIRED for the Human Review Gate to be resumable.
+    # `interrupt()` raises whether or not one is configured, but only a
+    # checkpoint lets a later `Command(resume=...)` continue the run — and
+    # the SSE endpoint resumes in a DIFFERENT request than the one that
+    # paused. With `DATABASE_URL` unset this falls back to MemorySaver,
+    # which works within a single server process.
+    graph = build_graph(use_checkpointer=True)
 
     initial: AgentState = {
         "question": question,
@@ -143,6 +184,11 @@ def stream_agent(
     }
     if domain_scope:
         initial["domain_scope"] = domain_scope
+    # Phase 24: the user's own results (ground truth) ride along so the
+    # Retriever can search for the related prior work and the Novelty
+    # Check has something to compare against.
+    if user_results:
+        initial["user_results"] = user_results
 
     yield {
         "type": "run_started",
@@ -151,9 +197,27 @@ def stream_agent(
         "ts": time.time(),
     }
 
+    # The run id IS the LangGraph thread id: the frontend hands it back to
+    # POST /api/novelty/review to resume a run paused at the gate.
+    cfg = {"configurable": {"thread_id": rid}}
+
     final_state: AgentState = {}
+    interrupted = False
     try:
-        for chunk in graph.stream(initial, stream_mode="updates"):
+        for chunk in graph.stream(initial, cfg, stream_mode="updates"):
+            # Phase 24: LangGraph reports a Human Review Gate pause as an
+            # `__interrupt__` chunk. The graph has STOPPED — it is waiting
+            # for POST /api/novelty/review with this run id. Surface it and
+            # stop streaming; anything after this would be an `isinstance`
+            # surprise, not a node update.
+            if "__interrupt__" in chunk:
+                interrupted = True
+                yield {
+                    "type": "review_required",
+                    "run_id": rid,
+                    "ts": time.time(),
+                }
+                break
             for node_name, update in chunk.items():
                 if isinstance(update, dict):
                     final_state.update(update)  # type: ignore[arg-type]
@@ -169,6 +233,12 @@ def stream_agent(
             "error": f"{type(e).__name__}: {e}",
             "ts": time.time(),
         }
+        return
+
+    # A paused run has no final answer yet. Stop here — the frontend will
+    # call /api/novelty/review, and the resumed run finishes the pipeline.
+    # Auto-saving now would write a partial note to the vault.
+    if interrupted:
         return
 
     # Memory extraction payload (if any)
@@ -229,6 +299,9 @@ def stream_agent(
         "reflection_attempts": int(final_state.get("reflection_attempts") or 0),
         "provenance_dropped_count": int(final_state.get("provenance_dropped_count") or 0),
         "provenance_flagged_count": int(final_state.get("provenance_flagged_count") or 0),
+        "novelty_report": final_state.get("novelty_report"),
+        "novelty_review_approved": bool(final_state.get("novelty_review_approved")),
+        "novelty_review_decision": final_state.get("novelty_review_decision"),
         "error": final_state.get("error"),
         "ts": time.time(),
     }
@@ -254,6 +327,8 @@ def stream_agent(
         domain_scope=list(final_state.get("domain_scope") or []) or None,
         provenance_dropped_count=int(final_state.get("provenance_dropped_count") or 0),
         provenance_flagged_count=int(final_state.get("provenance_flagged_count") or 0),
+        originality_report=final_state.get("originality_report"),
+        novelty_report=final_state.get("novelty_report"),
     )
     if saved_path is not None:
         yield {

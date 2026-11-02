@@ -54,6 +54,15 @@ from src.llm import chat
 
 _SYSTEM = """You are a STRICT, SKEPTICAL chunk-relevance grader for a research assistant.
 
+SOURCE POOL — ALREADY VETTED:
+Every chunk you are shown has already passed two upstream screens. It has passed the \
+PROVENANCE CHECK (it is not retracted, corrected, or under an expression of concern), \
+and it has passed the NOVELTY CHECK (it was screened against the user's own experimental \
+results and is not a near-duplicate of the work the user is claiming). Because the pool is \
+already vetted, do NOT spend your reasoning re-checking retraction status or novelty — \
+grade each chunk purely on whether it answers the question. Your only job here is \
+relevance to the question asked.
+
 Your job: look at the user's question and the numbered chunks we found in our local \
 database, and grade each chunk. Be conservative — the system uses your grades to decide \
 whether to fire a live Semantic Scholar + web search for better evidence. If the local \

@@ -5,7 +5,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useAgentStore, type ThreadTurn } from "@/lib/store";
-import type { Source } from "@/lib/types";
+import type { FinalEvent, Source } from "@/lib/types";
 
 const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE?.replace(/\/$/, "") || "http://127.0.0.1:8000";
@@ -123,6 +123,15 @@ export default function ResultModal() {
                       defaultOpen={i === threadTurns.length - 1 && !running}
                     />
                   ))}
+                  {/* Phase 24 — the run-level novelty verdict. Rendered
+                      once, after the turns: it describes the RUN's own
+                      results vs the prior work, not one turn's answer. */}
+                  {finalOutput?.novelty_report && !running && (
+                    <NoveltyReportCard
+                      report={finalOutput.novelty_report}
+                      decision={finalOutput.novelty_review_decision ?? null}
+                    />
+                  )}
                   {running && <LiveTurn question={liveQuery} />}
                   {error && threadTurns.length > 0 && (
                     <ErrorBlock error={error} />
@@ -232,6 +241,97 @@ function TurnBlock({
         )}
       </AnimatePresence>
     </section>
+  );
+}
+
+/**
+ * Phase 24 — the Novelty Report for a run.
+ *
+ * Answers "is this RESULT new?" (the Originality Report answers "is this
+ * DRAFT copied?" — different question, different report).
+ */
+function NoveltyReportCard({
+  report,
+  decision,
+}: {
+  report: NonNullable<FinalEvent["novelty_report"]>;
+  decision: string | null;
+}) {
+  const verdict = report.verdict ?? "unknown";
+  const tone =
+    verdict === "improvement" || verdict === "novel"
+      ? "text-good border-good/40 bg-good/[0.06]"
+      : verdict === "not_novel"
+        ? "text-warn border-warn/40 bg-warn/[0.06]"
+        : "text-ink-dim border-line bg-white/[0.02]";
+
+  const matched = report.matched_metrics ?? [];
+
+  return (
+    <div className="rounded-xl border border-line bg-white/[0.015] px-4 py-3.5">
+      <div className="mb-2 flex items-center gap-2">
+        <span className="font-mono text-[9.5px] uppercase tracking-[0.32em] text-ink-mute">
+          novelty
+        </span>
+        <span
+          className={`rounded-md border px-1.5 py-[1px] font-mono text-[10px] uppercase tracking-widest ${tone}`}
+        >
+          {verdict}
+        </span>
+        {decision && decision !== "auto_approved" && (
+          <span className="font-mono text-[9.5px] uppercase tracking-widest text-ink-mute">
+            · you {decision}
+          </span>
+        )}
+        <span className="ml-auto font-mono text-[10px] tabular-nums text-ink-mute">
+          sim {(report.overall_similarity ?? 0).toFixed(2)}
+        </span>
+      </div>
+
+      {report.rationale && (
+        <p className="text-[12.5px] leading-relaxed text-ink-dim">
+          {report.rationale}
+        </p>
+      )}
+
+      {matched.length > 0 && (
+        <div className="mt-2.5 space-y-0.5">
+          {matched.map((m, i) => (
+            <div
+              key={i}
+              className="flex items-baseline justify-between gap-3 font-mono text-[11px]"
+            >
+              <span className="text-ink-mute">{m.name}</span>
+              <span className="tabular-nums">
+                <span className="text-accent">{String(m.value)}</span>
+                <span className="text-ink-mute"> vs </span>
+                <span className="text-ink-dim">{String(m.paper_value)}</span>
+                {m.direction && (
+                  <span
+                    className={
+                      m.direction === "better"
+                        ? " text-good"
+                        : m.direction === "worse"
+                          ? " text-bad"
+                          : " text-ink-mute"
+                    }
+                  >
+                    {" "}
+                    {m.direction}
+                  </span>
+                )}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {typeof report.compared_papers === "number" && (
+        <p className="mt-2 font-mono text-[9.5px] uppercase tracking-widest text-ink-mute">
+          vs {report.compared_papers} prior paper(s)
+        </p>
+      )}
+    </div>
   );
 }
 

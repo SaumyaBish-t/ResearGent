@@ -49,6 +49,20 @@ export const NODES: NodeDef[] = [
   { id: "reflector", label: "Reflector", sublabel: "gap audit", position: [-1.6, -3.6, -0.6], accent: "violet" },
   { id: "llm_reasoning", label: "LLM Priors", sublabel: "last resort", position: [4.6, -3.6, 1], accent: "violet" },
   { id: "no_answer", label: "No Answer", sublabel: "graceful stop", position: [-4.6, -3.8, 1], accent: "violet" },
+
+  // Phase 24 — Novelty Check + Human Review Gate.
+  //
+  // These sit BETWEEN provenance_check and the critic in the live graph,
+  // so they are positioned on that corridor rather than in the lower
+  // supporting region. The gate is deliberately offset in Z so the
+  // pause/approve branch reads as a distinct side step off the main
+  // spine instead of another inline node.
+  { id: "novelty_check", label: "Novelty Check", sublabel: "vs your results", position: [-2.4, 0.4, 0.4], accent: "orange", shape: "octa" },
+  { id: "human_review_gate", label: "Human Review Gate", sublabel: "confirm or pause", position: [-3.8, 0.4, 1.8], accent: "orange", shape: "box" },
+
+  // Originality Check — repositioned in Phase 24 to sit between Answer
+  // Generation and the Vault, so it validates the FINAL text.
+  { id: "originality_check", label: "Originality Check", sublabel: "copy overlap", position: [0.4, -4.4, 0.2], accent: "orange", shape: "octa" },
 ];
 
 export const NODE_BY_ID: Record<NodeId, NodeDef> = NODES.reduce(
@@ -64,7 +78,12 @@ export const EDGES: EdgeDef[] = [
   { from: "planner", to: "retriever" },
   { from: "planner", to: "paper_discovery" },
   { from: "retriever", to: "provenance_check" },
-  { from: "provenance_check", to: "critic" },
+  // Phase 24 — the Critic no longer sits directly after Provenance.
+  // The Novelty Check filters the refs in between, so the Critic only
+  // ever sees sources that cleared BOTH screens.
+  { from: "provenance_check", to: "novelty_check" },
+  { from: "novelty_check", to: "human_review_gate" },
+  { from: "human_review_gate", to: "critic" },
   { from: "critic", to: "generator" },
   { from: "critic", to: "rewriter" },
   { from: "critic", to: "paper_discovery" },
@@ -77,7 +96,13 @@ export const EDGES: EdgeDef[] = [
   { from: "retriever", to: "paper_discovery" },
   { from: "retriever", to: "web_fallback" },
   { from: "retriever", to: "llm_reasoning" },
-  { from: "generator", to: "reflector" },
+  // Phase 24 — Originality Check moved to sit between Answer Generation
+  // and the Vault, so it checks the FINAL text rather than a draft the
+  // Reflector might still change.
+  { from: "generator", to: "verifier" },
+  { from: "verifier", to: "reflector" },
+  { from: "reflector", to: "originality_check" },
+  { from: "originality_check", to: "memory_keeper" },
   { from: "reflector", to: "retriever" }, // loopback
   { from: "generator", to: "vault" }, // synthetic save edge
 ];

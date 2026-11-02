@@ -5,6 +5,7 @@ from . import (
     generator,
     llm_reasoning,
     memory_keeper,
+    novelty_check,
     originality_check,
     paper_discovery,
     planner,
@@ -12,6 +13,7 @@ from . import (
     reflector,
     retriever,
     rewriter,
+    review_gate,
     verifier,
     web_fallback,
 )

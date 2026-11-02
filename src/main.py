@@ -1496,13 +1496,13 @@ def provenance_check_doi(
 @provenance_app.command("stats")
 def provenance_stats() -> None:
     """Show cache size and last import date."""
-    from src.db import connection
+    from src.db import connection, row_get
     with connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT count(*) FROM retraction_status_cache;")
-            total = cur.fetchone()[0]
-            cur.execute("SELECT max(checked_at) FROM retraction_status_cache;")
-            last = cur.fetchone()[0]
+            cur.execute("SELECT count(*) AS n FROM retraction_status_cache;")
+            total = row_get(cur.fetchone(), "n", 0)
+            cur.execute("SELECT max(checked_at) AS m FROM retraction_status_cache;")
+            last = row_get(cur.fetchone(), "m", 0)
     console.print(f"Total cached DOIs: {total}")
     if last:
         console.print(f"Last checked: {last.isoformat()}")
@@ -1543,6 +1543,114 @@ def research(
     domain_scope = [domain] if domain else None
     result = run_agent(question, k=k, domain_scope=domain_scope, user_results=user_results)
     console.print(result.formatted())
+
+
+# ---- Phase 24 CLI: results validation + review gate ------------------------------
+results_app = typer.Typer(help="Results Ingestion (your own experimental results).")
+novelty_app = typer.Typer(help="Novelty Check + Human Review Gate.")
+app.add_typer(results_app, name="results")
+app.add_typer(novelty_app, name="novelty")
+
+
+@results_app.command(name="validate")
+def results_validate(
+    results_file: str = typer.Argument(..., help="Path to the JSON results file"),
+) -> None:
+    """
+    Validate a user-results file WITHOUT running the agent.
+
+    Confirms the payload is well-formed, shows the metrics exactly as
+    they will be used (the values are never altered), and lists the
+    search queries the Retriever will use to find the related prior
+    work — so you can sanity-check before spending on a research run.
+    """
+    import json
+    from pathlib import Path
+
+    from src.novelty.ingest import IngestionError, normalize_user_results
+
+    path = Path(results_file)
+    if not path.exists():
+        console.print(f"[red]No such file: {results_file}[/red]")
+        raise typer.Exit(code=1)
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        console.print(f"[red]Not valid JSON: {e}[/red]")
+        raise typer.Exit(code=1)
+
+    try:
+        normalized = normalize_user_results(payload)
+    except IngestionError as e:
+        console.print(f"[red]Invalid results: {e}[/red]")
+        raise typer.Exit(code=1)
+
+    console.print("[green]Results are valid.[/green]")
+    console.print(f"Ingestion id: {normalized['ingestion_id']}")
+    console.print(f"\n[bold]Summary:[/bold] {normalized['summary']}")
+    console.print(f"[bold]Approach:[/bold] {normalized['approach']}")
+    if normalized.get("dataset"):
+        console.print(f"[bold]Dataset:[/bold] {normalized['dataset']}")
+
+    console.print("\n[bold]Metrics (values are used verbatim):[/bold]")
+    for m in normalized["metrics"]:
+        unit = f" {m['unit']}" if m.get("unit") else ""
+        console.print(f"  - {m['name']}: {m['value']}{unit}")
+
+    if normalized.get("search_queries"):
+        console.print("\n[bold]Retriever queries:[/bold]")
+        for q in normalized["search_queries"]:
+            console.print(f"  - {q}")
+
+
+@novelty_app.command(name="review")
+def novelty_review(
+    thread_id: str = typer.Option(..., "--thread-id", help="Thread id of the paused run"),
+    approve: bool = typer.Option(False, "--approve", help="Approve and resume the run"),
+    reject: bool = typer.Option(False, "--reject", help="Reject and stop the run"),
+) -> None:
+    """
+    Approve or reject a run paused at the Human Review Gate.
+
+    The gate interrupts the run when the novelty similarity is high.
+    This hands your decision back to the graph, which resumes from the
+    Novelty Check.
+    """
+    if approve == reject:
+        console.print("[red]Pass exactly one of --approve or --reject.[/red]")
+        raise typer.Exit(code=1)
+
+    from langgraph.types import Command
+
+    from src.agent.graph import build_graph
+
+    graph = build_graph(use_checkpointer=True)
+    cfg = {"configurable": {"thread_id": thread_id}}
+
+    try:
+        snapshot = graph.get_state(cfg)
+    except Exception as e:
+        console.print(f"[red]Could not load checkpoint '{thread_id}': {e}[/red]")
+        raise typer.Exit(code=1)
+
+    if not snapshot.interrupts:
+        console.print(f"[red]No paused run found for thread '{thread_id}'.[/red]")
+        raise typer.Exit(code=1)
+
+    decision = {"approved": bool(approve)}
+    try:
+        list(
+            graph.stream(
+                Command(resume=decision), cfg, stream_mode="updates"
+            )
+        )
+    except Exception as e:
+        console.print(f"[red]Failed to resume: {type(e).__name__}: {e}[/red]")
+        raise typer.Exit(code=1)
+
+    verdict = "approved" if approve else "rejected"
+    console.print(f"[green]Run {verdict}. The graph resumed from Novelty Check.[/green]")
 
 
 if __name__ == "__main__":

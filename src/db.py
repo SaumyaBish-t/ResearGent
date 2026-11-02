@@ -20,7 +20,7 @@ Why `autocommit=True` + `row_factory=dict_row`?
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import Iterator
+from typing import Any, Iterator
 
 from src.config import settings
 
@@ -78,6 +78,39 @@ def connection() -> Iterator:
     pool = get_pool()
     with pool.connection() as conn:
         yield conn
+
+
+def row_get(row: Any, key: str, index: int | None = None) -> Any:
+    """
+    Read a column from a DB row, whatever the row factory produced.
+
+    The shared pool sets `row_factory=dict_row`, so rows come back as
+    DICTS. But plenty of older code indexed them as TUPLES (`row[0]`),
+    which raises `KeyError` on a dict — the Background Sweep and the
+    retraction cache both crashed that way on their first row.
+
+    This helper reads a dict by key and falls back to positional
+    indexing for tuple-style rows, so both shapes work:
+
+        row_get(row, "status")        # dict row, by column name
+        row_get(row, "status", 0)     # tuple row, by position
+        row_get(row, "status", 0)     # dict row, ignores the position
+
+    Returns None for a missing column or a None row — never raises.
+    """
+    if row is None:
+        return None
+    if isinstance(row, dict):
+        return row.get(key)
+    if index is not None:
+        try:
+            return row[index]
+        except (IndexError, KeyError, TypeError):
+            return None
+    try:
+        return row[key]
+    except (IndexError, KeyError, TypeError):
+        return None
 
 
 def get_checkpointer(*, setup: bool = False):

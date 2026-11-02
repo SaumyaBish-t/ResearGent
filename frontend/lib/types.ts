@@ -13,6 +13,8 @@ export type NodeId =
   | "planner"
   | "retriever"
   | "provenance_check"
+  | "novelty_check"
+  | "human_review_gate"
   | "critic"
   | "rewriter"
   | "paper_discovery"
@@ -20,6 +22,7 @@ export type NodeId =
   | "reflector"
   | "generator"
   | "verifier"
+  | "originality_check"
   | "memory_keeper"
   | "llm_reasoning"
   | "no_answer"
@@ -76,6 +79,25 @@ export interface NodeSummary {
     arxiv_id?: string;
     reason?: string;
   }>;
+  // novelty_check (Phase 24)
+  /** "novel" | "improvement" | "not_novel" | "inconclusive" */
+  verdict?: string;
+  is_novel?: boolean;
+  overall_similarity?: number;
+  approach_similarity?: number;
+  result_similarity?: number;
+  /** True when the Human Review Gate should pause the run. */
+  requires_review?: boolean;
+  matched_metrics?: NoveltyMetricMatch[];
+  compared_papers?: number;
+  /** Papers dropped by the novelty screen (near-duplicates of the user's work). */
+  dropped_sources?: number;
+  // human_review_gate (Phase 24)
+  /** "approved" | "rejected" | "auto_approved" */
+  decision?: string;
+  similarity?: number;
+  threshold?: number;
+  approved?: boolean;
   // generator
   answer_chars?: number;
   n_sources?: number;
@@ -86,6 +108,49 @@ export interface NodeSummary {
   gaps?: string[];
   // no_answer
   reason?: string;
+}
+
+/**
+ * One row of the novelty comparison: the user's own metric against the
+ * same metric reported by a prior paper.
+ *
+ * These rows are the point of the Novelty Check — "your BLEU-4 38.1 vs
+ * their 34.8 (better)" is what the user needs to see, not just a
+ * similarity score.
+ */
+export interface NoveltyMetricMatch {
+  /** The user's metric name (e.g. "BLEU-4"). */
+  name?: string;
+  /** The user's value. */
+  value?: number | string;
+  /** The prior paper's metric name (may differ in formatting). */
+  paper_name?: string;
+  /** The prior paper's value. */
+  paper_value?: number | string;
+  /** "better" | "worse" | "equal" */
+  direction?: string;
+  /** Absolute difference (user - paper). */
+  delta?: number;
+  source?: string;
+}
+
+/**
+ * The full novelty report attached to a run (Phase 24).
+ *
+ * Mirrors `novelty_report` in `src/agent/state.py`.
+ */
+export interface NoveltyReport {
+  verdict?: string;
+  is_novel?: boolean;
+  overall_similarity?: number;
+  approach_similarity?: number;
+  result_similarity?: number;
+  requires_review?: boolean;
+  rationale?: string;
+  compared_papers?: number;
+  matched_metrics?: NoveltyMetricMatch[];
+  user_approach?: string;
+  user_metrics?: Array<{ name?: string; value?: number | string; unit?: string }>;
 }
 
 export interface Source {
@@ -121,6 +186,10 @@ export interface FinalEvent {
   reflection_attempts: number;
   provenance_dropped_count?: number;
   provenance_flagged_count?: number;
+  // Phase 24 — Novelty Check + Human Review Gate
+  novelty_report?: NoveltyReport | null;
+  novelty_review_approved?: boolean;
+  novelty_review_decision?: string | null;
   error: string | null;
   ts: number;
 }
@@ -137,6 +206,20 @@ export interface SaveSkippedEvent {
   ts: number;
 }
 
+/**
+ * Phase 24 — emitted when the Human Review Gate pauses the graph.
+ *
+ * The graph has STOPPED and is waiting for `POST /api/novelty/review` with
+ * this `run_id`. The pause DETAIL (similarity, papers) rides on the
+ * preceding `novelty_check` node_complete summary, because `interrupt()`
+ * raises before the gate node writes any state.
+ */
+export interface ReviewRequiredEvent {
+  type: "review_required";
+  run_id: string;
+  ts: number;
+}
+
 export interface ErrorEvent {
   type: "error";
   error: string;
@@ -149,6 +232,7 @@ export type AgentEvent =
   | FinalEvent
   | SavedEvent
   | SaveSkippedEvent
+  | ReviewRequiredEvent
   | ErrorEvent;
 
 // ── Review pipeline events ──────────────────────────────────────────────

@@ -38,6 +38,7 @@ from src.auth.users import User
 from src.billing import quota, threads
 from src.billing.routes import router as billing_router
 from src.config import settings
+from src.db import row_get
 from src.llm import list_status
 from src.llm.observability import load_records, summarize
 from src.memory import store as memory_store
@@ -233,6 +234,143 @@ def create_app() -> FastAPI:
 
         return EventSourceResponse(event_gen())
 
+    # ── Phase 24: Results Ingestion + Novelty ─────────────────────────────
+
+    @app.post("/api/results")
+    async def ingest_results(
+        payload: dict[str, Any],
+        user: User = Depends(current_user),
+    ):
+        """
+        Ingest the user's OWN experimental results.
+
+        These are GROUND TRUTH: the values are stored verbatim and are
+        never rewritten, rounded, or paraphrased by any later node. The
+        response returns the normalised payload plus the search queries
+        the Retriever will use to find the related prior work.
+        """
+        from src.novelty.ingest import IngestionError, normalize_user_results
+
+        try:
+            normalized = normalize_user_results(payload)
+        except IngestionError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+
+        return {"ok": True, "results": normalized}
+
+    @app.get("/api/research-with-results")
+    async def research_with_results(
+        q: str = Query(..., description="The research question"),
+        results: str = Query(
+            ...,
+            description="JSON-encoded user results (the payload returned "
+            "by POST /api/results).",
+        ),
+        k: int = Query(8, description="Total chunks budget across all sub-questions"),
+        domain: str | None = Query(None, description="Comma-separated domain id(s)"),
+        user: User = Depends(current_user),
+    ):
+        """
+        SSE stream of an agent run that carries the user's own results.
+
+        Identical to `/api/research` except that the ingested results are
+        threaded into the graph, so the Retriever searches for the related
+        prior work and the Novelty Check has something to compare against.
+        """
+        from src.novelty.ingest import IngestionError, normalize_user_results
+
+        try:
+            parsed = json.loads(results)
+        except json.JSONDecodeError as e:
+            raise HTTPException(
+                status_code=422,
+                detail=f"'results' must be valid JSON: {e}",
+            ) from e
+
+        try:
+            user_results = normalize_user_results(parsed)
+        except IngestionError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+
+        domain_scope: list[str] | None = None
+        if domain:
+            domain_scope = [d.strip() for d in domain.split(",") if d.strip()]
+
+        async def event_gen():
+            loop = asyncio.get_running_loop()
+            gen = stream_agent(
+                q, k=k, domain_scope=domain_scope, user_results=user_results
+            )
+            while True:
+                try:
+                    event = await loop.run_in_executor(None, _next_or_none, gen)
+                except Exception as e:
+                    yield {"event": "error", "data": json.dumps({"error": str(e)})}
+                    return
+                if event is None:
+                    break
+                yield {
+                    "event": event.get("type", "message"),
+                    "data": json.dumps(event, default=str),
+                }
+
+        return EventSourceResponse(event_gen())
+
+    @app.post("/api/novelty/review")
+    async def resume_novelty_review(
+        payload: dict[str, Any],
+        user: User = Depends(current_user),
+    ):
+        """
+        Resume a run paused at the Human Review Gate.
+
+        The gate interrupts the graph when the novelty similarity is high.
+        This endpoint hands the human's decision back to LangGraph, which
+        continues the run from the Novelty Check.
+        """
+        thread_id = (payload.get("thread_id") or "").strip()
+        if not thread_id:
+            raise HTTPException(
+                status_code=422, detail="'thread_id' is required to resume a run."
+            )
+        if "approved" not in payload:
+            raise HTTPException(
+                status_code=422, detail="'approved' (true/false) is required."
+            )
+
+        from langgraph.types import Command
+
+        from src.agent.graph import build_graph
+
+        graph = build_graph(use_checkpointer=True)
+        cfg = {"configurable": {"thread_id": thread_id}}
+
+        try:
+            snapshot = graph.get_state(cfg)
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Could not load checkpoint '{thread_id}': {e}",
+            ) from e
+
+        if not snapshot.interrupts:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No paused run found for thread '{thread_id}'.",
+            )
+
+        decision = {"approved": bool(payload["approved"])}
+        try:
+            graph.update_state(cfg, {})
+            list(graph.stream(Command(resume=decision), cfg, stream_mode="updates"))
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to resume run: {type(e).__name__}: {e}",
+            ) from e
+
+        return {"ok": True, "thread_id": thread_id, "decision": decision}
+
     # ── BibTeX export ──────────────────────────────────────────────────────
     @app.get("/api/threads/{thread_id}/turns/{turn_index}/export.bib")
     async def export_bibtex(
@@ -357,14 +495,21 @@ def create_app() -> FastAPI:
                             """
                         )
                 rows = cur.fetchall()
+                # dict_row pool -> rows are dicts, not tuples. Tuple
+                # indexing here raised KeyError and broke the reflags
+                # dashboard notification endpoint.
                 return JSONResponse([
                     {
-                        "doi": r[0],
-                        "arxiv_id": r[1],
-                        "old_status": r[2],
-                        "new_status": r[3],
-                        "detected_at": r[4].isoformat(),
-                        "notified": r[5],
+                        "doi": row_get(r, "doi"),
+                        "arxiv_id": row_get(r, "arxiv_id"),
+                        "old_status": row_get(r, "old_status"),
+                        "new_status": row_get(r, "new_status"),
+                        "detected_at": (
+                            row_get(r, "detected_at").isoformat()
+                            if row_get(r, "detected_at")
+                            else None
+                        ),
+                        "notified": row_get(r, "notified"),
                     }
                     for r in rows
                 ])

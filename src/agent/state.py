@@ -134,6 +134,30 @@ class AgentState(TypedDict, total=False):
     user_results: dict | None   # {"summary": str, "metrics": [{"name","value","unit"}...],
                                  #  "dataset": str, "methodology_notes": str}
 
+    # ---- Novelty Check (Phase 24) ----
+    # The novelty report comparing the user's own results against the
+    # retrieved papers:
+    #   {"verdict": "novel"|"improvement"|"not_novel"|"inconclusive",
+    #    "is_novel": bool, "overall_similarity": float,
+    #    "approach_similarity": float, "result_similarity": float,
+    #    "requires_review": bool, "matched_metrics": [...], "rationale": str,
+    #    "compared_papers": int}
+    novelty_report: dict | None
+
+    # Refs that FAILED the novelty screen, keyed the same way as
+    # `chunk_refs_by_subq`. The Critic sees only sources that passed both
+    # Provenance and Novelty, so this is what got filtered out.
+    novelty_dropped_refs: dict[str, list[dict[str, str]]]
+
+    # ---- Human Review Gate (Phase 24) ----
+    # True once a human confirmed the run may proceed past the gate.
+    novelty_review_approved: bool
+    # The pause payload shown to the human (similarity, verdict, the
+    # papers that triggered it). `None` when the gate never fired.
+    novelty_review_request: dict | None
+    # What the human decided: "approved" | "rejected" | None (pending).
+    novelty_review_decision: str | None
+
     # ---- Flow control / observability ----
     error: str | None
     trace: Annotated[list[dict[str, Any]], operator.add]

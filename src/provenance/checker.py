@@ -10,10 +10,19 @@ from src.provenance.cache import get_cached, upsert_status
 from src.provenance.crossref_client import lookup_doi
 
 
-async def check_many(identifiers: list[tuple[str, str]]) -> dict[tuple[str, str], dict]:
+async def check_many(
+    identifiers: list[tuple[str, str]],
+    *,
+    force_refresh: bool = False,
+) -> dict[tuple[str, str], dict]:
     """
     identifiers: list of (doi, arxiv_id) tuples, either may be "".
     Returns {(doi, arxiv_id): {"status": ..., "reason": ..., "notice_url": ...}}
+
+    `force_refresh=True` ignores the cache and re-queries live. The
+    Background Sweep needs this: without it the sweep reads back the very
+    status row the per-run check wrote and can never observe a flip —
+    making the sweep a no-op that can never catch a retraction.
     """
     out: dict[tuple[str, str], dict] = {}
     to_fetch: list[tuple[str, str]] = []
@@ -22,7 +31,7 @@ async def check_many(identifiers: list[tuple[str, str]]) -> dict[tuple[str, str]
         if not doi and not arxiv_id:
             out[(doi, arxiv_id)] = {"status": "clean", "reason": "", "notice_url": ""}
             continue
-        cached = get_cached(doi=doi, arxiv_id=arxiv_id)
+        cached = None if force_refresh else get_cached(doi=doi, arxiv_id=arxiv_id)
         if cached is not None:
             out[(doi, arxiv_id)] = cached
         else:
