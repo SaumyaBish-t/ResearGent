@@ -118,7 +118,10 @@ def _cosine(a: list[float], b: list[float]) -> float:
     nb = math.sqrt(sum(y * y for y in b))
     if na == 0 or nb == 0:
         return 0.0
-    return dot / (na * nb)
+    # Embeddings may contain NumPy scalar values. Keep node outputs made from
+    # this score as native Python floats so LangGraph's msgpack checkpoint can
+    # serialize them.
+    return float(dot / (na * nb))
 
 
 def _source_signals(draft_sentence: str, source_text: str) -> dict[str, float]:
@@ -186,7 +189,7 @@ def originality_check(state: AgentState) -> dict[str, Any]:
                     "draft_sentence": draft_sentence[:200],
                     "source_tag": tag,
                     "source_snippet": chunk.text[:200],
-                    "similarity": round(sim, 3),
+                    "similarity": float(round(sim, 3)),
                     "ngram_overlap_words": ngram,
                     "status": status,
                 }
