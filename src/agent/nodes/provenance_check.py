@@ -81,6 +81,12 @@ def _normalized_title(chunk: HydratedChunk) -> str:
     return re.sub(r"[^a-z0-9]+", " ", title.casefold()).strip()
 
 
+def _is_retraction_notice(chunk: HydratedChunk) -> bool:
+    """Retraction notices are evidence about retracted works, not the works themselves."""
+    title = (getattr(chunk, "doc_title", "") or getattr(chunk, "citation", "") or "").strip()
+    return bool(re.match(r"^\s*retraction(?:\s+note)?\s*[:—–-]", title, re.IGNORECASE))
+
+
 def _previously_blocked(
     chunk: HydratedChunk,
     identifiers: tuple[str, str],
@@ -154,10 +160,21 @@ def provenance_check(state: AgentState) -> dict[str, Any]:
         kept_refs: list[dict[str, str]] = []
         for i, c in enumerate(chunks):
             identifiers = _identifiers_for(c)
-            prior_block = _previously_blocked(c, identifiers, previously_blocked)
-            status_info = prior_block or results.get(
-                identifiers, {"status": "clean"}
-            )
+            # A notice can have a Crossref `update-to` relation to the
+            # original article, or even a stale erroneous status cache row.
+            # Keep the notice so the system can explain and substantiate the
+            # retraction while blocking the original paper itself.
+            if _is_retraction_notice(c):
+                status_info = {
+                    "status": "clean",
+                    "reason": "retraction notice retained as provenance evidence",
+                    "notice_url": "",
+                }
+            else:
+                prior_block = _previously_blocked(c, identifiers, previously_blocked)
+                status_info = prior_block or results.get(
+                    identifiers, {"status": "clean"}
+                )
             status = status_info.get("status", "clean")
             ref = original_refs[i] if i < len(original_refs) else None
             if status == "retracted":

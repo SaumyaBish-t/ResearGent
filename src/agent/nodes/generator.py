@@ -404,13 +404,24 @@ def no_answer(state: AgentState) -> dict[str, Any]:
     return a clear "I don't know" — far better than letting the LLM
     hallucinate from no evidence.
     """
-    return {
-        "draft_answer": (
+    provenance_dropped = int(state.get("provenance_dropped_count") or 0)
+    if provenance_dropped:
+        answer = (
+            "I found potentially relevant sources, but the provenance check marked them "
+            "as retracted, and no unflagged evidence remained. I can't responsibly "
+            "summarize the paper's claims from memory. Search for the formal retraction "
+            "notice or provide a non-retracted source to compare against."
+        )
+        reason = "all retrieved evidence was blocked by provenance checks"
+    else:
+        answer = (
             "I couldn't find anything relevant in the indexed corpus for this question. "
-            "Try rephrasing, or ingest additional documents. "
-            "(Phase 4 will add a live web-search fallback for this case.)"
-        ),
+            "Try rephrasing, or ingest additional documents."
+        )
+        reason = "retrieval empty"
+    return {
+        "draft_answer": answer,
         "citation_map": {},
         "error": "no_chunks_retrieved",
-        "trace": [{"node": "no_answer", "reason": "retrieval empty"}],
+        "trace": [{"node": "no_answer", "reason": reason}],
     }

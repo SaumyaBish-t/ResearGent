@@ -185,6 +185,10 @@ def _route_after_critic(state: AgentState) -> str:
     if web_already_tried:
         if has_chunks:
             return "generator"
+        # If the only retrieved evidence was rejected by provenance checks,
+        # do not silently switch to model priors for a paper-specific answer.
+        if int(state.get("provenance_dropped_count") or 0) > 0:
+            return "no_answer"
         if settings.llm_reasoning_fallback_enabled:
             return "llm_reasoning"
         return "no_answer"
