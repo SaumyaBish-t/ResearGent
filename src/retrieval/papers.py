@@ -675,7 +675,9 @@ def _rank_by_relevance(query: str, papers: list[PaperChunk], top_k: int) -> list
         # Citation score: log(citations + 1) / log(max_citations + 1)
         citations = p.citations or 0
         if max_citations > 0:
-            citation_score = np.log(citations + 1) / np.log(max_citations + 1)
+            citation_score = float(
+                np.log(citations + 1) / np.log(max_citations + 1)
+            )
         else:
             citation_score = 0.0
         

@@ -45,6 +45,9 @@ Phase 18: Memory keeper after reflector accepts.
 
 from __future__ import annotations
 
+from functools import wraps
+from typing import Any, Callable
+
 from langgraph.graph import END, START, StateGraph
 
 from src.agent.nodes import (
@@ -71,6 +74,39 @@ PAPER_CONFIDENCE_THRESHOLD = 0.70
 
 # Cached result of the connectivity probe below. `None` = not probed yet.
 _PG_CHECKPOINTER_OK: bool | None = None
+
+
+def _checkpoint_safe(value: Any) -> Any:
+    """Convert NumPy values recursively before they reach a graph checkpoint."""
+    if isinstance(value, dict):
+        return {
+            _checkpoint_safe(key): _checkpoint_safe(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_checkpoint_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_checkpoint_safe(item) for item in value)
+
+    # Import-free handling keeps NumPy optional for graph construction while
+    # covering both scalar values and arrays returned by embedding libraries.
+    if type(value).__module__.split(".", 1)[0] == "numpy":
+        tolist = getattr(value, "tolist", None)
+        if callable(tolist):
+            return _checkpoint_safe(tolist())
+        item = getattr(value, "item", None)
+        if callable(item):
+            return item()
+    return value
+
+
+def _checkpoint_safe_node(node: Callable[..., Any]) -> Callable[..., Any]:
+    """Wrap a node so no NumPy scalar/array escapes into AgentState."""
+    @wraps(node)
+    def wrapped(state: AgentState) -> Any:
+        return _checkpoint_safe(node(state))
+
+    return wrapped
 
 
 def _postgres_checkpointer_available() -> bool:
@@ -202,30 +238,30 @@ def build_graph(use_checkpointer: bool = True):
     g = StateGraph(AgentState)
 
     # Phase 3 nodes
-    g.add_node("planner", planner.plan)
-    g.add_node("retriever", retriever.retrieve)
-    g.add_node("generator", generator.generate)
-    g.add_node("no_answer", generator.no_answer)
+    g.add_node("planner", _checkpoint_safe_node(planner.plan))
+    g.add_node("retriever", _checkpoint_safe_node(retriever.retrieve))
+    g.add_node("generator", _checkpoint_safe_node(generator.generate))
+    g.add_node("no_answer", _checkpoint_safe_node(generator.no_answer))
     # Phase 4 nodes
-    g.add_node("critic", critic.critique)
-    g.add_node("rewriter", rewriter.rewrite_and_retry)
-    g.add_node("web_fallback", web_fallback.web_fallback)
+    g.add_node("critic", _checkpoint_safe_node(critic.critique))
+    g.add_node("rewriter", _checkpoint_safe_node(rewriter.rewrite_and_retry))
+    g.add_node("web_fallback", _checkpoint_safe_node(web_fallback.web_fallback))
     # Phase 5 node
-    g.add_node("reflector", reflector.reflect)
+    g.add_node("reflector", _checkpoint_safe_node(reflector.reflect))
     # Phase 7 nodes — open-domain
-    g.add_node("paper_discovery", paper_discovery.discover)
-    g.add_node("llm_reasoning", llm_reasoning.reason)
+    g.add_node("paper_discovery", _checkpoint_safe_node(paper_discovery.discover))
+    g.add_node("llm_reasoning", _checkpoint_safe_node(llm_reasoning.reason))
     # Phase 17: claim verification
-    g.add_node("verifier", verifier.verify)
+    g.add_node("verifier", _checkpoint_safe_node(verifier.verify))
     # Phase 18: memory extraction
-    g.add_node("memory_keeper", memory_keeper.extract_memory)
+    g.add_node("memory_keeper", _checkpoint_safe_node(memory_keeper.extract_memory))
     # Phase 19: provenance check
-    g.add_node("provenance_check", provenance_check.provenance_check)
+    g.add_node("provenance_check", _checkpoint_safe_node(provenance_check.provenance_check))
     # Phase 20: originality check
-    g.add_node("originality_check", originality_check.originality_check)
+    g.add_node("originality_check", _checkpoint_safe_node(originality_check.originality_check))
     # Phase 24: novelty check + human review gate
-    g.add_node("novelty_check", novelty_check.novelty_check)
-    g.add_node("human_review_gate", review_gate.human_review_gate)
+    g.add_node("novelty_check", _checkpoint_safe_node(novelty_check.novelty_check))
+    g.add_node("human_review_gate", _checkpoint_safe_node(review_gate.human_review_gate))
 
     g.add_edge(START, "planner")
     g.add_conditional_edges(

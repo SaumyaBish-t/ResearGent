@@ -203,6 +203,7 @@ def stream_agent(
 
     final_state: AgentState = {}
     interrupted = False
+    last_streamed_node: str | None = None
     try:
         for chunk in graph.stream(initial, cfg, stream_mode="updates"):
             # Phase 24: LangGraph reports a Human Review Gate pause as an
@@ -219,6 +220,7 @@ def stream_agent(
                 }
                 break
             for node_name, update in chunk.items():
+                last_streamed_node = node_name
                 if isinstance(update, dict):
                     final_state.update(update)  # type: ignore[arg-type]
                 yield {
@@ -228,9 +230,12 @@ def stream_agent(
                     "ts": time.time(),
                 }
     except Exception as e:
+        error = f"{type(e).__name__}: {e}"
+        if last_streamed_node:
+            error += f" (last streamed node: {last_streamed_node})"
         yield {
             "type": "error",
-            "error": f"{type(e).__name__}: {e}",
+            "error": error,
             "ts": time.time(),
         }
         return
