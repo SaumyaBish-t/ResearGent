@@ -90,6 +90,8 @@ def _summarize_node_update(node_name: str, update: dict[str, Any]) -> dict[str, 
         )
         summary["clean"] = entry.get("clean", 0)
         summary["flagged"] = entry.get("flagged", 0)
+        summary["unchecked"] = entry.get("unchecked", 0)
+        summary["unchecked_examples"] = entry.get("unchecked_examples", [])
         summary["retracted_dropped"] = entry.get("retracted_dropped", 0)
         summary["blocked_sources"] = entry.get("blocked_sources", [])
 

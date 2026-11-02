@@ -33,22 +33,31 @@ async def lookup_doi(doi: str) -> dict:
         if resp.status_code != 200:
             return {"status": "clean", "reason": "", "notice_url": "", "source": "crossref"}
         msg = resp.json().get("message", {})
-        # Check update-to relations for retraction/correction/EOC types
-        for upd in msg.get("update-to", []):
+        # Crossref can expose updates in either direction. Original records
+        # commonly list a retraction notice under `updated-by`; ignoring that
+        # field makes already-retracted works appear clean.
+        updates = [
+            *[u for u in (msg.get("update-to") or []) if isinstance(u, dict)],
+            *[u for u in (msg.get("updated-by") or []) if isinstance(u, dict)],
+        ]
+        for upd in updates:
             utype = (upd.get("type") or "").lower()
+            notice = upd.get("DOI") or upd.get("URL") or ""
+            if notice and not str(notice).startswith(("http://", "https://")):
+                notice = f"https://doi.org/{notice}"
             if "retraction" in utype:
                 return {
                     "status": "retracted", "reason": utype,
-                    "notice_url": upd.get("URL", ""), "source": "crossref",
+                    "notice_url": notice, "source": "crossref",
                 }
             if "correction" in utype:
                 return {
                     "status": "corrected", "reason": utype,
-                    "notice_url": upd.get("URL", ""), "source": "crossref",
+                    "notice_url": notice, "source": "crossref",
                 }
             if "expression" in utype or "concern" in utype:
                 return {
                     "status": "concern", "reason": utype,
-                    "notice_url": upd.get("URL", ""), "source": "crossref",
+                    "notice_url": notice, "source": "crossref",
                 }
         return {"status": "clean", "reason": "", "notice_url": "", "source": "crossref"}

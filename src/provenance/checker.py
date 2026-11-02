@@ -29,9 +29,18 @@ async def check_many(
 
     for doi, arxiv_id in identifiers:
         if not doi and not arxiv_id:
-            out[(doi, arxiv_id)] = {"status": "clean", "reason": "", "notice_url": ""}
+            out[(doi, arxiv_id)] = {
+                "status": "unchecked",
+                "reason": "no DOI or arXiv identifier",
+                "notice_url": "",
+            }
             continue
         cached = None if force_refresh else get_cached(doi=doi, arxiv_id=arxiv_id)
+        # Earlier releases only inspected Crossref `update-to`, so cached
+        # clean values from that logic are not trustworthy. Recheck them live
+        # once with the corrected parser; positive flags remain safe to reuse.
+        if cached and cached.get("status") == "clean" and cached.get("source") == "crossref":
+            cached = None
         if cached is not None:
             out[(doi, arxiv_id)] = cached
         else:
@@ -46,7 +55,11 @@ async def check_many(
                 # rarely retract via Crossref; mark clean but unverified.
                 # (Phase 23's bulk sweep re-checks these against arXiv's
                 # own withdrawal notices separately — see 23.3.)
-                return (doi, arxiv_id), {"status": "clean", "reason": "", "notice_url": ""}
+                return (doi, arxiv_id), {
+                    "status": "unchecked",
+                    "reason": "no DOI available for live Crossref check",
+                    "notice_url": "",
+                }
             async with sem:
                 result = await lookup_doi(doi)
             upsert_status(doi=doi, arxiv_id=arxiv_id, source="crossref", **{

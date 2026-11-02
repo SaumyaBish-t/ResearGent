@@ -132,6 +132,8 @@ def provenance_check(state: AgentState) -> dict[str, Any]:
     dropped_count = 0
     flagged_count = 0
     clean_count = 0
+    unchecked_count = 0
+    unchecked_examples: list[dict[str, str]] = []
     blocked_sources: list[dict[str, str]] = []
     cumulative_blocked = list(previously_blocked)
 
@@ -164,6 +166,15 @@ def provenance_check(state: AgentState) -> dict[str, Any]:
                 continue  # HARD DROP — never re-emitted into state
             elif status in ("corrected", "concern"):
                 flagged_count += 1
+            elif status == "unchecked":
+                unchecked_count += 1
+                if len(unchecked_examples) < 10:
+                    unchecked_examples.append({
+                        "title": (c.doc_title or c.citation or "")[:180],
+                        "doi": identifiers[0],
+                        "arxiv_id": identifiers[1],
+                        "reason": status_info.get("reason", "identifier unavailable"),
+                    })
             else:
                 clean_count += 1
             if ref is not None:
@@ -186,6 +197,8 @@ def provenance_check(state: AgentState) -> dict[str, Any]:
             "node": "provenance_check",
             "clean": clean_count,
             "flagged": flagged_count,
+            "unchecked": unchecked_count,
+            "unchecked_examples": unchecked_examples,
             "retracted_dropped": dropped_count,
             "blocked_sources": blocked_sources[:50],
         }],
