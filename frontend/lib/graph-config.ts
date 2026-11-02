@@ -49,6 +49,8 @@ export const NODES: NodeDef[] = [
   { id: "reflector", label: "Reflector", sublabel: "gap audit", position: [-1.6, -3.6, -0.6], accent: "violet" },
   { id: "llm_reasoning", label: "LLM Priors", sublabel: "last resort", position: [4.6, -3.6, 1], accent: "violet" },
   { id: "no_answer", label: "No Answer", sublabel: "graceful stop", position: [-4.6, -3.8, 1], accent: "violet" },
+  { id: "verifier", label: "Verifier", sublabel: "citation audit", position: [2.8, -4.1, 0.8], accent: "orange", shape: "octa" },
+  { id: "memory_keeper", label: "Memory Keeper", sublabel: "topic memory", position: [2.4, -5.3, -1.2], accent: "emerald", shape: "box" },
 
   // Phase 24 — Novelty Check + Human Review Gate.
   //

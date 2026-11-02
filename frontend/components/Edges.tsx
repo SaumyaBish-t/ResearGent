@@ -48,9 +48,10 @@ export default function Edges({ activeEdge }: Props) {
 function FlowParticles({ activeEdge }: { activeEdge: { from: NodeId; to: NodeId } }) {
   const groupRef = useRef<THREE.Group>(null);
 
-  const { start, end } = useMemo(() => {
-    const a = NODE_BY_ID[activeEdge.from].position;
-    const b = NODE_BY_ID[activeEdge.to].position;
+  const endpoints = useMemo(() => {
+    const a = NODE_BY_ID[activeEdge.from]?.position;
+    const b = NODE_BY_ID[activeEdge.to]?.position;
+    if (!a || !b) return null;
     return {
       start: new THREE.Vector3(...a),
       end: new THREE.Vector3(...b),
@@ -59,17 +60,19 @@ function FlowParticles({ activeEdge }: { activeEdge: { from: NodeId; to: NodeId 
 
   useFrame((state) => {
     const g = groupRef.current;
-    if (!g) return;
+    if (!g || !endpoints) return;
     const t = state.clock.elapsedTime;
     g.children.forEach((child, i) => {
       // Evenly spaced phases, looping 0→1 along the edge.
       const phase = (t * 0.8 + i / PARTICLE_COUNT) % 1;
-      child.position.lerpVectors(start, end, phase);
+      child.position.lerpVectors(endpoints.start, endpoints.end, phase);
       const m = (child as THREE.Mesh).material as THREE.MeshBasicMaterial;
       // Fade in at the start, out at the end.
       m.opacity = Math.sin(phase * Math.PI);
     });
   });
+
+  if (!endpoints) return null;
 
   return (
     <group ref={groupRef}>
