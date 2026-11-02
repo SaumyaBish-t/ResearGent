@@ -123,6 +123,9 @@ class AgentState(TypedDict, total=False):
     provenance_flagged_count: int   # corrected/concern chunks passed through with a caveat
     # Pointer-keyed provenance metadata; keeps chunk text out of checkpoints.
     provenance_by_ref: dict[str, dict[str, str]]
+    # Paper identities already confirmed retracted earlier in this run. Kept
+    # across fallback retrieval so web results cannot reintroduce the same work.
+    provenance_blocked_sources: list[dict[str, str]]
 
     # ---- Originality Check (Phase 20) ----
     originality_report: dict | None   # {score, flags: [...], sentences_checked}
