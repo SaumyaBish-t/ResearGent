@@ -124,6 +124,24 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return float(dot / (na * nb))
 
 
+def _native_checkpoint_values(value: Any) -> Any:
+    """Recursively convert NumPy scalar values to msgpack-safe Python types."""
+    if isinstance(value, dict):
+        return {key: _native_checkpoint_values(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_native_checkpoint_values(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_native_checkpoint_values(item) for item in value)
+
+    # Avoid importing NumPy in this node just for serialization. NumPy scalar
+    # types expose `.item()` to return the matching Python bool/int/float.
+    if type(value).__module__.split(".", 1)[0] == "numpy":
+        item = getattr(value, "item", None)
+        if callable(item):
+            return item()
+    return value
+
+
 def _source_signals(draft_sentence: str, source_text: str) -> dict[str, float]:
     """Compute both detectors against ONE source: best cosine + best n-gram.
 
@@ -197,7 +215,7 @@ def originality_check(state: AgentState) -> dict[str, Any]:
 
     originality_score = 1.0 - (len(flags) / max(len(draft_sentences), 1))
 
-    return {
+    result = {
         "originality_report": {
             "score": round(originality_score, 3),
             "flags": flags,
@@ -212,3 +230,4 @@ def originality_check(state: AgentState) -> dict[str, Any]:
             }
         ],
     }
+    return _native_checkpoint_values(result)
