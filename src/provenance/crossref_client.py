@@ -1,15 +1,10 @@
 """
 Crossref REST API client — free, no key required.
 
-Crossref now carries retraction relations directly on work metadata:
-  - `update-to` array with `type: "retraction"` — the work THIS DOI
-    retracts, or that retracts THIS DOI (check `label` field: works
-    have `update-to[].updated.DOI` pointing at what superseded them).
-  - Some publishers additionally tag `type: "retraction"` on the DOI's
-    OWN metadata (i.e. the retraction notice is itself a separate DOI
-    linked back via `relation.is-retraction-of`).
-
-We check both shapes. If neither is present, status is "clean" — but
+Crossref records updates in two directions: `update-to` on a notice points
+to the original work, while `updated-by` on an original points to its notice.
+Only `updated-by` indicates that the DOI currently being checked has itself
+been superseded. If neither is present, status is "clean" — but
 note Crossref coverage of retraction metadata is NOT 100%, which is
 exactly why `retraction_source_mode="bulk"` (importing the actual
 Retraction Watch Database) is the recommended default — see
@@ -33,13 +28,11 @@ async def lookup_doi(doi: str) -> dict:
         if resp.status_code != 200:
             return {"status": "clean", "reason": "", "notice_url": "", "source": "crossref"}
         msg = resp.json().get("message", {})
-        # Crossref can expose updates in either direction. Original records
-        # commonly list a retraction notice under `updated-by`; ignoring that
-        # field makes already-retracted works appear clean.
-        updates = [
-            *[u for u in (msg.get("update-to") or []) if isinstance(u, dict)],
-            *[u for u in (msg.get("updated-by") or []) if isinstance(u, dict)],
-        ]
+        # `updated-by` means this work was superseded by the listed notice.
+        # `update-to` is found on the notice and points TO the original work;
+        # treating it as the notice's own status incorrectly blocks valid
+        # retraction notices (which are needed as evidence for the retraction).
+        updates = [u for u in (msg.get("updated-by") or []) if isinstance(u, dict)]
         for upd in updates:
             utype = (upd.get("type") or "").lower()
             notice = upd.get("DOI") or upd.get("URL") or ""

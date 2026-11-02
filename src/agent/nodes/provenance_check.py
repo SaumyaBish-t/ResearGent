@@ -35,6 +35,7 @@ _ARXIV_RE = re.compile(
     r"((?:\d{4}\.\d{4,5}|[a-z-]+/\d{7})(?:v\d+)?)",
     re.IGNORECASE,
 )
+_SCHOLAR_ID_RE = re.compile(r"(?<![a-f0-9])([a-f0-9]{40})(?![a-f0-9])", re.IGNORECASE)
 
 
 def _identifiers_for(c: HydratedChunk) -> tuple[str, str]:
@@ -87,10 +88,21 @@ def _previously_blocked(
 ) -> dict[str, str] | None:
     doi, arxiv_id = identifiers
     title = _normalized_title(chunk)
+    source_text = " ".join(
+        str(value or "")
+        for value in (
+            getattr(chunk, "url", ""),
+            getattr(chunk, "source_file", ""),
+            getattr(chunk, "citation", ""),
+        )
+    )
+    scholar_id = _SCHOLAR_ID_RE.search(source_text)
     for source in blocked_sources:
         if doi and doi == (source.get("doi") or "").lower():
             return source
         if arxiv_id and arxiv_id == source.get("arxiv_id"):
+            return source
+        if scholar_id and scholar_id.group(1).lower() == (source.get("semantic_scholar_id") or "").lower():
             return source
         if title and title == source.get("normalized_title"):
             return source
@@ -150,10 +162,14 @@ def provenance_check(state: AgentState) -> dict[str, Any]:
             ref = original_refs[i] if i < len(original_refs) else None
             if status == "retracted":
                 dropped_count += 1
+                source_text = " ".join((c.url or "", c.source_file or "", c.citation or ""))
+                scholar_id_match = _SCHOLAR_ID_RE.search(source_text)
                 blocked_entry = {
                     "citation": c.citation,
                     "title": c.doc_title or c.citation,
                     "normalized_title": _normalized_title(c),
+                    "url": c.url or c.source_file,
+                    "semantic_scholar_id": scholar_id_match.group(1).lower() if scholar_id_match else "",
                     "doi": identifiers[0],
                     "arxiv_id": identifiers[1],
                     "reason": status_info.get("reason", "retracted"),
