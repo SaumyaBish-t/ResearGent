@@ -92,7 +92,7 @@ export default function LogPanel() {
           {/* Log stream */}
           <div
             ref={scrollRef}
-            className="flex-1 space-y-1.5 overflow-y-auto px-6 py-4 font-mono text-[13px] leading-relaxed"
+            className="min-w-0 flex-1 space-y-1.5 overflow-x-hidden overflow-y-auto px-6 py-4 font-mono text-[13px] leading-relaxed"
           >
             {logs.length === 0 && (
               <div className="py-4 text-center text-ink-mute">
@@ -103,7 +103,7 @@ export default function LogPanel() {
             {logs.map((l) => (
               <div
                 key={l.id}
-                className="group grid grid-cols-[auto_auto_1fr] items-baseline gap-2 rounded px-1 py-[2px] transition hover:bg-white/[0.02]"
+                className="group grid min-w-0 grid-cols-[auto_auto_minmax(0,1fr)] items-baseline gap-2 rounded px-1 py-[2px] transition hover:bg-white/[0.02]"
               >
                 <span className="shrink-0 tabular-nums text-ink-mute/70">
                   {new Date(l.ts).toLocaleTimeString([], {
@@ -118,7 +118,7 @@ export default function LogPanel() {
                   {l.node}
                   <span className="text-ink-mute">]</span>
                 </span>
-                <span className={`break-words ${LEVEL_COLOR[l.level] ?? "text-slate-200"}`}>
+                <span className={`min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere] ${LEVEL_COLOR[l.level] ?? "text-slate-200"}`}>
                   <span className="mr-1 opacity-60">
                     {LEVEL_GLYPH[l.level] ?? "·"}
                   </span>
