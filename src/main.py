@@ -1338,6 +1338,11 @@ def eval(
                 f"prec={sc['context_precision']:.2f}  "
                 f"overall=[bold]{sc['overall']:.2f}[/bold]  "
                 f"({r.latency_ms}ms)")
+        if r.retrieval.get("labeled"):
+            line += (
+                f"  P@5={r.retrieval.get('precision_at_k', 0):.2f}"
+                f" R@5={r.retrieval.get('recall_at_k', 0):.2f}"
+            )
         console.print(line)
         if show_answers:
             console.print(Panel(r.answer.strip(), border_style="dim"))
@@ -1359,7 +1364,56 @@ def eval(
         f"[bold]Reflection-triggered:[/bold] {summary['n_reflections_triggered']}/{summary['n']}    "
         f"[bold]Web-fallback used:[/bold] {summary['n_web_used']}/{summary['n']}"
     )
+    retrieval_summary = summary.get("retrieval") or {}
+    if retrieval_summary.get("n_labeled"):
+        console.print(
+            f"[bold]Labeled local retrieval:[/bold] "
+            f"P@5={retrieval_summary['mean_precision_at_k']:.3f}    "
+            f"R@5={retrieval_summary['mean_recall_at_k']:.3f}    "
+            f"MRR={retrieval_summary['mean_reciprocal_rank']:.3f}    "
+            f"({retrieval_summary['n_labeled']} queries)"
+        )
     console.print(f"\nResults appended to [cyan]data/eval/runs.jsonl[/cyan]")
+
+
+@app.command(name="eval-retrieval")
+def eval_retrieval(
+    suite_path: str = typer.Argument(..., help="Path to a labeled YAML retrieval suite"),
+) -> None:
+    """Measure local top-k retrieval against labeled relevant paper files."""
+    from pathlib import Path as _P
+    from src.eval import EvalSuite
+    from src.eval.runner import run_retrieval_suite, summarize_retrieval_results
+
+    p = _P(suite_path)
+    if not p.exists():
+        console.print(f"[red]Suite not found: {p}[/red]")
+        raise typer.Exit(code=1)
+
+    suite = EvalSuite.from_yaml(p)
+    rows = run_retrieval_suite(suite)
+    for row in rows:
+        metric = row["retrieval"]
+        if metric.get("error"):
+            console.print(f"[red]{row['query_id']}[/red]  {metric['error']}")
+            continue
+        console.print(
+            f"[cyan]{row['query_id']}[/cyan]  "
+            f"P@5={metric.get('precision_at_k', 0):.2f}  "
+            f"R@5={metric.get('recall_at_k', 0):.2f}  "
+            f"RR={metric.get('reciprocal_rank', 0):.2f}  "
+            f"hits={metric.get('hits', 0)}/{metric.get('expected_count', 0)}"
+        )
+    summary = summarize_retrieval_results(rows)
+    console.print(
+        f"\n[bold]Labeled retrieval summary ({summary.get('n', 0)} queries):[/bold] "
+        f"P@5={summary.get('mean_precision_at_k', 0):.3f}  "
+        f"R@5={summary.get('mean_recall_at_k', 0):.3f}  "
+        f"MRR={summary.get('mean_reciprocal_rank', 0):.3f}  "
+        f"no-gold-hit={summary.get('no_gold_hit', 0)}  "
+        f"errors={summary.get('retrieval_errors', 0)}"
+    )
+    console.print("Detailed results appended to [cyan]data/eval/retrieval_runs.jsonl[/cyan]")
 
 
 @app.command()

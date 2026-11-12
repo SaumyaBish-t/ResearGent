@@ -1,0 +1,201 @@
+name: research-quality-v1
+retrieval_mode: bm25
+description: >
+  24 manually labeled research questions across the three indexed domains.
+  Expected source filenames provide local retrieval ground truth; reference
+  points are for human review of the generated answer and confidence label.
+  The initial run uses the local BM25 baseline because the configured local
+  embedding service is unavailable; change to hybrid to evaluate dense+BM25.
+queries:
+  - id: agentic_crag_mechanism
+    category: single-paper
+    domain: agentic_ai
+    question: What problem does Corrective Retrieval Augmented Generation address, and how does it evaluate retrieved documents?
+    expected_sources: [arxiv_2401.15884.md]
+    reference_points:
+      - It addresses unreliable or irrelevant retrieved context in RAG.
+      - It evaluates retrieved documents and corrects retrieval when evidence is poor.
+  - id: agentic_rest_react
+    category: method
+    domain: agentic_ai
+    question: How does ReST meet ReAct to improve multi-step reasoning in LLM agents?
+    expected_sources: [arxiv_2312.10003.md]
+    reference_points:
+      - The method combines a ReAct-style agent that reasons and acts on external knowledge with iterative self-training.
+      - It uses prior trajectories and AI feedback for improvement.
+  - id: agentic_agentlite
+    category: system
+    domain: agentic_ai
+    question: What is AgentLite designed to help researchers build and evaluate?
+    expected_sources: [arxiv_2402.15538.md]
+    reference_points:
+      - AgentLite is a lightweight library for task-oriented LLM agents.
+      - It supports experimenting with reasoning strategies and multi-agent architectures.
+  - id: agentic_critique_models
+    category: method
+    domain: agentic_ai
+    question: What role do critique models play in improving LLM reasoning with test-time or training-time supervision?
+    expected_sources: [arxiv_2411.16579.md]
+    reference_points:
+      - The work studies critique models as sources of feedback for reasoning.
+      - The answer should distinguish test-time from training-time supervision if the source supports it.
+  - id: agentic_toolhop
+    category: benchmark
+    domain: agentic_ai
+    question: What capability does the ToolHop benchmark evaluate in large language models?
+    expected_sources: [arxiv_2501.02506.md]
+    reference_points:
+      - ToolHop is a benchmark for query-driven multi-hop tool use.
+      - The answer should describe multi-step tool selection or execution, not generic tool calling only.
+  - id: agentic_metacognition
+    category: method
+    domain: agentic_ai
+    question: How does adaptive tool use with a meta-cognition trigger decide when an LLM should use tools?
+    expected_sources: [arxiv_2502.12961.md]
+    reference_points:
+      - The work uses a meta-cognitive trigger to adapt tool use.
+      - The answer should explain the trigger's role in deciding whether tool assistance is needed.
+  - id: agentic_retool
+    category: method
+    domain: agentic_ai
+    question: How does ReTool use reinforcement learning to improve strategic tool use in language models?
+    expected_sources: [arxiv_2504.11536.md]
+    reference_points:
+      - ReTool applies reinforcement learning to tool-use behavior.
+      - The answer should distinguish strategic tool use from ordinary prompted tool calls.
+  - id: agentic_mcpradar
+    category: benchmark
+    domain: agentic_ai
+    question: What dimensions of tool-use capability does MCP-RADAR benchmark in language models?
+    expected_sources: [arxiv_2505.16700.md]
+    reference_points:
+      - MCP-RADAR is a multi-dimensional benchmark of tool-use capabilities.
+      - The answer should ground listed dimensions in the source rather than inventing them.
+  - id: ts_crossformer
+    category: architecture
+    domain: time_series
+    question: How does Crossformer model cross-dimension dependencies for multivariate time-series forecasting?
+    expected_sources: [title_crossformer_transformer_utilizing_cross_dimension_dependency.md]
+    reference_points:
+      - Crossformer explicitly models dependencies across series dimensions.
+      - The response should describe the cross-dimension attention or equivalent mechanism only if supported by the source.
+  - id: ts_patch_tokens
+    category: architecture
+    domain: time_series
+    question: What does patch-level tokenization change in Transformer-based time-series forecasting?
+    expected_sources: [arxiv_2601.12467.md]
+    reference_points:
+      - The paper studies patch-level tokenization for time-series inputs.
+      - It uses CNN encoders and attention according to the paper title and evidence.
+  - id: ts_twinformer
+    category: architecture
+    domain: time_series
+    question: What are the two levels represented by TwinFormer's dual-level Transformer for long-sequence forecasting?
+    expected_sources: [arxiv_2512.12301.md]
+    reference_points:
+      - The answer should identify the two levels using evidence from the paper.
+      - It should not infer unreported performance numbers.
+  - id: ts_dtw_lowrank
+    category: method
+    domain: time_series
+    question: How does low-rank sparse representation contribute to the dynamic time-warping similarity measurement method?
+    expected_sources: [doi_10.1007_s00371-021-02101-w.md]
+    reference_points:
+      - The paper concerns a DTW similarity measurement based on low-rank sparse representation.
+      - Any claimed algorithm steps must be supported by retrieved text.
+  - id: ts_informer_pemfc
+    category: application
+    domain: time_series
+    question: How is the Informer model applied to PEMFC degradation prediction, and what architectural components are highlighted?
+    expected_sources: [doi_10.1016_j.enconman.2025.120737.md]
+    reference_points:
+      - The application is PEMFC degradation prediction.
+      - The title identifies dual ProbSparse self-attention and a temporal feature decoder.
+  - id: ts_general_time_transformer
+    category: foundation-model
+    domain: time_series
+    question: What is the General Time Transformer intended to do for multivariate time series, and is it zero-shot?
+    expected_sources: [doi_10.1145_3627673.3679931.md]
+    reference_points:
+      - It is an encoder-only foundation model for zero-shot multivariate time-series forecasting.
+      - Do not add unsupported benchmark values.
+  - id: ts_timeraf
+    category: foundation-model
+    domain: time_series
+    question: How does TimeRAF combine retrieval with a foundation model for zero-shot time-series forecasting?
+    expected_sources: [doi_10.1109_TKDE.2025.3579137.md]
+    reference_points:
+      - TimeRAF is retrieval-augmented and targets zero-shot time-series forecasting.
+      - Details of its retrieval design must come from the cited paper text.
+  - id: ts_rdlinear
+    category: comparison
+    domain: time_series
+    question: What is RDLinear, and what role does decomposition with RevIN play in its time-series forecasting design?
+    expected_sources: [doi_10.1109_IJCNN60899.2024.10650961.md]
+    reference_points:
+      - RDLinear is a time-series forecasting model.
+      - The source associates it with decomposition and RevIN.
+  - id: quant_rl_execution
+    category: application
+    domain: quant_finance
+    question: How does the multi-agent market simulator study reinforcement learning for optimal execution?
+    expected_sources: [arxiv_2411.06389.md]
+    reference_points:
+      - The work studies RL-based optimal execution in a multi-agent market simulator.
+      - Avoid claiming real-market deployment unless cited.
+  - id: quant_tlob
+    category: architecture
+    domain: quant_finance
+    question: What does TLOB use dual attention for when predicting stock-price trends from limit-order-book data?
+    expected_sources: [arxiv_2502.15757.md]
+    reference_points:
+      - TLOB is a Transformer model for stock trend prediction from limit-order-book data.
+      - The paper title highlights a dual-attention design.
+  - id: quant_abides_marl
+    category: simulator
+    domain: quant_finance
+    question: What research setting does ABIDES-MARL provide for multi-agent reinforcement learning in financial markets?
+    expected_sources: [arxiv_2511.02016.md]
+    reference_points:
+      - It is an environment for multi-agent RL.
+      - The focus is endogenous price formation and execution in a limit order book.
+  - id: quant_hawkes_lob
+    category: simulator
+    domain: quant_finance
+    question: How does a Hawkes-driven order-flow model contribute to a deterministic limit order book simulator?
+    expected_sources: [arxiv_2510.08085.md]
+    reference_points:
+      - The paper presents a deterministic limit order book simulator.
+      - Order flow is driven by Hawkes processes.
+  - id: quant_bitcoin_regimes
+    category: method
+    domain: quant_finance
+    question: How does the Bitcoin market-regime detection study combine K-means clustering and hidden Markov models?
+    expected_sources: [doi_10.47738_jdmdc.v3i1.57.md]
+    reference_points:
+      - The study applies K-means and HMMs to Bitcoin time-series regime detection.
+      - Any claimed regime count or performance figure needs source support.
+  - id: quant_bayesian_regimes
+    category: method
+    domain: quant_finance
+    question: How do Bayesian regime-switching models support data-driven investment strategies?
+    expected_sources: [doi_10.1002_asmb.70058.md]
+    reference_points:
+      - The paper covers data-driven investment strategies using Bayesian regime-switching models.
+      - Report strategy details only when present in the retrieved source.
+  - id: quant_esg_risk
+    category: method
+    domain: quant_finance
+    question: Does the cited study treat ESG as a systematic risk factor for US equity mutual funds, and what evidence does it investigate?
+    expected_sources: [doi_10.1080_20430795.2017.1395251.md]
+    reference_points:
+      - The paper investigates whether ESG is a systematic risk factor for US equity mutual funds.
+      - The answer should not turn the research question into a proven conclusion without evidence.
+  - id: quant_factor_investing
+    category: method
+    domain: quant_finance
+    question: How does the Black-Litterman-Bayes approach incorporate factor views and priors in portfolio construction?
+    expected_sources: [doi_10.3905_jpm.2020.1.196.md]
+    reference_points:
+      - The paper combines factor investing with Black-Litterman-Bayes.
+      - It concerns factor views and priors in portfolio construction.
