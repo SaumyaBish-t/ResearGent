@@ -1137,7 +1137,17 @@ function summarizeNode(node: NodeId, s: NodeCompleteEvent["summary"]): string {
     case "retriever":
       return `retrieved ${s.total_chunks ?? 0} chunks${s.graph_expanded ? ` (+${s.graph_expanded} graph)` : ""}`;
     case "critic":
-      return `confidence=${s.confidence ?? "?"}${typeof s.score === "number" ? ` score=${s.score.toFixed(2)}` : ""} kept ${s.chunks_kept ?? "?"}/${s.chunks_in ?? "?"}`;
+      {
+        const headline = `confidence=${s.confidence ?? "?"}${typeof s.score === "number" ? ` score=${s.score.toFixed(2)}` : ""} kept ${s.chunks_kept ?? "?"}/${s.chunks_in ?? "?"}`;
+        const diagnostics = (s.diagnostics ?? []).slice(0, 3).map((d) => {
+          const g = d.grades ?? {};
+          const grades = `rel ${g.relevant ?? 0}, partial ${g.partial ?? 0}, irrelevant ${g.irrelevant ?? 0}`;
+          const sources = Object.entries(d.sources ?? {}).map(([name, count]) => `${name} ${count}`).join(", ");
+          const reason = d.reasoning ? ` — ${d.reasoning.slice(0, 180)}` : "";
+          return `“${(d.question ?? "sub-question").slice(0, 100)}”: ${grades}${sources ? ` (${sources})` : ""}${reason}`;
+        });
+        return [headline, ...diagnostics].join(" · ");
+      }
     case "rewriter":
       return `rewrite attempt ${s.rewrite_attempt ?? "?"} · ${s.rewritten_count ?? 0} queries`;
     case "paper_discovery":

@@ -63,6 +63,13 @@ export interface NodeSummary {
   grades?: Record<string, number> | unknown;
   chunks_in?: number;
   chunks_kept?: number;
+  diagnostics?: Array<{
+    question?: string;
+    chunks_in?: number;
+    grades?: Record<string, number>;
+    sources?: Record<string, number>;
+    reasoning?: string;
+  }>;
   // rewriter
   rewrite_attempt?: number;
   rewritten_count?: number;

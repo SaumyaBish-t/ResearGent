@@ -443,6 +443,7 @@ def critique(state: AgentState) -> dict[str, Any]:
     total_chunks_in = 0
     total_chunks_kept = 0
     total_prompt_chars = 0
+    subq_diagnostics: list[dict[str, Any]] = []
     # Phase 15.2: collect every chunk we grade so `_derive_verdict` can
     # inspect provenance signals (paper:* / web:*) and pick the right
     # HIGH threshold. We only need the chunk objects, not the refs.
@@ -465,6 +466,22 @@ def critique(state: AgentState) -> dict[str, Any]:
         all_graded_chunks.extend(chunks)
         if reasoning:
             reasonings.append(reasoning)
+        grade_counts = {
+            "relevant": grades.count("relevant"),
+            "partial": grades.count("partial"),
+            "irrelevant": grades.count("irrelevant"),
+        }
+        source_counts: dict[str, int] = {}
+        for chunk in chunks:
+            source = (getattr(chunk, "signal", "") or "unknown").split(":", 1)[0]
+            source_counts[source] = source_counts.get(source, 0) + 1
+        subq_diagnostics.append({
+            "question": sq[:160],
+            "chunks_in": len(chunks),
+            "grades": grade_counts,
+            "sources": source_counts,
+            "reasoning": reasoning[:240],
+        })
         # Keep relevant + partial. Drop irrelevant. Refs sliced from the
         # ORIGINAL input refs by index so we don't write new artifacts.
         original_refs = refs_by_subq.get(sq) or []
@@ -561,6 +578,9 @@ def critique(state: AgentState) -> dict[str, Any]:
                     "partial": all_grades.count("partial"),
                     "irrelevant": all_grades.count("irrelevant"),
                 },
+                # Keep enough detail to diagnose retrieval/critic mismatches
+                # without copying chunk text or full prompts into the trace.
+                "subquestions": subq_diagnostics,
             }
         ],
     }

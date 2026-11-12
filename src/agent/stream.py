@@ -47,6 +47,7 @@ def _summarize_node_update(node_name: str, update: dict[str, Any]) -> dict[str, 
                     summary["grades"] = entry.get("grades")
                     summary["chunks_in"] = entry.get("chunks_in")
                     summary["chunks_kept"] = entry.get("chunks_kept")
+                    summary["diagnostics"] = entry.get("subquestions") or []
                     break
 
     elif node_name == "rewriter":
