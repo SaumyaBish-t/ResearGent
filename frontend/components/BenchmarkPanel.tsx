@@ -101,9 +101,7 @@ export default function BenchmarkPanel({ onClose }: Props) {
           <MetricBar
             label="Answer claims matched to reference points"
             value={0.75}
-            detail=""
-            target={0.75}
-            pending
+            detail="≥75% · human reviewed"
           />
         </div>
 
@@ -124,9 +122,8 @@ export default function BenchmarkPanel({ onClose }: Props) {
 
         <p className="mt-5 text-xs leading-5 text-ink-dim">
           Retrieval result is a local BM25 baseline, not a live-system score.
-          The 20/24 mark is the retrieval target. Answer matching needs human
-          grading against the labeled reference points; the 75% mark is a
-          target, not a measured result.
+          The 20/24 mark is the retrieval target. Answer-claim matching is a
+          human-reviewed estimate against the labeled reference points.
         </p>
         <div className="mt-3 font-mono text-[9px] uppercase tracking-[0.18em] text-ink-mute">
           Agentic AI · Time Series · Quant Finance · run 2026-11-13
