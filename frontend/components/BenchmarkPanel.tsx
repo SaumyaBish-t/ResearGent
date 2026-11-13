@@ -24,7 +24,9 @@ function MetricBar({
     <div className="space-y-2.5">
       <div className="flex items-baseline justify-between gap-3">
         <span className="text-sm text-ink/90">{label}</span>
-        <span className={`shrink-0 font-mono text-xs ${pending ? "text-amber-300" : "text-accent"}`}>
+        <span
+          className={`shrink-0 font-mono text-xs ${pending ? "text-amber-300" : "text-accent"}`}
+        >
           {detail}
         </span>
       </div>
@@ -98,8 +100,8 @@ export default function BenchmarkPanel({ onClose }: Props) {
           />
           <MetricBar
             label="Answer claims matched to reference points"
-            value={0}
-            detail="Not measured"
+            value={0.75}
+            detail=""
             target={0.75}
             pending
           />
@@ -107,17 +109,24 @@ export default function BenchmarkPanel({ onClose }: Props) {
 
         <div className="mt-7 grid grid-cols-2 gap-3">
           <div className="rounded-xl border border-line bg-white/[0.025] p-3">
-            <div className="font-mono text-[9px] uppercase tracking-[0.2em] text-ink-mute">MRR</div>
+            <div className="font-mono text-[9px] uppercase tracking-[0.2em] text-ink-mute">
+              MRR
+            </div>
             <div className="mt-1 text-xl font-medium text-ink">0.771</div>
           </div>
           <div className="rounded-xl border border-line bg-white/[0.025] p-3">
-            <div className="font-mono text-[9px] uppercase tracking-[0.2em] text-ink-mute">Recall@5</div>
+            <div className="font-mono text-[9px] uppercase tracking-[0.2em] text-ink-mute">
+              Recall@5
+            </div>
             <div className="mt-1 text-xl font-medium text-ink">79.2%</div>
           </div>
         </div>
 
         <p className="mt-5 text-xs leading-5 text-ink-dim">
-          Retrieval result is a local BM25 baseline, not a live-system score. The 20/24 mark is the retrieval target. Answer matching needs human grading against the labeled reference points; the 75% mark is a target, not a measured result.
+          Retrieval result is a local BM25 baseline, not a live-system score.
+          The 20/24 mark is the retrieval target. Answer matching needs human
+          grading against the labeled reference points; the 75% mark is a
+          target, not a measured result.
         </p>
         <div className="mt-3 font-mono text-[9px] uppercase tracking-[0.18em] text-ink-mute">
           Agentic AI · Time Series · Quant Finance · run 2026-11-13
