@@ -15,9 +15,9 @@ const jetbrains = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "ResearGent — Agentic Network",
+  title: "ProvenanceRag — Agentic Research Assistant",
   description:
-    "Live 3D visualization of ResearGent's multi-model GEN AI Corrective-RAG workers.",
+    "A provenance-aware research assistant for paper discovery and cited answers.",
 };
 
 export default function RootLayout({

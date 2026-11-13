@@ -80,7 +80,7 @@ export default function NarrativeOverlay() {
             </div>
 
             <h1 className="bg-gradient-to-b from-white via-white to-slate-400 bg-clip-text text-[44px] font-semibold tracking-tight text-transparent sm:text-[56px]">
-              ResearGent
+              ProvenanceRag
             </h1>
 
             <p className="mx-auto mt-3 max-w-md text-[13.5px] leading-relaxed text-ink-dim">

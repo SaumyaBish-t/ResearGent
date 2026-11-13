@@ -27,7 +27,7 @@ export default function SignInLanding() {
         </div>
 
         <h1 className="bg-gradient-to-b from-white via-white to-slate-400 bg-clip-text text-[40px] font-semibold tracking-tight text-transparent">
-          ResearGent
+          ProvenanceRag
         </h1>
         <p className="mx-auto mt-2 max-w-sm text-[13px] leading-relaxed text-ink-dim">
           A living map of workers that retrieve, critique, and rewrite their way

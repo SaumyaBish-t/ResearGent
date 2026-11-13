@@ -82,7 +82,7 @@ export default function Overlay() {
         </div>
         <div className="flex items-baseline gap-2">
           <span className="font-mono text-[11px] font-medium tracking-[0.22em] text-ink/90">
-            RESEARGENT
+            PROVENANCERAG
           </span>
           <span className="font-mono text-[9px] uppercase tracking-[0.32em] text-ink-mute">
             v1
