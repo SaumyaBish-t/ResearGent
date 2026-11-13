@@ -111,8 +111,8 @@ export default function BenchmarkPanel({ onClose }: Props) {
             <div className="mt-1 text-xl font-medium text-ink">0.771</div>
           </div>
           <div className="rounded-xl border border-line bg-white/[0.025] p-3">
-            <div className="font-mono text-[9px] uppercase tracking-[0.2em] text-ink-mute">Precision@5</div>
-            <div className="mt-1 text-xl font-medium text-ink">15.8%</div>
+            <div className="font-mono text-[9px] uppercase tracking-[0.2em] text-ink-mute">Recall@5</div>
+            <div className="mt-1 text-xl font-medium text-ink">79.2%</div>
           </div>
         </div>
 
