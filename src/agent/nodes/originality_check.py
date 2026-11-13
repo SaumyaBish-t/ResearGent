@@ -36,6 +36,7 @@ is never flagged.
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -161,6 +162,7 @@ def _source_signals(draft_sentence: str, source_text: str) -> dict[str, float]:
 
 
 def originality_check(state: AgentState) -> dict[str, Any]:
+    t0 = time.perf_counter()
     answer = state.get("draft_answer") or ""
     citation_refs = state.get("citation_refs") or {}
     if not answer or not citation_refs:
@@ -171,14 +173,36 @@ def originality_check(state: AgentState) -> dict[str, Any]:
     source_by_tag = dict(zip(tags, hydrated))
 
     draft_sentences = _split_sentences(answer)
-    draft_vecs = embed(draft_sentences)
+
+    # Embed source sentences in batches rather than making one network request
+    # per paper. The old per-source loop made a 16-source answer wait on 17+
+    # sequential embedding requests even though the vectors are independent.
+    source_sentences_by_tag = {
+        tag: _split_sentences(chunk.text)
+        for tag, chunk in source_by_tag.items()
+    }
+    all_texts = list(draft_sentences)
+    source_offsets: dict[str, tuple[int, int]] = {}
+    for tag, sentences in source_sentences_by_tag.items():
+        start = len(all_texts)
+        all_texts.extend(sentences)
+        source_offsets[tag] = (start, len(all_texts))
+
+    # Keep request payloads bounded across providers. Most runs fit in one
+    # request; unusually large source sets use a small number of batches.
+    batch_size = 128
+    all_vecs: list[list[float]] = []
+    for start in range(0, len(all_texts), batch_size):
+        all_vecs.extend(embed(all_texts[start : start + batch_size]))
+    draft_vecs = all_vecs[: len(draft_sentences)]
 
     flags: list[dict] = []
     for tag, chunk in source_by_tag.items():
-        source_sentences = _split_sentences(chunk.text)
+        source_sentences = source_sentences_by_tag.get(tag, [])
         if not source_sentences:
             continue
-        source_vecs = embed(source_sentences)
+        start, end = source_offsets[tag]
+        source_vecs = all_vecs[start:end]
         for i, dvec in enumerate(draft_vecs):
             draft_sentence = draft_sentences[i]
             sim = max((_cosine(dvec, sv) for sv in source_vecs), default=0.0)
@@ -227,6 +251,8 @@ def originality_check(state: AgentState) -> dict[str, Any]:
                 "score": round(originality_score, 3),
                 "flags_found": len(flags),
                 "verbatim_uncited": sum(1 for f in flags if f["status"] == "verbatim_uncited"),
+                "duration_ms": int((time.perf_counter() - t0) * 1000),
+                "embedding_batches": (len(all_texts) + batch_size - 1) // batch_size,
             }
         ],
     }
