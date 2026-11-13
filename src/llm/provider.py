@@ -36,6 +36,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import lru_cache
+from typing import Any
 
 import httpx
 import openai
@@ -276,6 +277,7 @@ def chat(
     tier: ModelTier = ModelTier.REASONING,
     temperature: float = 0.2,
     max_tokens: int | None = 1024,
+    cloudflare_chat_template_kwargs: dict[str, Any] | None = None,
     **kwargs,
 ) -> str:
     """
@@ -293,12 +295,25 @@ def chat(
                 referer = settings.openrouter_app_url if "openrouter" in step.base_url else None
                 title = settings.openrouter_app_name if "openrouter" in step.base_url else None
                 client = _client(step.base_url, step.api_key, referer, title)
+                request_kwargs = dict(kwargs)
+                is_cloudflare_gemma = (
+                    "api.cloudflare.com/client/v4/accounts/" in step.base_url.lower()
+                    and step.model == "@cf/google/gemma-4-26b-a4b-it"
+                )
+                if is_cloudflare_gemma and cloudflare_chat_template_kwargs:
+                    # Workers AI accepts model-specific chat template options
+                    # through `extra_body`; the OpenAI SDK otherwise rejects
+                    # unknown top-level kwargs. Keep this scoped to the exact
+                    # Cloudflare Gemma model so fallback providers are untouched.
+                    extra_body = dict(request_kwargs.get("extra_body") or {})
+                    extra_body["chat_template_kwargs"] = cloudflare_chat_template_kwargs
+                    request_kwargs["extra_body"] = extra_body
                 resp = client.chat.completions.create(
                     model=step.model,
                     messages=messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
-                    **kwargs,
+                    **request_kwargs,
                 )
                 ctx["usage"] = resp.usage
                 return resp.choices[0].message.content or ""

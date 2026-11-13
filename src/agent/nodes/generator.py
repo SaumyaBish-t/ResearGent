@@ -326,6 +326,10 @@ def generate(state: AgentState) -> dict[str, Any]:
         tier=ModelTier.REASONING,
         temperature=0.1,
         max_tokens=1200,
+        # Cloudflare Gemma otherwise spends the completion budget on hidden
+        # reasoning tokens; synthesis should use the retrieved evidence to
+        # produce its visible answer directly.
+        cloudflare_chat_template_kwargs={"enable_thinking": False},
     )
 
     # EMPTY-DRAFT GUARD + RETRY.
@@ -351,6 +355,7 @@ def generate(state: AgentState) -> dict[str, Any]:
             tier=ModelTier.REASONING,
             temperature=0.1,
             max_tokens=1200,
+            cloudflare_chat_template_kwargs={"enable_thinking": False},
         )
         # Track for the trace so it's visible when the shrink happened.
         prompt_chars = retry_chars
@@ -358,9 +363,9 @@ def generate(state: AgentState) -> dict[str, Any]:
     if not answer.strip():
         # Both attempts came back empty. Refuse to save a blank note.
         answer = (
-            "Generator returned an empty draft after retry. This usually means "
-            "the reasoning LLM choked on prompt size or hit a rate limit. "
-            "Try re-running, or lower the per-paper chunk count in the cascade."
+            "The model returned no visible answer text after retry. Check the "
+            "provider response finish reason and token usage; the completion "
+            "may have ended before answer text was produced."
         )
 
     # Phase 21: verify that user_results metrics appear verbatim in the answer

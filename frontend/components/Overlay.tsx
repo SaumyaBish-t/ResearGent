@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useAgentStore } from "@/lib/store";
 import HistorySidebar from "./HistorySidebar";
+import BenchmarkPanel from "./BenchmarkPanel";
 import LogPanel from "./LogPanel";
 import ModeSwitcher from "./ModeSwitcher";
 import NarrativeOverlay from "./NarrativeOverlay";
@@ -38,6 +39,7 @@ export default function Overlay() {
   // Gate to client-only render after mount — framer-motion's transforms differ
   // server vs client, which trips React hydration.
   const [mounted, setMounted] = useState(false);
+  const [benchmarkOpen, setBenchmarkOpen] = useState(false);
   useEffect(() => setMounted(true), []);
   useEffect(() => {
     if (mounted) void bootstrap();
@@ -91,6 +93,13 @@ export default function Overlay() {
       {/* Top-right: status + user menu */}
       <header className="absolute right-5 top-4 flex items-center gap-3">
               <ModeSwitcher />
+              <button
+                type="button"
+                onClick={() => setBenchmarkOpen(true)}
+                className="pointer-events-auto rounded-lg border border-line px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.12em] text-ink-dim transition hover:border-accent/40 hover:text-accent"
+              >
+                Eval
+              </button>
               <span className="h-3 w-px bg-line" />
               <div className="font-mono text-[9px] uppercase tracking-[0.3em] text-ink-mute">
                 agentic network
@@ -114,6 +123,8 @@ export default function Overlay() {
 
             {/* Review — renders when mode=review */}
             <ReviewModal />
+
+      {benchmarkOpen && <BenchmarkPanel onClose={() => setBenchmarkOpen(false)} />}
 
             {/* Phase 24 — Results Ingestion. Lets the user declare their own
                 experimental results so the Novelty Check has something to
