@@ -96,6 +96,28 @@ def _summarize_node_update(node_name: str, update: dict[str, Any]) -> dict[str, 
         summary["retracted_dropped"] = entry.get("retracted_dropped", 0)
         summary["blocked_sources"] = entry.get("blocked_sources", [])
 
+    elif node_name == "originality_check":
+        trace = update.get("trace") or []
+        entry = next(
+            (e for e in reversed(trace) if e.get("node") == "originality_check"),
+            {},
+        )
+        report = update.get("originality_report") or {}
+        summary["score"] = report.get("score", entry.get("score"))
+        summary["sentences_checked"] = report.get("sentences_checked", 0)
+        summary["flags_found"] = entry.get("flags_found", len(report.get("flags") or []))
+        summary["duration_ms"] = entry.get("duration_ms")
+        summary["embedding_batches"] = entry.get("embedding_batches")
+        summary["skipped"] = entry.get("skipped")
+        summary["uncited_flags"] = [
+            {
+                "source_tag": flag.get("source_tag"),
+                "status": flag.get("status"),
+                "draft_sentence": flag.get("draft_sentence", ""),
+            }
+            for flag in (report.get("flags") or [])[:3]
+        ]
+
     elif node_name == "novelty_check":
         report = update.get("novelty_report") or {}
         summary["verdict"] = report.get("verdict")

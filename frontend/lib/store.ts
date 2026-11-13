@@ -1161,6 +1161,22 @@ function summarizeNode(node: NodeId, s: NodeCompleteEvent["summary"]): string {
           .join(", ");
         return `clean ${s.clean ?? 0} · flagged ${s.flagged ?? 0} · blocked ${s.retracted_dropped ?? 0} retracted${blocked ? ` · ${blocked}` : ""}`;
       }
+    case "originality_check":
+      {
+        if (s.skipped) return `skipped · ${s.skipped}`;
+        const count = s.flags_found ?? 0;
+        const elapsed = typeof s.duration_ms === "number"
+          ? ` · ${(s.duration_ms / 1000).toFixed(1)}s`
+          : "";
+        const checked = `checked ${s.sentences_checked ?? 0} sentences`;
+        if (!count) return `no uncited overlap · ${checked}${elapsed}`;
+        const examples = (s.uncited_flags ?? []).map((flag) => {
+          const source = flag.source_tag ? `[${flag.source_tag}] ` : "";
+          const excerpt = (flag.draft_sentence ?? "").slice(0, 160);
+          return `${source}${excerpt}`;
+        });
+        return `${count} uncited overlap(s) · ${checked}${elapsed}${examples.length ? ` · ${examples.join(" · ")}` : ""}`;
+      }
     case "novelty_check":
       {
         if (!s.verdict) return "no user results — nothing to compare";
@@ -1200,5 +1216,6 @@ function nodeLevel(
   if (node === "no_answer") return "error";
   if (node === "critic" && s.confidence && s.confidence !== "high") return "warn";
   if (node === "reflector" && s.gaps_found) return "warn";
+  if (node === "originality_check" && (s.flags_found ?? 0) > 0) return "warn";
   return "info";
 }

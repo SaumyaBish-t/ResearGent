@@ -86,6 +86,17 @@ export interface NodeSummary {
     arxiv_id?: string;
     reason?: string;
   }>;
+  // originality_check
+  sentences_checked?: number;
+  flags_found?: number;
+  duration_ms?: number;
+  embedding_batches?: number;
+  skipped?: string;
+  uncited_flags?: Array<{
+    source_tag?: string;
+    status?: string;
+    draft_sentence?: string;
+  }>;
   // novelty_check (Phase 24)
   /** "novel" | "improvement" | "not_novel" | "inconclusive" */
   verdict?: string;
